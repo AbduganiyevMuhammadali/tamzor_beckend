@@ -1,0 +1,41 @@
+const Joi = require('joi');
+
+const KUNLAR = ['Du', 'Se', 'Ch', 'Pa', 'Ju', 'Sh', 'Ya'];
+const TRANSPORT = ['avto', 'moto', 'piyoda', 'velosiped', 'boshqa'];
+
+const create = Joi.object({
+  fullname:          Joi.string().min(2).max(100).required()
+                       .messages({ 'string.empty': 'Ism majburiy', 'any.required': 'Ism majburiy' }),
+  telefon:           Joi.string().max(20).allow('', null).optional(),
+  passport:          Joi.string().max(20).allow('', null).optional(),
+  tugilgan_sana:     Joi.string().isoDate().allow('', null).optional(),
+  territoriya_id:    Joi.number().integer().positive().allow(null).optional(),
+  plan_summa:        Joi.number().min(0).required()
+                       .messages({ 'any.required': 'Oylik plan summasi majburiy' }),
+  bonus_foiz:        Joi.number().min(0).max(100).allow(null).optional(),
+  kredit_limit:      Joi.number().min(0).allow(null).optional(),
+  max_chegirma:      Joi.number().min(0).max(100).allow(null).optional(),
+  ish_boshlagan:     Joi.string().isoDate().allow('', null).optional(),
+  // Array yoki vergul bilan ajratilgan string
+  tashrif_kunlari:   Joi.alternatives().try(
+    Joi.array().items(Joi.string().valid(...KUNLAR)),
+    Joi.string().max(50).allow('', null)
+  ).optional(),
+  boshlanish_manzil: Joi.string().max(255).allow('', null).optional(),
+  transport:         Joi.string().valid(...TRANSPORT).allow(null).optional(),
+  mashina_raqam:     Joi.string().max(20).allow('', null).optional(),
+  radius_km:         Joi.number().min(0).max(1000).allow(null).optional(),
+  izoh:              Joi.string().allow('', null).optional(),
+  faol:              Joi.boolean().default(true),
+  avtolavka:         Joi.boolean().optional(),
+  // Mobil ilova kirishi (login bo'sh — agent ilovaga kirmaydi; parol bo'sh — o'zgarmaydi)
+  login:             Joi.string().trim().max(50).allow('', null).optional(),
+  parol:             Joi.string().min(4).max(100).allow('', null).optional()
+                       .messages({ 'string.min': 'Parol kamida 4 belgi' }),
+});
+
+const update = create
+  .fork(['fullname', 'plan_summa'], f => f.optional())
+  .unknown(false);
+
+module.exports = { agentSchemas: { create, update } };

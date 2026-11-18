@@ -1,0 +1,341 @@
+const { Op, fn, col } = require('sequelize');
+const { AgentModel, MijozModel, TerritoriyaModel } = require('../../models/index');
+const AgentRegisterModel = require('../../models/agent_register.model');
+const HttpException = require('../../utils/HttpException.utils');
+const { ArizaModel } = require('../../models/ariza.model');
+const TovarRegisterModel = require('../../models/tovar_register.model');
+const { agentOmbori, AGENT_PREFIKS } = require('../../utils/ombor.utils');
+const bcrypt = require('bcryptjs');
+
+/* ── Bo'sh string va noto'g'ri qiymatlarni tozalash ───── */
+const DATE_FIELDS   = ['tugilgan_sana', 'ish_boshlagan'];
+const NUMBER_FIELDS = ['plan_summa', 'bonus_foiz', 'kredit_limit', 'max_chegirma', 'radius_km', 'territoriya_id'];
+
+function sanitize(body) {
+  const out = { ...body };
+  // Bo'sh string → null (DATE, TEXT, STRING fieldlar uchun)
+  Object.keys(out).forEach(k => {
+    if (out[k] === '' || out[k] === undefined) out[k] = null;
+  });
+  // Sana fieldlari: noto'g'ri sana → null
+  DATE_FIELDS.forEach(k => {
+    if (out[k]) {
+      const d = new Date(out[k]);
+      out[k] = isNaN(d.getTime()) ? null : out[k];
+    }
+  });
+  // Raqam fieldlari: string → number, '' yoki NaN → null
+  NUMBER_FIELDS.forEach(k => {
+    if (out[k] !== null && out[k] !== undefined) {
+      const n = parseFloat(out[k]);
+      out[k] = isNaN(n) ? null : n;
+    }
+  });
+  // tashrif_kunlari: array → vergul bilan string
+  if (Array.isArray(out.tashrif_kunlari)) {
+    out.tashrif_kunlari = out.tashrif_kunlari.length ? out.tashrif_kunlari.join(',') : null;
+  }
+  return out;
+}
+
+/* ── include: territoriya ─────────────────────────────── */
+const INCLUDE = [
+  { model: TerritoriyaModel, as: 'territoriya', attributes: ['id', 'nomi'] },
+];
+
+/* ─────────────────────────────────────────────────────────
+   Yordamchi: agent uchun statistika hisoblash
+   ───────────────────────────────────────────────────────── */
+async function buildStats(agent, period) {
+  const now  = new Date();
+  let from   = new Date(now.getFullYear(), now.getMonth(), 1);   // oy boshi default
+  if (period === 'today') {
+    from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (period === 'week') {
+    const day  = now.getDay() || 7;
+    from = new Date(now);
+    from.setDate(now.getDate() - day + 1);
+    from.setHours(0, 0, 0, 0);
+  }
+
+  // Agentning barcha mijozlari
+  const mijozlar = await MijozModel.findAll({
+    where: { agent_id: agent.id },
+    attributes: ['id', 'sinf', 'balans', 'faol', 'tashrif_kunlari'],
+    include: [{ model: TerritoriyaModel, as: 'territoriya', attributes: ['id', 'nomi'] }],
+  });
+
+  // Sinf taqsimoti
+  const sinfMap = {};
+  mijozlar.forEach(m => {
+    if (m.sinf) sinfMap[m.sinf] = (sinfMap[m.sinf] || 0) + 1;
+  });
+  const sinflar = Object.entries(sinfMap)
+    .map(([sinf, count]) => ({ sinf, count }))
+    .sort((a, b) => a.sinf.localeCompare(b.sinf));
+
+  // ── Plan-fakt-bonus (agent_register dan, period bo'yicha) ──
+  const reg = await AgentRegisterModel.findOne({
+    attributes: [
+      [fn('SUM', col('summa')),       'fakt_summa'],
+      [fn('SUM', col('bonus_summa')), 'bonus_summa'],
+      [fn('COUNT', col('id')),        'savdo_soni'],
+    ],
+    where: { agent_id: agent.id, tur: 'savdo', sana: { [Op.gte]: from } },
+    raw: true,
+  });
+  const fakt_summa  = parseFloat(reg?.fakt_summa  || 0);
+  const bonus_summa = parseFloat(reg?.bonus_summa || 0);
+  const savdo_soni  = parseInt(reg?.savdo_soni    || 0, 10);
+  const plan_summa  = parseFloat(agent.plan_summa || 0);
+  const plan_pct    = plan_summa > 0 ? Math.round(fakt_summa / plan_summa * 100) : 0;
+  const qolgan_plan = Math.max(0, plan_summa - fakt_summa);
+
+  return {
+    mijozlar_soni:    mijozlar.length,
+    faol_mijozlar:    mijozlar.filter(m => m.faol).length,
+    nofaol_mijozlar:  mijozlar.filter(m => !m.faol).length,
+    sinflar,
+    // Plan-fakt-bonus
+    plan_summa,
+    fakt_summa,
+    plan_pct,
+    qolgan_plan,
+    bonus_summa,
+    buyurtmalar_soni: savdo_soni,
+    bugungi_tashrif:  0,
+  };
+}
+
+class AgentController {
+
+  /* ── GET /agents ────────────────────────────────────── */
+  getAll = async (req, res) => {
+    const { search, territoriya_id, faol, period = 'month' } = req.query;
+
+    const where = {};
+    if (search)         where.fullname      = { [Op.like]: `%${search}%` };
+    if (territoriya_id) where.territoriya_id = territoriya_id;
+    if (faol !== undefined && faol !== '') where.faol = faol === 'true';
+
+    const agents = await AgentModel.findAll({
+      where,
+      include: INCLUDE,
+      order: [['fullname', 'ASC']],
+    });
+
+    // Har bir agent uchun statistika qo'shamiz
+    const result = await Promise.all(
+      agents.map(async a => {
+        const stats = await buildStats(a, period);
+        return { ...a.toJSON(), ...stats };
+      })
+    );
+
+    res.send(result);
+  };
+
+  /* ── GET /agents/:id ────────────────────────────────── */
+  getById = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id, { include: INCLUDE });
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+
+    const stats = await buildStats(agent, req.query.period || 'month');
+
+    // Agentning barcha mijozlarini qaytaramiz
+    const mijozlar = await MijozModel.findAll({
+      where: { agent_id: agent.id },
+      include: [{ model: TerritoriyaModel, as: 'territoriya', attributes: ['id', 'nomi'] }],
+      order: [['nomi', 'ASC']],
+    });
+
+    res.send({ ...agent.toJSON(), ...stats, mijozlar });
+  };
+
+  /* Mobil login/parol: parol xeshlanadi, bo'sh parol mavjudini o'zgartirmaydi,
+     login boshqa agentda band bo'lsa — aniq xabar (aks holda 500 chiqardi) */
+  async mobilKirish(body, agentId = null) {
+    if (body.parol) body.parol = await bcrypt.hash(String(body.parol), 10);
+    else delete body.parol;
+    if (body.login) {
+      const band = await AgentModel.findOne({ where: { login: body.login, ...(agentId ? { id: { [Op.ne]: agentId } } : {}) } });
+      if (band) throw new HttpException(400, `"${body.login}" logini boshqa agentda band`);
+    }
+    return body;
+  }
+
+  /* ── POST /agents ───────────────────────────────────── */
+  create = async (req, res) => {
+    const body  = await this.mobilKirish(sanitize(req.body));
+    const agent = await AgentModel.create(body);
+    const full  = await AgentModel.findByPk(agent.id, { include: INCLUDE });
+    res.status(201).send(full);
+  };
+
+  /* ── PATCH /agents/:id ──────────────────────────────── */
+  update = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id);
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+    const body = await this.mobilKirish(sanitize(req.body), agent.id);
+    await this.kanalOzgarishTekshir(agent, body);
+    await agent.update(body);
+    const full = await AgentModel.findByPk(agent.id, { include: INCLUDE });
+    res.send(full);
+  };
+
+  /* Kanal (avtolavka ↔ distributsiya) yoki ism almashganda ma'lumot chalkashmasin:
+     - avtolavkaga o'tkazish — ochiq distributsiya zakazlari bo'lsa (ular ombor/dostavchik
+       oqimida turibdi) taqiqlanadi;
+     - avtolavkadan chiqarish yoki ismni o'zgartirish — "Agent: <ism>" omborida tovar bo'lsa
+       taqiqlanadi: mashina ombori ism bilan nomlanadi, tovar eski nom ostida qolib ketadi. */
+  kanalOzgarishTekshir = async (agent, body) => {
+    const avtoYangi = body.avtolavka === undefined ? agent.avtolavka : !!body.avtolavka;
+    const ismYangi  = body.fullname === undefined ? agent.fullname : body.fullname;
+    if (avtoYangi && !agent.avtolavka) {
+      const ochiq = await ArizaModel.count({ where: {
+        agent_id: agent.id, turi: 'sotish', holat: { [Op.in]: ['yangi', 'tasdiqlangan', 'yigilmoqda', 'yolda'] },
+        kanal: 'distributsiya',
+      } });
+      if (ochiq) throw new HttpException(400, `${agent.fullname}ning ${ochiq} ta ochiq zakazi bor — Won Sell'ga o'tkazishdan oldin ularni yetkazing yoki bekor qiling`);
+    }
+    if ((agent.avtolavka && !avtoYangi) || ismYangi !== agent.fullname) {
+      const q = await this.omborQoldigi(agent);
+      if (q > 0.001) {
+        throw new HttpException(400, `"${agentOmbori(agent.fullname)}" omborida ${+q.toFixed(3)} birlik tovar bor — `
+          + `avval Won Sell → Qabul (yoki Ombor → Qaytarish qabul) bilan asosiy omborga qaytaring, keyin `
+          + (ismYangi !== agent.fullname ? "ismni o'zgartiring" : "Won Sell'dan chiqaring"));
+      }
+    }
+  };
+
+  // "Agent: <ism>" omboridagi jami qoldiq (avtolavka mashinasi yoki qabul kutayotgan qaytarishlar)
+  omborQoldigi = async (agent) => {
+    const [r] = await TovarRegisterModel.findAll({
+      attributes: [[fn('SUM', col('donada')), 'q']], where: { ombor: agentOmbori(agent.fullname) }, raw: true,
+    });
+    return parseFloat(r?.q) || 0;
+  };
+
+  /* ── DELETE /agents/:id ─────────────────────────────── */
+  delete = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id);
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+    const q = await this.omborQoldigi(agent);
+    if (q > 0.001) throw new HttpException(400, `"${agentOmbori(agent.fullname)}" omborida ${+q.toFixed(3)} birlik tovar bor — avval asosiy omborga qaytaring, keyin o'chiring`);
+
+    // Agentga biriktirilgan mijozlarni agent_idsiz qoldirish (soft)
+    await MijozModel.update({ agent_id: null }, { where: { agent_id: agent.id } });
+
+    await agent.destroy();
+    res.send({ message: "Agent o'chirildi" });
+  };
+
+  /* ── GET /agents/:id/mijozlar ───────────────────────── */
+  getMijozlar = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id);
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+
+    const { sinf, faol, search } = req.query;
+    const where = { agent_id: req.params.id };
+    if (sinf)  where.sinf = sinf;
+    if (faol !== undefined && faol !== '') where.faol = faol === 'true';
+    if (search) where.nomi = { [Op.like]: `%${search}%` };
+
+    const mijozlar = await MijozModel.findAll({
+      where,
+      include: [{ model: TerritoriyaModel, as: 'territoriya', attributes: ['id', 'nomi'] }],
+      order: [['nomi', 'ASC']],
+    });
+    res.send(mijozlar);
+  };
+
+  /* ── GET /agents/spravochnik ────────────────────────── */
+  spravochnik = async (req, res) => {
+    const [agentlar, territoriyalar] = await Promise.all([
+      AgentModel.findAll({
+        where: { faol: true },
+        include: INCLUDE,
+        attributes: ['id', 'fullname', 'territoriya_id'],
+        order: [['fullname', 'ASC']],
+      }),
+      TerritoriyaModel.findAll({ order: [['nomi', 'ASC']] }),
+    ]);
+    res.send({ agentlar, territoriyalar });
+  };
+
+  /* ── GET /agents/statistika ─────────────────────────── */
+  statistika = async (req, res) => {
+    const { period = 'month' } = req.query;
+
+    const agentlar = await AgentModel.findAll({
+      where: { faol: true },
+      include: INCLUDE,
+      order: [['fullname', 'ASC']],
+    });
+
+    const result = await Promise.all(
+      agentlar.map(async a => {
+        const stats = await buildStats(a, period);
+        return { ...a.toJSON(), ...stats };
+      })
+    );
+
+    // Umumiy KPI
+    const kpi = {
+      jami_agentlar:    result.length,
+      jami_mijozlar:    result.reduce((s, a) => s + a.mijozlar_soni, 0),
+      jami_plan_summa:  result.reduce((s, a) => s + (a.plan_summa  || 0), 0),
+      jami_fakt_summa:  result.reduce((s, a) => s + (a.fakt_summa  || 0), 0),
+      jami_bonus_summa: result.reduce((s, a) => s + (a.bonus_summa || 0), 0),
+      orta_plan_foiz:   result.length
+        ? Math.round(result.reduce((s, a) => s + (a.plan_pct || 0), 0) / result.length)
+        : 0,
+    };
+
+    res.send({ agentlar: result, kpi });
+  };
+
+  /* ── PATCH /agents/:id/faol ─────────────────────────── */
+  toggleFaol = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id);
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+    await agent.update({ faol: !agent.faol });
+    res.send({ id: agent.id, faol: agent.faol });
+  };
+
+  /* ── GET /agents/:id/register — savdo harakatlari tarixi ── */
+  register = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id, { include: INCLUDE });
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+
+    const { period = 'month' } = req.query;
+    const now = new Date();
+    let from = new Date(now.getFullYear(), now.getMonth(), 1);
+    if (period === 'today')      from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    else if (period === 'week')  { const d = now.getDay()||7; from = new Date(now); from.setDate(now.getDate()-d+1); from.setHours(0,0,0,0); }
+    else if (period === 'year')  from = new Date(now.getFullYear(), 0, 1);
+    else if (period === 'all')   from = new Date(2000, 0, 1);
+
+    const harakatlar = await AgentRegisterModel.findAll({
+      where: { agent_id: agent.id, sana: { [Op.gte]: from } },
+      order: [['sana', 'DESC'], ['id', 'DESC']],
+    });
+
+    const fakt_summa  = harakatlar.reduce((s, h) => s + h.summa, 0);
+    const bonus_summa = harakatlar.reduce((s, h) => s + h.bonus_summa, 0);
+    const plan_summa  = parseFloat(agent.plan_summa || 0);
+
+    res.send({
+      agent: { id: agent.id, fullname: agent.fullname, plan_summa, bonus_foiz: parseFloat(agent.bonus_foiz||0) },
+      jami: {
+        fakt_summa, bonus_summa, plan_summa,
+        plan_pct:    plan_summa > 0 ? Math.round(fakt_summa / plan_summa * 100) : 0,
+        qolgan_plan: Math.max(0, plan_summa - fakt_summa),
+        savdo_soni:  harakatlar.length,
+      },
+      harakatlar,
+    });
+  };
+}
+
+module.exports = new AgentController();
