@@ -134,20 +134,25 @@ class TurkumController {
   };
 
   delete = async (req, res) => {
-    const t = await topish(req.params.id);
-    const soni = await TovarModel.count({ where: { turkum_id: t.id } });
     const kochir = Number(req.query.kochir) || null;
-    await sequelize.transaction(async (tr) => {
-      if (soni > 0) {
-        if (!kochir) throw new HttpException(400, `"${t.nomi}"da ${soni} ta tovar bor — avval ularni boshqa turkumga ko'chiring yoki turkumni yashiring`);
+    // Hammasi bitta tranzaksiyada, turkum va uning tovarlari qulflangan holda: sanash bilan
+    // o'chirish orasida parallel biriktirilgan tovar egasiz (o'chgan turkumga bog'langan) qolmaydi
+    const soni = await sequelize.transaction(async (tr) => {
+      const t = await TurkumModel.findByPk(req.params.id, { transaction: tr, lock: tr.LOCK.UPDATE });
+      if (!t) throw new HttpException(404, 'Turkum topilmadi');
+      const kochadi = (await TovarModel.findAll({
+        where: { turkum_id: t.id }, attributes: ['id'], raw: true, transaction: tr, lock: tr.LOCK.UPDATE,
+      })).map(x => x.id);
+      if (kochadi.length > 0) {
+        if (!kochir) throw new HttpException(400, `"${t.nomi}"da ${kochadi.length} ta tovar bor — avval ularni boshqa turkumga ko'chiring yoki turkumni yashiring`);
         if (kochir === t.id) throw new HttpException(400, 'Tovarlarni o\'sha turkumning o\'ziga ko\'chirib bo\'lmaydi');
         const yangi = await TurkumModel.findByPk(kochir, { transaction: tr });
         if (!yangi) throw new HttpException(404, 'Ko\'chiriladigan turkum topilmadi');
-        const kochadi = (await TovarModel.findAll({ where: { turkum_id: t.id }, attributes: ['id'], raw: true, transaction: tr })).map(x => x.id);
         await TovarModel.update({ turkum_id: yangi.id, turkum: yangi.nomi }, { where: { turkum_id: t.id }, transaction: tr });
         await tovarTurkuminiTarqat(kochadi, yangi.nomi, tr);
       }
       await t.destroy({ transaction: tr });
+      return kochadi.length;
     });
     res.send({ ok: true, kochirildi: soni });
   };

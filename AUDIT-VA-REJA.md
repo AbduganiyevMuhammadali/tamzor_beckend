@@ -130,6 +130,73 @@ Test skriptlari vaqtinchalik scratchpad papkasida turibdi (`tests/integration.js
 
 ---
 
+## 5b. Ikkinchi audit: validatsiya va tranzaksiyalar (2026-11-20)
+
+Barcha endpoint'lar (mobil, web pul/ombor, asosiy ma'lumotlar, hisobotlar) validatsiya va tranzaksiya bo'yicha qayta ko'rib chiqildi. 36 ta fayl o'zgardi, yangi fayl bitta: `src/middleware/rateLimit.middleware.js`. Migratsiya kerak emas.
+
+**Yuqori xavf (pul yoki ombor buzilishi):**
+- **Avtolavka sotuvi:** bitta tovar bir nechta qatorda kelsa, endi tovar bo'yicha jamlanib tekshiriladi.
+- **`reysBoshla`:**
+  - butun amal bitta tranzaksiyada, dostavchi qatori va bugungi reys qulflanadi;
+  - reys raqami web bilan bir xil hisoblagichdan olinadi;
+  - web'dagi trip sheet yaratish ham dostavchi qatorini qulflaydi.
+- **`returnDeliveryProducts` (eski APK):**
+  - qator, buyurtma summasi va yetkazilgan buyurtmada mijoz balansi ham kamayadi;
+  - `yetkazdim` bilan birga qayta qaytarish oshib ketmaydi.
+- **Prixod narxlari:** qulf hammasidan oldin olinadi, hujjat va qatorlar qulflangan nusxadan o'qiladi.
+- **Ishlab chiqarish (`boshla`, `yakunla`, `create`):**
+  - xom ashyo qulfi birinchi o'qishdan oldin olinadi (REPEATABLE READ snapshot);
+  - `bekor` endi `mavjudQoldiq` dan foydalanadi.
+- **Kamomad (dostavchi):** limit va izoh `dostavchiTopshir` ichida, qulfdan keyin tekshiriladi. Yangi parametrlar: `maxQoshish`, `izohQosh`, `kutilganTopshirilgan`.
+- **Yetkazuvchi, mijoz, tovar, dostavchini o'chirish:** tarixi, balansi yoki qoldig'i bo'lsa rad etiladi (tekshiruv qulf ostida).
+
+**O'rta xavf:**
+- **Mijoz:** boshlang'ich balans qulf ostida hisoblanadi.
+- **Kassa:** `mijoz_id` faqat `mijoz_tolov` kategoriyasida saqlanadi.
+- **Ariza:** qaytarish arizasini `qabul_*` holatida o'chirib bo'lmaydi.
+- **Web idempotentlik (ixtiyoriy maydonlar):**
+  - `sorov_id`: kassa va avtolavka sotuvi;
+  - `kutilgan_topshirilgan`: dostavchi kassa qabuli.
+- **Import:** `GET_LOCK` bilan navbatma-navbat bajariladi.
+- **Mobil:**
+  - `checkIn` qulf ostida va idempotent;
+  - `orderDelivery` kassaga dostavchi nomidan yoziladi;
+  - kun kalitlari endi Toshkent kuni bo'yicha olinadi.
+- **Hisobotlar:**
+  - sana tekshiruvi va 366 kunlik chegara;
+  - xom SQL'da mahalliy kun chegaralari;
+  - limit oshganda `kesildi` bayrog'i;
+  - dashboard va inkassatsiya mahalliy kun bo'yicha.
+
+**Past xavf:**
+- `Infinity`, `NaN` va juda katta summalar rad etiladi.
+- Noto'g'ri `mobilId` → 400.
+- `saveKlient` va `tolovSurildi` parallel takrorda 500 o'rniga `takror: true` qaytaradi.
+- GPS: bir so'rovda ≤ 2000 nuqta; noto'g'ri koordinata yozilmaydi.
+- `limit=abc` 500 bermaydi.
+- `harakat=constructor` → 400.
+- `marshrut-reja/generate` `bulkCreate` bilan ishlaydi.
+- Sozlama va reyting kalitlari bitta tranzaksiyada yoziladi.
+- Turkum va agent yozuvlari tranzaksiya ichida.
+- Login: 15 daqiqada 10 ta xato urinishdan keyin 429.
+
+**Ataylab qilinmagan:** `savePayment`, `clientNotSell` va `tolovSurildi` da mijoz egaligi tekshirilmaydi. Ilova agentga barcha mijozlarni ko'rsatadi, `saveSell` ham egalikni tekshirmaydi. Shu sababli tekshiruv qo'yilsa, haqiqiy oflayn to'lovlar rad etilardi.
+
+**Ma'lum cheklov:** login cheklovi IP+login bo'yicha ishlaydi. Server nginx ortida bo'lsa, `trust proxy` sozlanmagan, shuning uchun amalda faqat login bo'yicha cheklanadi.
+
+**Sinov (test bazasi, 2026-11-20):**
+- Flutter testlari: 92/92 (shu jumladan e2e).
+- Jonli skript: 28 ta tekshiruv o'tdi.
+- Parallel holatlar sinaldi:
+  - `reysBoshla` ×5 → 1 reys;
+  - `checkIn` ×3 → 1 tashrif;
+  - kassa `sorov_id` ×3 → 1 yozuv;
+  - mijoz balansi ×2 → bir marta;
+  - ikki partiya parallel `boshla` → ikkinchisi 400, qoldiq minusga tushmadi.
+- Eski APK qaytarishi: summa va qarz to'g'ri kamayadi.
+
+---
+
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |
 |---|---|
@@ -140,7 +207,6 @@ Test skriptlari vaqtinchalik scratchpad papkasida turibdi (`tests/integration.js
 | Agent ombori kaliti agentning to'liq ismi (`agentOmbori(fullname)`); ism o'zgarsa qoldiq "yo'qoladi" | Ma'lumot migratsiyasini talab qiladi |
 | ~~Mobil `qarzTolov`, `checkIn`, `chekUp` da ega tekshiruvi yo'q~~ | ✅ 2026-11-19 tuzatildi: `qarzTolov` — faqat dostavchiga buyurtmasi tayinlangan mijoz (aks holda 403); `checkIn` — begona mijozga tashrif yoziladi, lekin uning koordinatasi o'zgartirilmaydi; `chekUp` — audit roli ochiq bo'lmasa 403 (hozir hech kimda yo'q) |
 | Mobilda narx serverdagi narx ro'yxatidan majburan olinmaydi (faqat summa izchilligi tekshiriladi) | Agent optom yoki chakana narxni tanlaydi, dollar narxi bor — majburlash to'g'ri sotuvlarni buzadi |
-| `dostavchiInkassatsiya.utils.js` hali UTC bo'yicha `DATE(sana)` bilan guruhlaydi | Hisobot lokal kun bilan ishlaydi — ikkalasini moslashtirish kerak |
 | `inkassatsiya (agent_id/dostavchi_id, sana)` da UNIQUE indeks yo'q (kodda qulf bilan himoyalangan) | Mavjud dublikat yozuvlar bo'lishi mumkin, migratsiya oldidan tekshirish kerak |
 | `npm audit`: `picomatch` (high) va `uuid` (moderate) | Faqat sequelize va umzug ichida; `picomatch` faqat doimiy shablon bilan ishlaydi |
 | `.gitignore` ichida `package-lock.json` | Build'lar takrorlanuvchan emas — egasi hal qilsin |

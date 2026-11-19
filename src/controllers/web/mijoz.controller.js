@@ -6,6 +6,7 @@ const sequelize = require('../../db/db-sequelize');
 const MijozReytingModel = require('../../models/mijozReyting.model');
 const { reytingYoz, qoidalar: reytingQoidalari, daraja: reytingDaraja, darajaChegara, DARAJALAR, MAX: REYTING_MAX } = require('../../utils/reyting.utils');
 const { adminMi } = require('../../utils/sotuvBekor.utils');
+const { ArizaModel } = require('../../models/ariza.model');
 
 /* Kassa kategoriyasining o'qiladigan nomi */
 const KATEGORIYA_NOMI = {
@@ -24,6 +25,20 @@ const TAHRIR_MAYDONLAR = [
   'tashrif_kunlari', 'tashrif_chastota', 'lat', 'lng', 'kredit_limit', 'tolov_muddati_kun',
   'izoh', 'faol', 'boshlangich_balans', 'boshlangich_sana', 'boshlangich_izoh',
 ];
+
+/* Buyurtmaning yakuniy holatlari — qolganlari "ochiq" (mijozni o'chirishga to'sqinlik qiladi) */
+const ARIZA_YAKUNIY = ['yetkazildi', 'bekor', 'qabul_qilindi'];
+
+/* Territoriya / kategoriya nomi: bo'sh bo'lmagan satr, ≤100 belgi (trim).
+ * majburiy=false bo'lsa va maydon yuborilmagan bo'lsa — undefined (o'zgarmaydi). */
+function nomiTekshir(body, majburiy) {
+  if (!majburiy && !(body && Object.prototype.hasOwnProperty.call(body, 'nomi'))) return undefined;
+  const v = body ? body.nomi : undefined;
+  if (typeof v !== 'string' || !v.trim()) throw new HttpException(400, 'Nomi majburiy');
+  const nomi = v.trim();
+  if (nomi.length > 100) throw new HttpException(400, 'Nomi 100 belgidan oshmasligi kerak');
+  return nomi;
+}
 
 /* Ro'yxat so'rovining yuqori chegarasi (all=true ham shu bilan cheklanadi) */
 const MAKS_QATOR = 5000;
@@ -165,15 +180,18 @@ class MijozController {
 
   /* PATCH /mijozlar/:id */
   update = async (req, res) => {
-    const m = await MijozModel.findByPk(req.params.id);
-    if (!m) throw new HttpException(404, 'Mijoz topilmadi');
     const body = this.#normalize(req.body);
-    // Boshlang'ich qoldiq o'zgarsa — joriy balans shu farqga suriladi (savdo/to'lovlar tarixi o'z joyida qoladi)
-    const yangi = body.boshlangich_balans;
-    const farq = (yangi === undefined || yangi === null) ? 0 : +(Number(yangi) - parseFloat(m.boshlangich_balans || 0)).toFixed(2);
-    await sequelize.transaction(async (t) => {
+    const m = await sequelize.transaction(async (t) => {
+      // Mijoz qatori tranzaksiya ichida qulflanib o'qiladi: farq shu yangi nusxadan hisoblanadi —
+      // ikki marta bosilganda (parallel so'rov) balans ikki marta surilmaydi
+      const m = await MijozModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!m) throw new HttpException(404, 'Mijoz topilmadi');
+      // Boshlang'ich qoldiq o'zgarsa — joriy balans shu farqga suriladi (savdo/to'lovlar tarixi o'z joyida qoladi)
+      const yangi = body.boshlangich_balans;
+      const farq = (yangi === undefined || yangi === null) ? 0 : +(Number(yangi) - parseFloat(m.boshlangich_balans || 0)).toFixed(2);
       await m.update(body, { transaction: t });
       if (Math.abs(farq) > 0.005) await MijozModel.increment('balans', { by: farq, where: { id: m.id }, transaction: t });
+      return m;
     });
     const full = await MijozModel.findByPk(m.id, { include: INCLUDE });
     res.send(full);
@@ -191,10 +209,24 @@ class MijozController {
   }
 
   /* DELETE /mijozlar/:id */
+  /* O'chirish: balansi 0 bo'lmagan yoki ochiq buyurtmasi bor mijoz o'chirilmaydi
+   * (qarz hisobotdan "yo'qolmasin", yo'ldagi buyurtma egasiz qolmasin). Tranzaksiya + qulf. */
   delete = async (req, res) => {
-    const m = await MijozModel.findByPk(req.params.id);
-    if (!m) throw new HttpException(404, 'Mijoz topilmadi');
-    await m.destroy();
+    await sequelize.transaction(async (t) => {
+      const m = await MijozModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!m) throw new HttpException(404, 'Mijoz topilmadi');
+      const balans = parseFloat(m.balans) || 0;
+      if (Math.abs(balans) > 0.005) {
+        throw new HttpException(400, `Mijozni o'chirib bo'lmaydi: balansi 0 emas (${+balans.toFixed(2)}). Avval hisob-kitobni yoping yoki mijozni nofaol qiling`);
+      }
+      const ochiq = await ArizaModel.count({
+        where: { mijoz_id: m.id, holat: { [Op.notIn]: ARIZA_YAKUNIY } }, transaction: t,
+      });
+      if (ochiq > 0) {
+        throw new HttpException(400, `Mijozni o'chirib bo'lmaydi: ${ochiq} ta ochiq buyurtmasi bor. Avval ularni yakunlang yoki bekor qiling`);
+      }
+      await m.destroy({ transaction: t });
+    });
     res.send({ message: 'O\'chirildi' });
   };
 
@@ -435,15 +467,18 @@ class MijozController {
 
   /* ── Territoriya CRUD ───────────────────────────── */
   territoriyaCreate = async (req, res) => {
-    if (!req.body.nomi) throw new HttpException(400, 'Nomi majburiy');
-    const t = await TerritoriyaModel.create({ nomi: req.body.nomi, izoh: req.body.izoh || null });
+    const nomi = nomiTekshir(req.body, true);
+    const t = await TerritoriyaModel.create({ nomi, izoh: req.body.izoh || null });
     res.status(201).send(t);
   };
 
   territoriyaUpdate = async (req, res) => {
     const t = await TerritoriyaModel.findByPk(req.params.id);
     if (!t) throw new HttpException(404, 'Topilmadi');
-    await t.update({ nomi: req.body.nomi, izoh: req.body.izoh });
+    const nomi = nomiTekshir(req.body, false);
+    const upd = { izoh: req.body.izoh };
+    if (nomi !== undefined) upd.nomi = nomi;
+    await t.update(upd);
     res.send(t);
   };
 
@@ -465,16 +500,18 @@ class MijozController {
   }
 
   kategoriyaCreate = async (req, res) => {
-    if (!req.body.nomi) throw new HttpException(400, 'Nomi majburiy');
+    const nomi = nomiTekshir(req.body, true);
     const narx_ruyxat_id = await this.narxRuyxatTekshir(req.body.narx_ruyxat_id);
-    const k = await MijozKategoriyaModel.create({ nomi: req.body.nomi, izoh: req.body.izoh || null, narx_ruyxat_id });
+    const k = await MijozKategoriyaModel.create({ nomi, izoh: req.body.izoh || null, narx_ruyxat_id });
     res.status(201).send(k);
   };
 
   kategoriyaUpdate = async (req, res) => {
     const k = await MijozKategoriyaModel.findByPk(req.params.id);
     if (!k) throw new HttpException(404, 'Topilmadi');
-    const upd = { nomi: req.body.nomi, izoh: req.body.izoh };
+    const nomi = nomiTekshir(req.body, false);
+    const upd = { izoh: req.body.izoh };
+    if (nomi !== undefined) upd.nomi = nomi;
     if ('narx_ruyxat_id' in req.body) upd.narx_ruyxat_id = await this.narxRuyxatTekshir(req.body.narx_ruyxat_id);
     await k.update(upd);
     res.send(k);

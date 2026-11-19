@@ -35,6 +35,18 @@ const TIZIM_KATEGORIYA = new Set([
   'qarz_berildi', 'qarz_qaytdi', 'qarz_olindi', 'qarz_qaytarildi',
 ]);
 
+const TOLOV_USUL = ['naqt', 'karta', 'bank'];       // kassa.tolov_usul ENUM bilan bir xil
+const HISOBOT_MAX_QATOR = 20000;                      // javobdagi harakatlar soni cheklovi
+
+/* Ixtiyoriy idempotentlik kaliti (web: ikki marta bosish). kassa.mobil_id (UNIQUE) ga yoziladi. */
+function sorovIdOl(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const s = String(v).trim();
+  if (!/^[A-Za-z0-9_.:-]{8,64}$/.test(s)) throw new HttpException(400, "sorov_id noto'g'ri (8–64 belgi: harf, raqam, - _ . :)");
+  return s;
+}
+const takrorXato = (e) => !!e && (e.name === 'SequelizeUniqueConstraintError' || (e.parent && e.parent.code === 'ER_DUP_ENTRY'));
+
 /* YYYY-MM-DD (ixtiyoriy vaqt bilan) sanani tekshiradi; noto'g'ri bo'lsa 400 */
 function sanaOl(v, nomi) {
   if (v === undefined || v === null || v === '') return null;
@@ -75,17 +87,23 @@ class KassaController extends BaseController {
   hisobot = async (req, res) => {
     const { period = 'month', from: fq, to: tq, tur, kategoriya, search } = req.query;
     const { from, to } = periodRange(period, fq, tq);
+    if (to < from) throw new HttpException(400, "Davr noto'g'ri: 'from' sanasi 'to' dan keyin");
 
     const where = { sana: { [Op.between]: [from, to] } };
     if (tur)        where.tur = tur;
     if (kategoriya) where.kategoriya = kategoriya;
     if (search) {
       where[Op.or] = [
-        { mijoz_nomi: { [Op.like]: `%${search}%` } },
-        { izoh:       { [Op.like]: `%${search}%` } },
+        { mijoz_nomi: { [Op.like]: `%${String(search).slice(0, 100)}%` } },
+        { izoh:       { [Op.like]: `%${String(search).slice(0, 100)}%` } },
       ];
     }
 
+    // Cheksiz davr (masalan faqat `to` berilsa 2000-yildan) serverni yuklamasin
+    const soni = await KassaModel.count({ where });
+    if (soni > HISOBOT_MAX_QATOR) {
+      throw new HttpException(400, `Tanlangan davrda yozuvlar juda ko'p (${soni}) — davrni qisqartiring yoki filtr qo'llang`);
+    }
     const rows = await KassaModel.findAll({ where, order: [['sana', 'DESC'], ['id', 'DESC']] });
     // Xarajat toifalari nomi — foydalanuvchi o'zgartirgan bo'lishi mumkin (Moliya → Kunlik xarajatlar → Toifalar)
     const turlar = await xarajatTurlari();
@@ -152,15 +170,36 @@ class KassaController extends BaseController {
       if (tur !== 'chiqim') throw new HttpException(400, 'Kategoriya va tur mos emas');
     }
     if (kategoriya === 'mijoz_tolov' && !mijoz_id) throw new HttpException(400, 'Mijoz tanlanmagan');
+    if (tolov_usul != null && tolov_usul !== '' && !TOLOV_USUL.includes(tolov_usul)) {
+      throw new HttpException(400, `To'lov usuli noto'g'ri (${TOLOV_USUL.join(', ')})`);
+    }
+    if (izoh != null && String(izoh).length > 255) throw new HttpException(400, 'Izoh 255 belgidan oshmasin');
     const sanaQiymat = sanaOl(sana, 'sana');
+    // mijoz_id faqat mijoz to'lovida saqlanadi: mijoz hisob-kitobi kassa kirimlarini mijoz_id
+    // bo'yicha yig'adi — boshqa kategoriyadagi yozuv mijoz qarzini noto'g'ri kamaytirib ko'rsatardi
+    const mijozId = kategoriya === 'mijoz_tolov' ? mijoz_id : null;
+
+    // Ixtiyoriy idempotentlik: shu sorov_id bilan yozuv bor bo'lsa — yangisi yaratilmaydi
+    const sorovId = sorovIdOl(req.body.sorov_id);
+    const takrorJavob = async () => {
+      const bor = await KassaModel.findOne({ where: { mobil_id: sorovId } });
+      if (!bor) return false;
+      const mos = bor.kategoriya === kategoriya && bor.tur === tur
+        && Math.abs(bor.summa - Number(summa)) < 0.005
+        && Number(bor.user_id || 0) === Number(req.currentUser?.id || 0);
+      if (!mos) throw new HttpException(409, "Bu sorov_id boshqa kassa yozuviga tegishli");
+      res.status(200).send(bor);
+      return true;
+    };
+    if (sorovId && await takrorJavob()) return;
 
     const t = await sequelize.transaction();
     try {
       let mijoz_nomi = null, eskiBalans = null;
       // Mijoz to'lovi bo'lsa — balansni oshiramiz (qarz kamayadi)
-      if (kategoriya === 'mijoz_tolov' && mijoz_id) {
+      if (kategoriya === 'mijoz_tolov' && mijozId) {
         // Mijoz qatori qulflanadi: parallel to'lovlar eskiBalans/reytingni noto'g'ri hisoblamasin
-        const m = await MijozModel.findByPk(mijoz_id, { transaction: t, lock: t.LOCK.UPDATE });
+        const m = await MijozModel.findByPk(mijozId, { transaction: t, lock: t.LOCK.UPDATE });
         if (!m) throw new HttpException(404, 'Mijoz topilmadi');
         mijoz_nomi = m.nomi;
         eskiBalans = parseFloat(m.balans) || 0;
@@ -173,18 +212,19 @@ class KassaController extends BaseController {
         summa:      Number(summa),
         tolov_usul: tolov_usul || 'naqt',
         manba_tur:  kategoriya === 'mijoz_tolov' ? 'mijoz' : 'qol',
-        manba_id:   kategoriya === 'mijoz_tolov' ? (mijoz_id || null) : null,
-        mijoz_id:   mijoz_id || null,
+        manba_id:   kategoriya === 'mijoz_tolov' ? (mijozId || null) : null,
+        mijoz_id:   mijozId || null,
         mijoz_nomi,
         izoh:       izoh || null,
         sana:       sanaQiymat || new Date(),
         user_id:    req.currentUser?.id || null,
+        mobil_id:   sorovId,
       }, { transaction: t });
 
       // Mijoz reytingi: qarzdor mijoz to'ladi (+ball, kuniga bir marta; to'lov o'chirilsa qaytadi)
       if (eskiBalans !== null && eskiBalans < -0.5) {
         const u = req.currentUser || {};
-        await reytingYoz(mijoz_id, {
+        await reytingYoz(mijozId, {
           tur: 'tolov_qabul', sabab: "Qarz to'lovi (kassa)", summa: Number(summa), manba_tur: 'kassa', manba_id: rec.id,
           qarzYopildi: eskiBalans + Number(summa) >= -0.5,
           xodim: { rol: 'web', id: u.id || null, nomi: u.username || u.fullname || null }, sana: rec.sana,
@@ -194,7 +234,9 @@ class KassaController extends BaseController {
       await t.commit();
       res.status(201).send(rec);
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
+      // Parallel takror (bir xil sorov_id) — UNIQUE indeks ushladi: mavjud yozuv qaytariladi
+      if (sorovId && takrorXato(e) && await takrorJavob()) return;
       throw e;
     }
   };

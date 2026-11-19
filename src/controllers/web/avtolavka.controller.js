@@ -15,7 +15,7 @@
 const { Op } = require('sequelize');
 const sequelize = require('../../db/db-sequelize');
 const { AvtolavkaHujjatModel, AvtolavkaQatorModel, AvtolavkaKunModel } = require('../../models/avtolavka.model');
-const { ArizaModel } = require('../../models/ariza.model');
+const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
 const AgentModel = require('../../models/agent.model');
 const TovarModel = require('../../models/tovar.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
@@ -654,9 +654,38 @@ class AvtolavkaController {
   };
 
   // POST /avtolavka/sotuv { agent_id, mijoz_id, sana, qatorlar:[{tovar_id, dona, narx}], tolov: naqd|qisman|qarz, naqd, tolov_sana, izoh }
+  // Ixtiyoriy `sorov_id` (8–64 belgi) — ikki marta bosishdan himoya: ariza.mobil_id (UNIQUE) ga
+  // yoziladi; shu kalit bilan qayta yuborilsa yangi sotuv yaratilmaydi, mavjudi 200 bilan qaytadi.
   sotuvCreate = async (req, res) => {
     const b = req.body || {};
+    let sorovId = null;
+    if (b.sorov_id !== undefined && b.sorov_id !== null && String(b.sorov_id).trim() !== '') {
+      sorovId = String(b.sorov_id).trim();
+      if (!/^[A-Za-z0-9_.:-]{8,64}$/.test(sorovId)) throw new HttpException(400, "sorov_id noto'g'ri (8–64 belgi: harf, raqam, - _ . :)");
+    }
     const sklad = skladMi(b.agent_id);   // xodimsiz — asosiy skladdan (createAriza agent=null)
+    // Takroriy so'rov: mavjud sotuvni qaytaramiz (boshqa sotuvga tegishli kalit — 409)
+    const takrorJavob = async () => {
+      const bor = await ArizaModel.findOne({ where: { mobil_id: sorovId }, include: [{ model: ArizaQatorModel, as: 'qatorlar' }] });
+      if (!bor) return false;
+      if (bor.manba !== 'web' || bor.turi !== 'sotish' || Number(bor.mijoz_id) !== (parseInt(b.mijoz_id, 10) || 0)) {
+        throw new HttpException(409, 'Bu sorov_id boshqa hujjatga tegishli');
+      }
+      const m = await MijozModel.findByPk(bor.mijoz_id, { paranoid: false });
+      const a = bor.agent_id ? await AgentModel.findByPk(bor.agent_id, { attributes: ['id', 'fullname'], paranoid: false }) : null;
+      const summa = n(bor.jami_summa), naqd = n(bor.tolangan_summa);
+      const qatorlar = bor.qatorlar || [];
+      res.status(200).send({
+        id: bor.id, raqam: bor.raqam, sana: kunKey(new Date(bor.yetkazilgan_sana || bor.createdAt)),
+        summa, naqd, qarz: +(summa - naqd).toFixed(2), tolov_sana: bor.tolov_sana || null,
+        sklad: !bor.agent_id, agent: a ? { id: a.id, fullname: a.fullname } : null,
+        mijoz: m ? { id: m.id, nomi: m.nomi, balans: n(m.balans) } : null,
+        tovar_soni: qatorlar.length, dona: +qatorlar.reduce((s, q) => s + n(q.jami_dona), 0).toFixed(3),
+        takror: true,
+      });
+      return true;
+    };
+    if (sorovId && await takrorJavob()) return;
     const agent = sklad ? null : await avtolavkaAgent(b.agent_id);
     if (agent && !agent.faol) throw new HttpException(400, `${agent.fullname} faol emas`);
     const mijoz = await MijozModel.findByPk(parseInt(b.mijoz_id, 10) || 0);
@@ -721,7 +750,16 @@ class AvtolavkaController {
       vaqt: vaqt.toISOString(),
     };
     const kim = req.currentUser ? (req.currentUser.fullname || req.currentUser.username) : null;
-    const ariza = await createAriza({ body, agent, turi: 'sotish', manba: 'web', webUser: kim || 'web', webUserId: req.currentUser ? req.currentUser.id : null });
+    if (sorovId) body.mobilId = sorovId;
+    let ariza;
+    try {
+      ariza = await createAriza({ body, agent, turi: 'sotish', manba: 'web', webUser: kim || 'web', webUserId: req.currentUser ? req.currentUser.id : null });
+    } catch (e) {
+      // Parallel takror (bir xil sorov_id) — UNIQUE indeks ushladi
+      if (sorovId && e && (e.name === 'SequelizeUniqueConstraintError' || (e.parent && e.parent.code === 'ER_DUP_ENTRY'))
+          && await takrorJavob()) return;
+      throw e;
+    }
     await mijoz.reload();
 
     res.status(201).send({

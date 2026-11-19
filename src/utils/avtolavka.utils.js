@@ -133,6 +133,7 @@ async function qatorlarniTayyorla(qatorlar) {
     const dona = n(q.dona);
     if (dona <= 0) throw new HttpException(400, `"${t.nomi}": miqdor noldan katta bo'lishi kerak`);
     const nx = narx[t.id] || { kirim_narx: 0, optom_narx: 0, chakana_narx: 0 };
+    if (n(q.narx) < 0) throw new HttpException(400, `"${t.nomi}": narx manfiy bo'lishi mumkin emas`);
     const sotuv = n(q.narx) || nx.chakana_narx;
     const k = birlashgan[t.id] || (birlashgan[t.id] = {
       tovar_id: t.id, tovar_nomi: t.nomi, turkum: t.turkum || null,

@@ -343,27 +343,39 @@ class PrixodController extends BaseController {
   // Bitta sotish narxi: optom = chakana = sotuv_narx (mijoz narx turi qaysi bo'lsa ham bir xil).
   narxlar = async (req, res) => {
     this.checkValidation(req);
-    const prixod = await PrixodModel.findOne({
-      where: { id: req.params.id }, include: [{ model: PrixodQatorModel, as: 'qatorlar' }],
-    });
-    if (!prixod) throw new HttpException(404, req.mf('data not found'));
     const kiritilgan = new Map((req.body.qatorlar || []).map(x => [Number(x.id), x]));
-    const hujjatKursi = (prixod.qatorlar.find(q => Number(q.kurs) > 0) || {}).kurs;
-    const kurs = Number(hujjatKursi) > 0 ? Number(hujjatKursi) : await joriyKurs();
-    const tasdiqlangan = prixod.holat === 'tasdiqlangan';
     const user = req.currentUser || {};
 
-    // Miqdor o'zgarishlari — tasdiqlangan hujjatda faqat Admin
-    const miqdorOzgarishi = prixod.qatorlar.some(q => {
-      const x = kiritilgan.get(q.id);
-      return x && x.donada != null && Math.abs((Number(x.donada) || 0) - (Number(q.donada) || 0)) > 0.0005;
-    });
-    if (miqdorOzgarishi && tasdiqlangan && !adminMi(user)) {
-      throw new HttpException(403, "Tasdiqlangan hujjatda miqdorni faqat Admin tuzata oladi");
-    }
-
+    // Hujjat, qatorlar va holat TRANZAKSIYA ICHIDA qulf bilan o'qiladi: parallel
+    // narx tuzatish / bekor qilish / tasdiqlash bilan poyga bo'lsa, yetkazuvchi
+    // balansi farqi ikki marta qo'llanmaydi va `tasdiqlangan` eskirgan nusxadan olinmaydi.
+    // Diqqat (REPEATABLE READ): oddiy o'qishlardan OLDIN barcha qulflar olinadi.
     const t = await sequelize.transaction();
     try {
+      const prixod = await qulflabOl(PrixodModel, req.params.id, t);
+      if (!prixod) throw new HttpException(404, req.mf('data not found'));
+      const qatorlar = await PrixodQatorModel.findAll({
+        where: { prixod_id: prixod.id }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE,
+      });
+      const tasdiqlangan = prixod.holat === 'tasdiqlangan';
+
+      // Miqdor o'zgarishlari — tasdiqlangan hujjatda faqat Admin
+      const miqdorOzgarishi = qatorlar.some(q => {
+        const x = kiritilgan.get(q.id);
+        return x && x.donada != null && Math.abs((Number(x.donada) || 0) - (Number(q.donada) || 0)) > 0.0005;
+      });
+      if (miqdorOzgarishi && tasdiqlangan && !adminMi(user)) {
+        throw new HttpException(403, "Tasdiqlangan hujjatda miqdorni faqat Admin tuzata oladi");
+      }
+      // Miqdor kamaytirilsa qoldiq SUM bilan tekshiriladi — shu tovarlar bo'yicha parallel
+      // sotuv/chiqim tekshiruvdan keyin qoldiqni minusga tushirmasligi uchun avval qulflanadi.
+      if (miqdorOzgarishi && tasdiqlangan) {
+        await tovarlarniQulfla(qatorlar.filter(q => kiritilgan.has(q.id)).map(q => q.tovar_id), t);
+      }
+
+      const hujjatKursi = (qatorlar.find(q => Number(q.kurs) > 0) || {}).kurs;
+      const kurs = Number(hujjatKursi) > 0 ? Number(hujjatKursi) : await joriyKurs();
+
       // Register qatorlari tasdiqlashda qatorlar tartibida yozilgan — shu tartibda juftlaymiz
       const regByTovar = {};
       if (tasdiqlangan) {
@@ -375,7 +387,7 @@ class PrixodController extends BaseController {
 
       let jami = 0;
       const miqdorIzoh = [];
-      for (const q of prixod.qatorlar) {
+      for (const q of qatorlar) {
         const x = kiritilgan.get(q.id);
         const reg = (regByTovar[q.tovar_id] || []).shift();
         if (!x) { jami += Number(q.summa) || 0; continue; }

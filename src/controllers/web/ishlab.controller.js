@@ -30,7 +30,7 @@ const { tovarlarniQulfla, keyingiTartib, maksRaqam } = require('../../utils/qulf
 const { ASOSIY_OMBOR, XOM_ASHYO_OMBOR, turOmbori, omborNomi } = require('../../utils/ombor.utils');
 const { tartibsizQoldiq, tartibla } = require('../../utils/omborKochirish.utils');
 const { tannarxXaritasi } = require('../../utils/tahlil.utils');
-const { narxMap, omborQoldiq } = require('../../utils/avtolavka.utils');
+const { narxMap } = require('../../utils/avtolavka.utils');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { tannarxHisobla, yax, n } = require('../../utils/ishlab.utils');
 
@@ -77,6 +77,23 @@ async function qatorlarniOl(royxat, { qaysi = TURLAR, t } = {}) {
     };
   });
 }
+/* Qatorlar / xarajatlar soni va sana tekshiruvi (tranzaksiyadan oldin) */
+const MAX_QATOR = 200;
+function kirishniTekshir(body = {}) {
+  if (Array.isArray(body.qatorlar) && body.qatorlar.length > MAX_QATOR) throw new HttpException(400, `Qatorlar soni ${MAX_QATOR} tadan oshmasligi kerak`);
+  if (Array.isArray(body.xarajatlar) && body.xarajatlar.length > MAX_QATOR) throw new HttpException(400, `Xarajatlar soni ${MAX_QATOR} tadan oshmasligi kerak`);
+  if (body.sana && Number.isNaN(new Date(body.sana).getTime())) throw new HttpException(400, 'Sana noto\'g\'ri formatda');
+}
+
+/* Xom ashyo tovarlarini TRANZAKSIYA BOSHIDA qulflash (hujjatdagi va so'rovda kelganlari).
+   InnoDB REPEATABLE READ: snapshot birinchi oddiy SELECT da olinadi — qulf undan OLDIN olinmasa,
+   keyingi qoldiq o'qishlari qulfdan oldingi (eskirgan) holatni ko'radi va xom ashyo minusga tushishi mumkin.
+   topHujjat (FOR UPDATE) va bu funksiya — locking read, snapshot yaratmaydi. */
+async function xomQulfla(h, body, t) {
+  const xomIds = q => (Array.isArray(q) ? q : []).filter(x => x && x.tur === 'xom_ashyo').map(x => Number(x.tovar_id));
+  await tovarlarniQulfla([...xomIds(h ? h.qatorlar : []), ...xomIds(body && body.qatorlar)], t);
+}
+
 function xarajatlarniOl(royxat) {
   return (Array.isArray(royxat) ? royxat : [])
     .map(x => ({ nomi: String(x.nomi || '').trim().slice(0, 120), summa: Math.max(0, n(x.summa)), kassadan: !!x.kassadan,
@@ -121,7 +138,9 @@ async function boshla(h, t) {
   const xom = h.qatorlar.filter(q => q.tur === 'xom_ashyo' && n(q.miqdor) > 0);
   if (!xom.length) throw new HttpException(400, 'Xom ashyo kiritilmagan');
   await omborlarniBelgila(xom, t);
-  // Xom ashyo tovarlari qulflanadi: parallel boshlash/buyurtmalar bir xil qoldiqni ikki marta ishlatmasin
+
+  // Xom ashyo tovarlari qulflanadi: parallel boshlash/buyurtmalar bir xil qoldiqni ikki marta ishlatmasin.
+  // Chaqiruvchilar qulfni tranzaksiya boshida (xomQulfla) oladi — bu yerda qayta chaqiruv zararsiz.
   await tovarlarniQulfla(xom.map(q => q.tovar_id), t);
   const kerak = {};
   for (const q of xom) {
@@ -355,7 +374,10 @@ class IshlabController {
 
   // POST /ishlab — yangi partiya (qoralama). { sana, izoh, taqsimlash, qatorlar[], xarajatlar[], boshlash?, yakunlash? }
   create = async (req, res) => {
+    kirishniTekshir(req.body);
     const id = await sequelize.transaction(async (t) => {
+      // Boshlanadigan bo'lsa — xom ashyo qulfi har qanday oddiy o'qishdan (raqamYarat ham) oldin
+      if (req.body.boshlash || req.body.yakunlash) await xomQulfla(null, req.body, t);
       const h = await IshlabModel.create({
         raqam: await raqamYarat(t), sana: req.body.sana ? new Date(req.body.sana) : new Date(), ombor: ASOSIY_OMBOR,
         taqsimlash: req.body.taqsimlash === 'miqdor' ? 'miqdor' : 'qiymat', izoh: req.body.izoh || null,
@@ -371,6 +393,7 @@ class IshlabController {
 
   // PATCH /ishlab/:id — qoralamada hammasi, jarayonda — faqat mahsulot, qo'shimcha va xarajatlar
   update = async (req, res) => {
+    kirishniTekshir(req.body);
     await sequelize.transaction(async (t) => {
       const h = await topHujjat(req.params.id, t);
       if (!['qoralama', 'jarayonda'].includes(h.holat)) throw new HttpException(400, `"${h.holat}" holatidagi hujjatni o'zgartirib bo'lmaydi`);
@@ -383,9 +406,11 @@ class IshlabController {
 
   // POST /ishlab/:id/boshla — xom ashyo ombordan chiqadi
   boshla = async (req, res) => {
+    kirishniTekshir(req.body || {});
     await sequelize.transaction(async (t) => {
       const h = await topHujjat(req.params.id, t);
       if (h.holat !== 'qoralama') throw new HttpException(400, 'Faqat qoralamadagi partiyani boshlash mumkin');
+      await xomQulfla(h, req.body, t);
       const toliq = req.body && Object.keys(req.body).length ? await chiqishniYoz(h, req.body, t, { xomHam: true }) : h;
       await boshla(toliq, t);
     });
@@ -394,10 +419,12 @@ class IshlabController {
 
   // POST /ishlab/:id/yakunla — { qatorlar (mahsulot/qo'shimcha haqiqiy miqdori, narxlar), xarajatlar, taqsimlash }
   yakunla = async (req, res) => {
+    kirishniTekshir(req.body || {});
     await sequelize.transaction(async (t) => {
       const h = await topHujjat(req.params.id, t);
       if (!['qoralama', 'jarayonda'].includes(h.holat)) throw new HttpException(400, 'Partiya allaqachon yakunlangan yoki bekor qilingan');
       const qoralama = h.holat === 'qoralama';
+      if (qoralama) await xomQulfla(h, req.body, t);
       const toliq = await chiqishniYoz(h, req.body || {}, t, { xomHam: qoralama });
       if (qoralama) await boshla(toliq, t);
       await yakunla(toliq, req.currentUser, t);
@@ -415,14 +442,18 @@ class IshlabController {
       if (h.holat === 'yakunlandi') {
         // Mahsulot hali omborda bo'lsagina — sotilgan bo'lsa qaytarib bo'lmaydi
         const chiqqan = h.qatorlar.filter(q => q.tur !== 'xom_ashyo' && n(q.miqdor) > 0);
-        // Mahsulot qoldig'i tekshiruvidan oldin tovarlar qulflanadi (parallel sotuv bilan poyga yo'q)
+        // Mahsulot qoldig'i tekshiruvidan oldin tovarlar qulflanadi (parallel sotuv bilan poyga yo'q).
+        // topHujjat (FOR UPDATE) dan keyin birinchi o'qish shu qulf — snapshot qulfdan keyin olinadi.
         await tovarlarniQulfla(chiqqan.map(q => q.tovar_id), t);
-        const omborlar = [...new Set(chiqqan.map(q => q.ombor || h.ombor))];
-        const bor = Object.fromEntries(await Promise.all(omborlar.map(async om => [om, await omborQoldiq(om, t)])));
-        const qoldi = q => n(bor[q.ombor || h.ombor]?.[q.tovar_id]?.qoldiq);
-        const yetmaydi = chiqqan.filter(q => qoldi(q) + 0.0005 < n(q.miqdor));
+        // Mavjud qoldiq (boshla bilan bir xil): jismoniy qoldiq − ochiq buyurtmalarga band qilingani.
+        // Aks holda bekor qilish buyurtmaga band qilingan mahsulotni olib ketib, skladni minusga tushirardi.
+        const mavjud = await omborlarBoyicha(chiqqan.map(q => ({ ombor: q.ombor || h.ombor, tovar_id: q.tovar_id })), t);
+        const jami = {};
+        for (const q of chiqqan) { const k = `${q.ombor || h.ombor}|${q.tovar_id}`; jami[k] = (jami[k] || 0) + n(q.miqdor); }
+        const qoldi = q => n(mavjud.get(q.ombor || h.ombor)?.get(Number(q.tovar_id))?.mavjud);
+        const yetmaydi = chiqqan.filter(q => qoldi(q) + 0.0005 < jami[`${q.ombor || h.ombor}|${q.tovar_id}`]);
         if (yetmaydi.length) {
-          throw new HttpException(400, 'Mahsulotning bir qismi omborda yo\'q (sotilgan yoki ko\'chirilgan): '
+          throw new HttpException(400, 'Mahsulotning bir qismi omborda yo\'q yoki buyurtmalarga band (sotilgan, ko\'chirilgan yoki band qilingan): '
             + yetmaydi.map(q => `"${q.tovar_nomi}" ${yax(qoldi(q), 3)} / ${yax(n(q.miqdor), 3)} ${q.olchov} (${omborNomi(q.ombor || h.ombor)})`).join('; ')
             + '. Bekor qilib bo\'lmaydi — farqni inventarizatsiya bilan to\'g\'rilang.');
         }

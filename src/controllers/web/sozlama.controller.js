@@ -1,5 +1,6 @@
 const SozlamaModel = require('../../models/sozlama.model');
 const HttpException = require('../../utils/HttpException.utils');
+const sequelize = require('../../db/db-sequelize');
 const { DEFAULT_KURS } = require('../../utils/kurs.utils');
 const { ochirishParoli, ochirishParoliniYoz } = require('../../utils/xavfsizlik.utils');
 const { qoidalar: reytingQoidalari, qoidalarniYoz: reytingQoidalariniYoz } = require('../../utils/reyting.utils');
@@ -41,11 +42,20 @@ class SozlamaController {
   // PATCH /sozlama/chek — body: { nomi, telefon, manzil, izoh } (Admin)
   updateChek = async (req, res) => {
     const b = req.body || {};
+    // Avval hamma qiymat tekshiriladi va tayyorlanadi, keyin bitta tranzaksiyada yoziladi
+    const yoz = [];
     for (const k of CHEK_KALITLAR) {
       if (b[k] === undefined) continue;
-      const qiymat = String(b[k] ?? '').trim().slice(0, 255);
-      const [row] = await SozlamaModel.findOrCreate({ where: { kalit: 'chek_' + k }, defaults: { qiymat, izoh: CHEK_IZOH[k] } });
-      await row.update({ qiymat });
+      if (b[k] !== null && typeof b[k] === 'object') throw new HttpException(400, `"${k}" matn bo'lishi kerak`);
+      yoz.push({ k, qiymat: String(b[k] ?? '').trim().slice(0, 255) });
+    }
+    if (yoz.length) {
+      await sequelize.transaction(async (transaction) => {
+        for (const { k, qiymat } of yoz) {
+          const [row] = await SozlamaModel.findOrCreate({ where: { kalit: 'chek_' + k }, defaults: { qiymat, izoh: CHEK_IZOH[k] }, transaction });
+          await row.update({ qiymat }, { transaction });
+        }
+      });
     }
     return this.getChek(req, res);
   };

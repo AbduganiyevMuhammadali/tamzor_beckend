@@ -23,6 +23,6 @@ exports.narxRuyxatSchemas = {
     qatorlar: Joi.array().items(Joi.object({
       tovar_id: Joi.number().integer().positive().required(),
       narx:     Joi.number().min(0).required(),
-    })).required(),
+    })).max(5000).required(),   // bitta so'rovda ko'pi bilan 5000 qator
   }),
 };

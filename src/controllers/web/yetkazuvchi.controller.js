@@ -8,17 +8,21 @@ const sequelize = require('../../db/db-sequelize');
 class YetkazuvchiController extends BaseController {
 
   getAll = async (req, res) => {
-    const { search, page = 1, limit = 200 } = req.query;
+    const { search } = req.query;
+    // NaN / manfiy / haddan katta qiymatlardan himoya (standart 100, maksimum 1000)
+    const limRaw = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(limRaw) && limRaw > 0 ? Math.min(1000, limRaw) : 100;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const where = {};
     if (search) where.ism = { [Op.like]: `%${search}%` };
-    const offset = (Number(page) - 1) * Number(limit);
+    const offset = (page - 1) * limit;
     const { count, rows } = await YetkazuvchiModel.findAndCountAll({
       where,
       order: [['ism', 'ASC']],
-      limit: Number(limit),
+      limit,
       offset,
     });
-    res.send({ data: rows, total: count, page: Number(page), pages: Math.ceil(count / Number(limit)) });
+    res.send({ data: rows, total: count, page, pages: Math.ceil(count / limit) });
   };
 
   /* GET /yetkazuvchilar/qoldiqlar — sahifa tepasidagi ikki ro'yxat.
@@ -66,10 +70,25 @@ class YetkazuvchiController extends BaseController {
     res.send(y);
   };
 
+  /* O'chirish faqat "toza" yetkazuvchi uchun: balans 0 va hech qanday prixod / harakat (qarz, to'lov) yo'q.
+     Aks holda ledger va prixodlar egasiz qolib, qarz hisoboti buziladi. Tekshiruv tranzaksiya ichida,
+     yetkazuvchi qatori qulflangan holda (parallel to'lov / prixod bilan poyga yo'q). */
   delete = async (req, res) => {
-    const y = await YetkazuvchiModel.findByPk(req.params.id);
-    if (!y) throw new HttpException(404, 'Yetkazuvchi topilmadi');
-    await y.destroy();
+    await sequelize.transaction(async (t) => {
+      const y = await YetkazuvchiModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!y) throw new HttpException(404, 'Yetkazuvchi topilmadi');
+      if (Math.abs(parseFloat(y.balans) || 0) > 0.005) {
+        throw new HttpException(400, `Yetkazuvchini o'chirib bo'lmaydi: balansi 0 emas (${parseFloat(y.balans)}). Avval hisob-kitobni yoping`);
+      }
+      const [r] = await sequelize.query(`
+        SELECT (SELECT COUNT(*) FROM prixod WHERE yetkazuvchi_id = :id) AS prixod,
+               (SELECT COUNT(*) FROM yetkazuvchi_harakatlar WHERE yetkazuvchi_id = :id) AS harakat`,
+      { replacements: { id: y.id }, type: sequelize.QueryTypes.SELECT, transaction: t });
+      if (Number(r.prixod) > 0 || Number(r.harakat) > 0) {
+        throw new HttpException(400, `Yetkazuvchini o'chirib bo'lmaydi: unga bog'langan ${Number(r.prixod)} ta prixod va ${Number(r.harakat)} ta harakat (qarz/to'lov) bor`);
+      }
+      await y.destroy({ transaction: t });
+    });
     res.send({ message: "O'chirildi" });
   };
 

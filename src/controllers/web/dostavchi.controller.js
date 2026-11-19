@@ -9,6 +9,7 @@ const BaseController = require('../BaseController');
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const { dostavchiYigildi, dostavchiTopshirildi, dostavchiTopshir } = require('../../utils/dostavchiInkassatsiya.utils');
+const { kunKey, tzOffset } = require('../../utils/tahlil.utils');
 
 // Ikki koordinata orasidagi masofa (km), Yer sharining egriligini hisobga oladi
 function haversineKm(lat1, lng1, lat2, lng2) {
@@ -413,14 +414,14 @@ class DostavchiController extends BaseController {
   kassa = async (req, res) => {
     const d = await DostavchiModel.findByPk(req.params.id);
     if (!d) throw new HttpException(404, 'Dostavchi topilmadi');
-    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '') ? req.query.sana : new Date().toISOString().slice(0, 10);
+    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '') ? req.query.sana : kunKey(new Date());
     const Q = sequelize.QueryTypes.SELECT;
     const [yig, top, [trip], tolovlar] = await Promise.all([
       dostavchiYigildi(d.id, sana),
       dostavchiTopshirildi(d.id, sana),
       sequelize.query(`SELECT id, raqam, holat, boshlangan_vaqt, tugagan_vaqt, naqd_elon FROM trip_sheet WHERE dostavchi_id=:id AND sana=:sana LIMIT 1`, { replacements: { id: d.id, sana }, type: Q }),
       sequelize.query(`SELECT id, mijoz_nomi, summa, manba_tur, izoh, sana FROM kassa
-        WHERE tur='kirim' AND tolov_usul='naqt' AND user_id=:id AND manba_tur IN ('dostavchik','mijoz_dostavchik') AND DATE(sana)=:sana ORDER BY sana`, { replacements: { id: d.id, sana }, type: Q }),
+        WHERE tur='kirim' AND tolov_usul='naqt' AND user_id=:id AND manba_tur IN ('dostavchik','mijoz_dostavchik') AND DATE(CONVERT_TZ(sana, '+00:00', :tz))=:sana ORDER BY sana`, { replacements: { id: d.id, sana, tz: tzOffset() }, type: Q }),
     ]);
     const yigildi = yig.summa, topshirildi = top.summa;
     res.send({
@@ -441,11 +442,23 @@ class DostavchiController extends BaseController {
   kassaQabul = async (req, res) => {
     const d = await DostavchiModel.findByPk(req.params.id);
     if (!d) throw new HttpException(404, 'Dostavchi topilmadi');
-    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.body.sana || '') ? req.body.sana : new Date().toISOString().slice(0, 10);
+    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.body.sana || '') ? req.body.sana : kunKey(new Date());
     const summa = Number(req.body.summa);
     if (!(summa >= 0)) throw new HttpException(400, "Summa noto'g'ri");
+    // Ixtiyoriy optimistik tekshiruv: klient ko'rgan "topshirildi" summasi. Bazadagidan farq
+    // qilsa (boshqa kassir parallel qabul qilgan) — 409, ikki marta qo'shilmaydi.
+    let kutilganTopshirilgan;
+    const kt = req.body.kutilgan_topshirilgan;
+    if (kt !== undefined && kt !== null && kt !== '') {
+      kutilganTopshirilgan = Number(kt);
+      if (!Number.isFinite(kutilganTopshirilgan) || kutilganTopshirilgan < 0) {
+        throw new HttpException(400, "kutilgan_topshirilgan noto'g'ri");
+      }
+    }
+    if (req.body.izoh != null && String(req.body.izoh).length > 2000) throw new HttpException(400, 'Izoh juda uzun');
     const natija = await dostavchiTopshir(d, sana, {
       summa, jami: false, izoh: req.body.izoh || null, userId: req.currentUser?.id || null,
+      kutilganTopshirilgan,
     });
     res.status(201).send({ ...natija.row.toJSON(), yigildi: natija.yigildi, topshirildi: natija.topshirildi, kerak: natija.kerak });
   };
@@ -495,14 +508,30 @@ class DostavchiController extends BaseController {
   };
 
   // ── DELETE /dostavchilar/:id ───────────────────────────────
+  // Butunlay o'chirish faqat TARIXI YO'Q dostavchi uchun: buyurtmalar (istalgan holat),
+  // kassa yozuvlari, inkassatsiya, reyslar, yetkazish urinish/qaytarishlari yoki unga bog'langan
+  // agent bo'lsa — hisobotlar va hisob-kitob buzilmasin, o'rniga nofaol qilinadi.
+  // Tekshiruv va o'chirish bitta tranzaksiyada, dostavchi qatori qulflangan holda.
   delete = async (req, res) => {
-    const d = await DostavchiModel.findByPk(req.params.id);
-    if (!d) throw new HttpException(404, 'Dostavchi topilmadi');
-    const aktiv = await ArizaModel.count({
-      where: { dostavchi_id: d.id, holat: { [Op.in]: ['tasdiqlangan', 'yigilmoqda', 'yolda'] } },
+    await sequelize.transaction(async (t) => {
+      const d = await DostavchiModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!d) throw new HttpException(404, 'Dostavchi topilmadi');
+      const [r] = await sequelize.query(`
+        SELECT
+          (SELECT COUNT(*) FROM ariza WHERE dostavchi_id = :id OR yetkazgan_dostavchi_id = :id) AS ariza,
+          (SELECT COUNT(*) FROM kassa WHERE user_id = :id AND manba_tur IN ('dostavchik','mijoz_dostavchik')) AS kassa,
+          (SELECT COUNT(*) FROM inkassatsiya WHERE dostavchi_id = :id) AS inkassatsiya,
+          (SELECT COUNT(*) FROM trip_sheet WHERE dostavchi_id = :id) AS trip,
+          (SELECT COUNT(*) FROM yetkazish_urinish WHERE dostavchi_id = :id) AS urinish,
+          (SELECT COUNT(*) FROM yetkazish_qaytarish WHERE dostavchi_id = :id) AS qaytarish,
+          (SELECT COUNT(*) FROM agent WHERE linked_dostavchi_id = :id) AS agent`,
+      { replacements: { id: d.id }, type: sequelize.QueryTypes.SELECT, transaction: t });
+      const tarix = Object.values(r || {}).some(v => Number(v) > 0);
+      if (tarix) {
+        throw new HttpException(400, "Bu dostavchining tarixi bor (buyurtmalar, kassa, inkassatsiya yoki reyslar) — o'chirib bo'lmaydi, o'rniga nofaol qiling");
+      }
+      await d.destroy({ transaction: t });
     });
-    if (aktiv > 0) throw new HttpException(400, "Bu dostavchida aktiv buyurtmalar bor, o'chirib bo'lmaydi");
-    await d.destroy();
     res.send({ message: "O'chirildi" });
   };
 

@@ -12,6 +12,7 @@
  *  • Ichki ko'chirish (avtolavka yuklash/qabul) savdo ham, kirim ham emas.
  */
 const sequelize = require('../db/db-sequelize');
+const HttpException = require('./HttpException.utils');
 
 const ICHKI = ['yuklash', 'qabul'];            // tovar_register.manba_tur — ichki ko'chirish
 const TANNARX_MANBA = ['prixod', 'ishlab_chiqarish'];   // kirim narxi manbai: xarid va o'zimiz ishlab chiqargan mahsulot
@@ -32,13 +33,33 @@ const pad = v => String(v).padStart(2, '0');
 const kunKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const KUN_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** So'rovdagi davr: chegaralar, kunlar soni, guruhlash qadami va oldingi teng davr */
+/** Qat'iy YYYY-MM-DD va haqiqiy kalendar sanasi (2026-02-31, 2026-13-01 emas) */
+function sanaTogrimi(v) {
+  if (typeof v !== 'string' || !KUN_RE.test(v)) return false;
+  const [y, m, d] = v.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+}
+const MAX_DAVR_KUN = 366;
+
+/**
+ * So'rovdagi davr: chegaralar, kunlar soni, guruhlash qadami va oldingi teng davr.
+ * Berilgan, lekin noto'g'ri sana (format yoki kalendar) → 400; davr 366 kundan oshsa → 400.
+ */
 function davr(q = {}, standartKun = 30) {
+  const tekshir = (v, nomi) => {
+    if (v === undefined || v === null || v === '') return null;
+    if (!sanaTogrimi(v)) throw new HttpException(400, `${nomi} YYYY-MM-DD formatda bo'lishi kerak`);
+    return v;
+  };
   const bugun = new Date();
-  const gacha = KUN_RE.test(q.gacha || '') ? q.gacha : kunKey(bugun);
+  const gacha = tekshir(q.gacha, 'gacha') || kunKey(bugun);
   const d0 = new Date(bugun); d0.setDate(d0.getDate() - (standartKun - 1));
-  let dan = KUN_RE.test(q.dan || '') ? q.dan : kunKey(d0);
+  let dan = tekshir(q.dan, 'dan') || kunKey(d0);
   if (dan > gacha) dan = gacha;
+  if ((new Date(`${gacha}T00:00:00`) - new Date(`${dan}T00:00:00`)) / 86400000 + 1 > MAX_DAVR_KUN) {
+    throw new HttpException(400, `Davr ${MAX_DAVR_KUN} kundan oshmasligi kerak`);
+  }
 
   const from = new Date(`${dan}T00:00:00`);
   const to   = new Date(`${gacha}T23:59:59.999`);
@@ -176,7 +197,7 @@ const TOLOV_NOM = { naqd: 'Naqd', plastik: 'Plastik / bank', qarz: 'Qarzga (nasi
 
 module.exports = {
   ICHKI, TANNARX_MANBA, BRAK_OMBOR, AGENT_OMBOR,
-  tzOffset, kunKey, davr, guruhSql, guruhKalitlari,
+  tzOffset, kunKey, sanaTogrimi, davr, guruhSql, guruhKalitlari,
   tannarxXaritasi, sotuvQatorlari, qaytarishQatorlari, sotuvTahlil,
   tolovKalit, TOLOV_NOM, n, yax, miq, foiz,
 };

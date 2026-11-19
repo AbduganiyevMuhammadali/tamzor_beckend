@@ -6,6 +6,10 @@ const Role = require('../utils/userRoles.utils');
 const awaitHandlerFactory = require('../middleware/awaitHandlerFactory.middleware');
 const joiMiddleware = require('../middleware/joi.middleware');
 const { userSchemas } = require('../middleware/validators/userValidator.middleware');
+const { loginRateLimit } = require('../middleware/rateLimit.middleware');
+
+// Parol tanlashdan himoya: IP + username bo'yicha 15 daqiqada 10 ta xato urinish → 429
+const loginLimit = loginRateLimit({ maks: 10, oynaMs: 15 * 60 * 1000, loginMaydoni: (req) => (req.body && req.body.username) || '' });
 
 
 router.get('/', auth(), awaitHandlerFactory(userController.getAll));
@@ -18,6 +22,6 @@ router.post('/', auth(Role.Admin), joiMiddleware(userSchemas.create), awaitHandl
 router.patch('/id/:id', auth(), joiMiddleware(userSchemas.update), awaitHandlerFactory(userController.update));
 router.delete('/id/:id', auth(Role.Admin), awaitHandlerFactory(userController.delete));
 
-router.post('/login', joiMiddleware(userSchemas.login), awaitHandlerFactory(userController.userLogin));
+router.post('/login', loginLimit, joiMiddleware(userSchemas.login), awaitHandlerFactory(userController.userLogin));
 
 module.exports = router;

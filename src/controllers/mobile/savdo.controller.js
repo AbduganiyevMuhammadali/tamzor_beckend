@@ -5,7 +5,7 @@ const KassaModel = require('../../models/kassa.model');
 const HttpException = require('../../utils/HttpException.utils');
 const { generateRaqam } = require('../../utils/arizaRaqam.utils');
 const { kreditTekshir } = require('../../utils/kreditLimit.utils');
-const { ok, requireRole, mobilVaqt, mobilKalit, takrorXato } = require('./shared');
+const { ok, requireRole, mobilVaqt, mobilKalit, takrorXato, summaOl } = require('./shared');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { agentOmbori, ASOSIY_OMBOR } = require('../../utils/ombor.utils');
@@ -15,6 +15,7 @@ const { turkumToldir } = require('../../utils/turkum.utils');
 const { reytingYoz } = require('../../utils/reyting.utils');
 const { TashrifModel } = require('../../models/marshrut.model');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
+const { kunKey } = require('../../utils/tahlil.utils');   // lokal (server/biznes) kun — UTC emas
 
 /* Avtolavka: agent omboridagi qoldiq, tovar bo'yicha */
 async function agentOmborQoldiq(ombor, transaction) {
@@ -32,7 +33,7 @@ async function agentOmborQoldiq(ombor, transaction) {
    chiqadi va sana noto'g'ri saqlanadi. */
 function sanaNormalla(v) {
   if (!v) return null;
-  if (v instanceof Date) return isNaN(+v) ? null : v.toISOString().slice(0, 10);
+  if (v instanceof Date) return isNaN(+v) ? null : kunKey(v);   // lokal kun (UTC 00:00–05:00 siljimasin)
   const s = String(v).trim();
   if (!s) return null;
   // 24.07.2026 yoki 24/07/2026
@@ -60,10 +61,19 @@ const r2 = (v) => Math.round(v * 100) / 100;
 // Miqdor (kolbo = umumiy dona) > 0 va narx >= 0 bo'lishi shart. Qator summasi SERVERDA
 // narx × miqdor bo'yicha hisoblanadi; ilova yuborgan summa faqat 1 so'mgacha yaxlitlash
 // farqi bo'lsa qabul qilinadi (APK ko'rsatgan raqam bilan mos qolishi uchun).
+const MAX_QATOR = 500;   // bitta hujjatdagi tovar qatorlari chegarasi
+function qatorlarniTekshir(list) {
+  if (list.length > MAX_QATOR) throw new HttpException(400, `Bitta hujjatda ${MAX_QATOR} tadan ortiq tovar qatori bo'lishi mumkin emas`);
+  return list;
+}
 const mapQator = (p) => {
   if (!p || typeof p !== 'object') throw new HttpException(400, "Tovar qatori noto'g'ri");
   const nomi = p.productName || p.tovar || '';
   const kim = nomi || (p.tovarId ? `#${p.tovarId}` : 'tovar');
+  // tovarId — musbat butun son bo'lishi shart (aks holda qoldiq tekshiruvi va ombor
+  // harakati shu qatorni jim o'tkazib yuborardi)
+  const tovarId = son(p.tovarId);
+  if (!Number.isInteger(tovarId) || tovarId <= 0) throw new HttpException(400, `"${kim}" — tovarId noto'g'ri`);
   const miqdor = son(p.kolbo ?? p.sht);
   if (!Number.isFinite(miqdor) || miqdor <= 0) throw new HttpException(400, `"${kim}" miqdori noto'g'ri (0 dan katta bo'lishi kerak)`);
   const narx = son(p.yangiNarx ?? p.eskiNarx ?? 0);
@@ -73,7 +83,7 @@ const mapQator = (p) => {
   const ilova = son(p.yangisumma ?? p.eskisumma);
   const summa = Number.isFinite(ilova) && Math.abs(ilova - hisob) <= 1 ? r2(ilova) : hisob;
   return {
-    tovar_id: p.tovarId,
+    tovar_id: tovarId,
     tovar_nomi: nomi,
     shtrix_kod: p.shtrix_kod || null,
     narx,
@@ -126,7 +136,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
 
   // Qatorlar va jami SERVERDA hisoblanadi (ilova yuborgan itogSummaSumYangi ishlatilmaydi):
   // qator summasi = narx × miqdor, jami = qatorlar − chegirma (web "Yangi ariza" bilan bir xil).
-  const tayyorQatorlar = products.map(mapQator);
+  const tayyorQatorlar = qatorlarniTekshir(products).map(mapQator);
   const { chegirma, jami: itog } = jamiHisobla(tayyorQatorlar, body.skidkaSum, agent);
 
   // Avtolavkada joyida olingan naqd (qisman to'lov). Berilmasa — currency bo'yicha.
@@ -140,7 +150,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
   let tolovSana = null;
   if (turi === 'sotish' && qarzQism > 0.005 && body.tolovSana) {
     const s = sanaNormalla(body.tolovSana);
-    if (s && s >= vaqt.toISOString().slice(0, 10)) tolovSana = s;
+    if (s && s >= kunKey(vaqt)) tolovSana = s;
   }
 
   // Kredit limit / muddati o'tgan qarz tekshiruvi — faqat sotishda va faqat qarzga
@@ -158,7 +168,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
      ichida bo'lsa, shu tashrifga bog'lanadi. */
   const nuqta = koordinata(body);
   const masofa = nuqta ? masofaMetr(mijozOldin.lat, mijozOldin.lng, nuqta.lat, nuqta.lng) : null;
-  const bugunSana = vaqt.toISOString().slice(0, 10);
+  const bugunSana = kunKey(vaqt);   // tashrif.sana ham lokal kun bilan yoziladi
   let tashrif = null;
   if (agent && body.tashrifId) {
     tashrif = await TashrifModel.findOne({ where: { id: body.tashrifId, agent_id: agent.id } });
@@ -207,14 +217,23 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
 
     if (avtolavka) {
       // Mashina qoldig'i — tovarlar tranzaksiya boshida qulflangan
+      // Bir tovar bir necha qatorda kelishi mumkin — tovar bo'yicha YIG'INDI tekshiriladi
+      // (zaxiraTekshir bilan bir xil), aks holda har qator alohida sig'ib, jami qoldiqdan oshardi.
       const qoldiq = await agentOmborQoldiq(ombor, t);
+      const kerakMap = new Map();
       for (const q of qatorlar) {
         if (!q.tovar_id) continue;
-        const kerak = parseFloat(q.jami_dona) || 0;
-        const bor = qoldiq[q.tovar_id] || 0;
+        const id = Number(q.tovar_id);
+        const x = kerakMap.get(id) || { nomi: q.tovar_nomi || `#${id}`, dona: 0 };
+        x.dona += parseFloat(q.jami_dona) || 0;
+        kerakMap.set(id, x);
+      }
+      for (const [id, x] of kerakMap) {
+        const kerak = +x.dona.toFixed(3);
+        const bor = qoldiq[id] || 0;
         if (kerak > bor + 0.001) {
           throw new HttpException(400,
-            `"${q.tovar_nomi || `#${q.tovar_id}`}" mashinada yetarli emas. Kerak: ${kerak}, bor: ${bor}`);
+            `"${x.nomi}" mashinada yetarli emas. Kerak: ${kerak}, bor: ${bor}`);
         }
       }
     }
@@ -407,7 +426,7 @@ class MobileSavdoController {
     const { docId, products } = req.body;
     const list = Array.isArray(products) ? products : [];
     if (!list.length) throw new HttpException(400, 'products majburiy');
-    const yangiQatorlar = list.map(mapQator);   // miqdor/narx validatsiyasi tranzaksiyadan oldin
+    const yangiQatorlar = qatorlarniTekshir(list).map(mapQator);   // miqdor/narx validatsiyasi tranzaksiyadan oldin
 
     await sequelize.transaction(async (t) => {
       const ariza = await qulflabOl(ArizaModel, docId, t);
@@ -441,13 +460,18 @@ class MobileSavdoController {
   savePayment = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
     const { klientId, paymentSum = [], komment, data: sana } = req.body;
-    const qismlar = (Array.isArray(paymentSum) ? paymentSum : [])
-      .map(p => parseFloat(p && p.summa != null ? p.summa : p) || 0);
-    if (qismlar.some(x => x < 0)) throw new HttpException(400, "To'lov summasi noto'g'ri");
+    // Har qism chekli, manfiy emas va ≤ 1e12 (Infinity/NaN/"1e400" — 400)
+    const royxat = Array.isArray(paymentSum) ? paymentSum : [];
+    if (royxat.length > 50) throw new HttpException(400, "To'lov qismlari juda ko'p");
+    const qismlar = royxat
+      .map(p => summaOl(p && typeof p === 'object' ? p.summa : p, { bosh: 0, xabar: "To'lov summasi noto'g'ri" }));
     const jami = Math.round(qismlar.reduce((s, x) => s + x, 0) * 100) / 100;
-    if (jami <= 0) throw new HttpException(400, "To'lov summasi noto'g'ri");
+    if (!(jami > 0) || jami > 1e12) throw new HttpException(400, "To'lov summasi noto'g'ri");
 
     if (!klientId) throw new HttpException(400, 'klientId majburiy');
+    // Faqat agent ishlaydigan mijoz (info/updateClient bilan bir xil qoida; avtolavka — hamma mijoz)
+    const mijozOldin = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id'] });
+    if (!mijozOldin) throw new HttpException(404, 'Mijoz topilmadi');
 
     // Oflayn navbat: bir xil to'lov qayta kelsa — ikkinchi marta yozilmaydi.
     // Tez tekshiruv shu yerda, yakuniy himoya — kassa.mobil_id UNIQUE (parallel takror

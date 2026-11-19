@@ -48,10 +48,43 @@ function mobilVaqt(v) {
   if (isNaN(t) || t > now + 5 * 60 * 1000 || t < now - 7 * 24 * 3600 * 1000) return new Date();
   return d;
 }
-/* Ilova bergan takrorlanmas kalit (UUID va shu kabi) — faqat xavfsiz belgilar */
+/* Ilova bergan takrorlanmas kalit (UUID va shu kabi) — faqat xavfsiz belgilar.
+   Berilmasa — null (takror tekshiruvi yo'q). Berilgan, lekin formati buzuq bo'lsa — 400:
+   avval jim null qaytarilardi va oflayn navbat takrori ikki marta yozilib ketardi. */
 function mobilKalit(v) {
-  const s = String(v || '').trim();
-  return /^[A-Za-z0-9_.:-]{8,64}$/.test(s) ? s : null;
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (!/^[A-Za-z0-9_.:-]{8,64}$/.test(s)) {
+    const HttpException = require('../../utils/HttpException.utils');
+    throw new HttpException(400, "mobilId noto'g'ri (8–64 ta harf, raqam yoki _ . : - belgisi)");
+  }
+  return s;
+}
+
+/* Pul summasi: chekli son, 0 dan kichik emas va aqlli yuqori chegaradan oshmaydi.
+   parseFloat("Infinity") / "1e400" kabi qiymatlar bazaga yetib bormasin.
+   Bo'sh qiymat — `bosh` (standart null). Noto'g'ri bo'lsa 400. */
+const MAX_SUMMA = 1e12;
+function summaOl(v, { bosh = null, xabar = "Summa noto'g'ri" } = {}) {
+  if (v === undefined || v === null || v === '') return bosh;
+  const x = typeof v === 'number' ? v : Number(String(v).trim().replace(/\s+/g, '').replace(',', '.'));
+  if (!Number.isFinite(x) || x < 0 || x > MAX_SUMMA) {
+    const HttpException = require('../../utils/HttpException.utils');
+    throw new HttpException(400, xabar);
+  }
+  return x;
+}
+
+/* Koordinata juftligi to'g'rimi: chekli son, |lat| ≤ 90, |lng| ≤ 180, (0,0) emas.
+   To'g'ri bo'lsa { lat, lng }, aks holda null (chaqiruvchi koordinatani e'tiborsiz qoldiradi —
+   eski APK ba'zan bo'sh/0 yuboradi, shuning uchun rad etilmaydi). */
+function koordinataJuft(lat, lng) {
+  if (lat === undefined || lat === null || lat === '' || lng === undefined || lng === null || lng === '') return null;
+  const a = Number(lat), o = Number(lng);
+  if (!Number.isFinite(a) || !Number.isFinite(o) || Math.abs(a) > 90 || Math.abs(o) > 180) return null;
+  if (a === 0 && o === 0) return null;
+  return { lat: a, lng: o };
 }
 
 /* Sotmaslik va tashrif sabablari — getReason, clientNotSell va hisobotlar bitta ro'yxatdan foydalanadi */
@@ -113,5 +146,5 @@ async function mijozRuxsat(req, mijoz) {
 
 module.exports = {
   ok, raw, fail, requireRole, WEEK_KEYS, PAGE_SIZE, PRICE_TYPES, VALYUTALAR, mobilVaqt, mobilKalit, SABABLAR, sababNomi,
-  dostavchiIdOl, takrorXato, mijozRuxsat,
+  dostavchiIdOl, takrorXato, mijozRuxsat, summaOl, MAX_SUMMA, koordinataJuft,
 };

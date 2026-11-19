@@ -4,53 +4,70 @@ const { ArizaModel } = require('../../models/ariza.model');
 const HttpException = require('../../utils/HttpException.utils');
 const { ok, requireRole, mobilVaqt } = require('./shared');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
+const { kunKey } = require('../../utils/tahlil.utils');
+const { qulflabOl } = require('../../utils/qulf.utils');
+const AgentModel = require('../../models/agent.model');
+const sequelize = require('../../db/db-sequelize');
 
 /* ── Check-in / Check-out (yangi maxsus endpoint — asl API hujjatida yo'q) ── */
 class MobileTashrifController {
   // POST checkIn/ — agent do'konga keldi. Body: { klientId, lat, long }
   checkIn = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
-    const { klientId, lat, long } = req.body;
+    const { klientId } = req.body;
     if (!klientId) throw new HttpException(400, 'klientId majburiy');
 
     const agent = req.currentAgent || {};
-    const mijoz = await MijozModel.findByPk(klientId);
-    if (!mijoz) throw new HttpException(404, req.mf('Not found'));
+    const mijozOldin = await MijozModel.findByPk(klientId, { attributes: ['id'] });
+    if (!mijozOldin) throw new HttpException(404, req.mf('Not found'));
 
     const vaqt = mobilVaqt(req.body.vaqt);   // oflayn bo'lsa — haqiqiy kelgan vaqti
-    const bugun = vaqt.toISOString().slice(0, 10);
-    const reja = await MarshrutRejaModel.findOne({ where: { agent_id: agent.id, mijoz_id: klientId, sana: bugun } });
-
-    // Shu kun uchun ochiq (checkout qilinmagan) tashrif bo'lsa — qayta ochilmasin
-    const ochiq = await TashrifModel.findOne({
-      where: { agent_id: agent.id, mijoz_id: klientId, sana: bugun, checkout_vaqt: null },
-    });
-    if (ochiq) { ok(res, { tashrifId: ochiq.id, davomEtyapti: true }); return; }
-
-    const masofa = masofaMetr(mijoz.lat, mijoz.lng, lat, long);
-    // Mijoz nuqtasi hali yo'q — agent do'kon oldida turibdi, shu nuqta mijoz manzili bo'ladi
+    const bugun = kunKey(vaqt);               // lokal kun (UTC emas — 00:00–05:00 oldingi kunga tushmasin)
+    // Koordinata: chekli, |lat| ≤ 90, |lng| ≤ 180 — aks holda e'tiborsiz (eski APK bo'sh/0 yuboradi)
     const nuqta = koordinata(req.body);
-    // Koordinata faqat O'Z mijoziga yoziladi — begona mijozning manzilini boshqa agent o'zgartirmasin
-    const ozMijozi = Number(mijoz.agent_id) === Number(agent.id);
-    if (nuqta && ozMijozi && (mijoz.lat == null || mijoz.lng == null)) {
-      await mijoz.update({ lat: nuqta.lat, lng: nuqta.lng });
-    }
-    const tashrif = await TashrifModel.create({
-      reja_id: reja ? reja.id : null,
-      agent_id: agent.id,
-      agent_nomi: agent.fullname,
-      mijoz_id: klientId,
-      mijoz_nomi: mijoz.nomi,
-      checkin_vaqt: vaqt,
-      checkin_lat: lat ?? null,
-      checkin_lng: long ?? null,
-      checkin_masofa: masofa,
-      sana: bugun,
+
+    // Ochiq tashrif tekshiruvi va yaratish BITTA tranzaksiyada, agent qatori qulflangan holda:
+    // ikki marta bosish / oflayn qayta yuborish ikkita ochiq tashrif yaratmaydi.
+    const natija = await sequelize.transaction(async (t) => {
+      await qulflabOl(AgentModel, agent.id, t, { attributes: ['id'] });
+      const ochiq = await TashrifModel.findOne({
+        where: { agent_id: agent.id, mijoz_id: klientId, sana: bugun, checkout_vaqt: null },
+        order: [['id', 'DESC']], transaction: t,
+      });
+      if (ochiq) return { ochiq };
+
+      const mijoz = await MijozModel.findByPk(klientId, { transaction: t });
+      if (!mijoz) throw new HttpException(404, req.mf('Not found'));
+      const reja = await MarshrutRejaModel.findOne({ where: { agent_id: agent.id, mijoz_id: klientId, sana: bugun }, transaction: t });
+      const masofa = nuqta ? masofaMetr(mijoz.lat, mijoz.lng, nuqta.lat, nuqta.lng) : null;
+      // Mijoz nuqtasi hali yo'q — agent do'kon oldida turibdi, shu nuqta mijoz manzili bo'ladi.
+      // Koordinata faqat O'Z mijoziga yoziladi — begona mijozning manzilini boshqa agent o'zgartirmasin
+      const ozMijozi = Number(mijoz.agent_id) === Number(agent.id);
+      if (nuqta && ozMijozi && (mijoz.lat == null || mijoz.lng == null)) {
+        await mijoz.update({ lat: nuqta.lat, lng: nuqta.lng }, { transaction: t });
+      }
+      const tashrif = await TashrifModel.create({
+        reja_id: reja ? reja.id : null,
+        agent_id: agent.id,
+        agent_nomi: agent.fullname,
+        mijoz_id: klientId,
+        mijoz_nomi: mijoz.nomi,
+        checkin_vaqt: vaqt,
+        checkin_lat: nuqta ? nuqta.lat : null,
+        checkin_lng: nuqta ? nuqta.lng : null,
+        checkin_masofa: masofa,
+        sana: bugun,
+      }, { transaction: t });
+      return { tashrif, masofa, belgilandi: masofa == null && !!nuqta && ozMijozi };
     });
+
+    // Shu kun uchun ochiq (checkout qilinmagan) tashrif bo'lsa — qayta ochilmaydi, borini qaytaramiz
+    if (natija.ochiq) { ok(res, { tashrifId: natija.ochiq.id, davomEtyapti: true }); return; }
+    const { tashrif, masofa } = natija;
     ok(res, {
       tashrifId: tashrif.id, masofa,
       uzoqda: masofa != null && masofa > SOTUV_RADIUS_M,
-      mijozNuqtasiBelgilandi: masofa == null && !!nuqta && ozMijozi,
+      mijozNuqtasiBelgilandi: natija.belgilandi,
     }, 'Check-in qayd qilindi');
   };
 
@@ -59,7 +76,7 @@ class MobileTashrifController {
   // Oflayn ilova tashrifId ni bilmaydi — o'rniga { klientId }: shu mijozdagi oxirgi ochiq tashrif yopiladi.
   checkOut = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
-    const { tashrifId, klientId, lat, long, natija, arizaId } = req.body;
+    const { tashrifId, klientId, natija, arizaId } = req.body;
     if (!tashrifId && !klientId) throw new HttpException(400, 'tashrifId yoki klientId majburiy');
 
     const agentId = (req.currentAgent || {}).id;
@@ -74,6 +91,7 @@ class MobileTashrifController {
     if (tashrif.checkout_vaqt) { ok(res, { tashrifId: tashrif.id }, 'Allaqachon yopilgan'); return; }
 
     const checkoutVaqt = mobilVaqt(req.body.vaqt);
+    const chiqish = koordinata(req.body);   // noto'g'ri koordinata e'tiborsiz qoldiriladi
     const davomiylik = Math.round((checkoutVaqt.getTime() - new Date(tashrif.checkin_vaqt).getTime()) / 1000);
 
     // Ilova natija/arizaId yubormasa — mavjud qiymat saqlanadi (masalan createAriza tashrifga
@@ -86,8 +104,8 @@ class MobileTashrifController {
     }
     await tashrif.update({
       checkout_vaqt: checkoutVaqt,
-      checkout_lat: lat ?? null,
-      checkout_lng: long ?? null,
+      checkout_lat: chiqish ? chiqish.lat : null,
+      checkout_lng: chiqish ? chiqish.lng : null,
       davomiylik_sek: davomiylik,
       natija: natija === 'savdo' || natija === 'sotmaslik' ? natija : (tashrif.natija || 'ochiq'),
       ariza_id: arizaIdYangi,
@@ -99,7 +117,7 @@ class MobileTashrifController {
   marshrutReja = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
     const agent = req.currentAgent || {};
-    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '') ? req.query.sana : new Date().toISOString().slice(0, 10);
+    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '') ? req.query.sana : kunKey(new Date());
 
     const rejalar = await MarshrutRejaModel.findAll({
       where: { agent_id: agent.id, sana },
@@ -138,7 +156,7 @@ class MobileTashrifController {
   bugungiTashriflar = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
     const agent = req.currentAgent || {};
-    const bugun = new Date().toISOString().slice(0, 10);
+    const bugun = kunKey(new Date());
     const rows = await TashrifModel.findAll({
       where: { agent_id: agent.id, sana: bugun },
       order: [['checkin_vaqt', 'ASC']],

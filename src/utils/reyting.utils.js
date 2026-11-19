@@ -57,6 +57,9 @@ async function qoidalar(transaction = null) {
 }
 
 async function qoidalarniYoz(body) {
+  // Avval HAMMA kalit tekshiriladi, keyin hammasi bitta tranzaksiyada yoziladi —
+  // bittasi xato bo'lsa qolganlari ham yozilmaydi (yarim saqlangan sozlama bo'lmaydi)
+  const yoz = [];
   for (const [k, kalit] of Object.entries(KALIT)) {
     if (body[k] === undefined) continue;
     const v = Math.round(Number(body[k]));
@@ -65,8 +68,15 @@ async function qoidalarniYoz(body) {
     if (k !== 'kritik_soni' && Math.abs(v) > 100) throw new HttpException(400, 'Ball −100…+100 oralig\'ida bo\'lsin');
     if ((k === 'buyurtma' || k === 'tolov_qabul') && v < 0) throw new HttpException(400, 'Zakaz va to\'lov uchun ball manfiy bo\'lmaydi');
     if ((k === 'rad_etildi' || k === 'tolov_surildi') && v > 0) throw new HttpException(400, 'Rad etish va to\'lov surilishi uchun ball musbat bo\'lmaydi');
-    const [row] = await SozlamaModel.findOrCreate({ where: { kalit }, defaults: { qiymat: String(v), izoh: `Mijoz reytingi: ${k}` } });
-    await row.update({ qiymat: String(v) });
+    yoz.push({ k, kalit, v });
+  }
+  if (yoz.length) {
+    await sequelize.transaction(async (transaction) => {
+      for (const { k, kalit, v } of yoz) {
+        const [row] = await SozlamaModel.findOrCreate({ where: { kalit }, defaults: { qiymat: String(v), izoh: `Mijoz reytingi: ${k}` }, transaction });
+        await row.update({ qiymat: String(v) }, { transaction });
+      }
+    });
   }
   return qoidalar();
 }

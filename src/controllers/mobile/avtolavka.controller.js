@@ -21,7 +21,7 @@ const { narxXaritasi } = require('../../utils/narx.utils');
 const { MijozModel, MijozKategoriyaModel } = require('../../models/mijoz.model');
 const { MarshrutRejaModel, TashrifModel } = require('../../models/marshrut.model');
 const { NarxRuyxatModel, NarxRuyxatQatorModel } = require('../../models/narxRuyxat.model');
-const { ok, fail, SABABLAR } = require('./shared');
+const { ok, fail, SABABLAR, summaOl } = require('./shared');
 const { ASOSIY_OMBOR, agentOmbori } = require('../../utils/ombor.utils');
 const AgentModel = require('../../models/agent.model');
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
@@ -89,7 +89,7 @@ function mobilQatorlar(products) {
     tovar_id: parseInt(p.tovarId ?? p.tovar_id, 10),
     dona: parseFloat(p.kolbo ?? p.dona ?? p.sht ?? 0),
     blok: parseFloat(p.pachka ?? p.blok ?? 0) || 0,
-  })).filter(q => q.tovar_id && q.dona > 0);
+  })).filter(q => q.tovar_id > 0 && Number.isFinite(q.dona) && q.dona > 0 && q.dona <= 1e9);
 }
 
 /* Agent mashinasidagi hozirgi tovarlar, narx bilan */
@@ -486,7 +486,8 @@ class MobileAvtolavkaController {
     }
 
     const naqdRaw = req.body.naqdSumma ?? req.body.naqd;
-    const naqdElon = naqdRaw === undefined || naqdRaw === null || naqdRaw === '' ? null : Math.max(0, n(naqdRaw));
+    // Chekli, 0..1e12 — Infinity/NaN/manfiy 400
+    const naqdElon = summaOl(naqdRaw, { bosh: null, xabar: "Naqd summa noto'g'ri" });
     const izoh = String(req.body.izoh ?? req.body.komment ?? '').trim() || null;
 
     // Agent qatori qulflanib, kun holati shu tranzaksiya ichida qayta hisoblanadi —

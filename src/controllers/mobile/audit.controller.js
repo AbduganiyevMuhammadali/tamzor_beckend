@@ -3,8 +3,27 @@ const { AuditModel } = require('../../models/hisobot.model');
 const { MijozModel } = require('../../models/mijoz.model');
 const { Op, fn, col } = require('sequelize');
 const HttpException = require('../../utils/HttpException.utils');
-const { ok, SABABLAR } = require('./shared');
+const { ok, SABABLAR, koordinataJuft } = require('./shared');
 const { ochiqRollar, rolOchiqEmasXabari } = require('../../utils/mobilRollar.utils');
+
+/* Mobil audit sanasi: "2026.11.19", "2026-11-19", "19.11.2026" (vaqt bilan ham) yoki ISO.
+   Berilmasa — hozir. Berilgan, lekin tushunarsiz bo'lsa — 400 (avval Invalid Date bazaga
+   yetib, 500 qaytarardi). */
+function auditSana(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return new Date();
+  const s = String(raw).trim();
+  let d = null;
+  let m = s.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) d = new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+  if (!d && (m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?:[ T]|\/\/)?(?:(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/))) {
+    d = new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+  }
+  if (!d) d = new Date(s);
+  if (isNaN(d.getTime()) || d.getFullYear() < 2000 || d.getFullYear() > 2100) {
+    throw new HttpException(400, "Sana noto'g'ri");
+  }
+  return d;
+}
 
 /* ── Audit (hujjat 3.6, 3.7, 8.1, 8.2) ────────────────────────────────────── */
 class MobileAuditController {
@@ -41,8 +60,7 @@ class MobileAuditController {
     const yollar = (req.files || []).map(f => `/uploads/audit/${f.filename}`);
 
     if (yollar.length) {
-      let sana = date ? new Date(String(date).replace(/\./g, '-')) : new Date();
-      if (isNaN(sana.getTime())) sana = new Date();
+      const sana = auditSana(date);
       // Shu xodim + klient (yoki aniq audit_id) uchun oxirgi audit yozuvi (chekUp dan kelgan)
       const where = { agent_id: agent.id };
       if (auditId) where.id = auditId;
@@ -88,6 +106,8 @@ class MobileAuditController {
     }
     const mijoz = b.client_id ? await MijozModel.findByPk(b.client_id) : null;
     if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
+    const sana = auditSana(b.date);
+    const nuqta = koordinataJuft(b.lat, b.long ?? b.lng);   // noto'g'ri koordinata e'tiborsiz
 
     await AuditModel.create({
       agent_id:     agent.id || null,
@@ -103,11 +123,11 @@ class MobileAuditController {
       taklif:       b.offer ?? null,
       kirish_vaqt:  b.enterTime ?? null,
       chiqish_vaqt: b.exitTime ?? null,
-      lat:          b.lat ?? null,
-      lng:          b.long ?? null,
+      lat:          nuqta ? nuqta.lat : null,
+      lng:          nuqta ? nuqta.lng : null,
       tovarlar:     Array.isArray(b.goods) ? b.goods : [],
       rasmlar:      [],
-      sana:         b.date ? new Date(String(b.date).replace(/\./g, '-')) : new Date(),
+      sana,
     });
 
     ok(res, { date: b.date || '' });

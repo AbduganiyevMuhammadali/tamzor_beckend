@@ -6,6 +6,10 @@ const uploadAudit = require('../middleware/uploadAudit.middleware');
 const uploadKassa = require('../middleware/uploadKassa.middleware');
 const h = require('../middleware/awaitHandlerFactory.middleware');
 const mobilRol = require('../middleware/mobilRol.middleware');
+const { loginRateLimit } = require('../middleware/rateLimit.middleware');
+
+// Parol tanlashdan himoya: IP + login bo'yicha 15 daqiqada 10 ta xato urinish → 429
+const loginLimit = loginRateLimit({ maks: 10, oynaMs: 15 * 60 * 1000 });
 
 // .env MOBIL_ROLLAR — rol o'chirilgan bo'lsa shu guruh 403 qaytaradi
 const dostavchik = mobilRol('dostavchik');
@@ -18,7 +22,7 @@ router.get('/LoadConfig', h(c.loadConfig));
 router.get('/mobilSozlama', h(c.mobilSozlama));   // yangi ilova: rollar, chek rekvizitlari
 
 /* ── 1. Auth (token kerak emas) ────────────────────────────────────────── */
-router.post('/Login',    h(c.login));
+router.post('/Login',    loginLimit, h(c.login));
 router.get('/getFilial', h(c.getFilial));
 
 /* ── 1. User (token) ───────────────────────────────────────────────────── */

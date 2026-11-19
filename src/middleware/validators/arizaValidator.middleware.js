@@ -29,9 +29,9 @@ const create = Joi.object({
   ombor:          Joi.string().max(80).allow('', null).optional(),
   ekspeditor:     Joi.string().max(100).allow('', null).optional(),
   jonatish_sana:  Joi.string().isoDate().allow('', null).optional(),
-  izoh:           Joi.string().allow('', null).optional(),
-  qatorlar: Joi.array().items(qatorSchema).min(1).required()
-    .messages({ 'array.min': 'Kamida 1 ta tovar kiritilishi shart' }),
+  izoh:           Joi.string().max(2000).allow('', null).optional(),
+  qatorlar: Joi.array().items(qatorSchema).min(1).max(500).required()
+    .messages({ 'array.min': 'Kamida 1 ta tovar kiritilishi shart', 'array.max': "Bitta arizada 500 tadan ortiq qator bo'lmasin" }),
 });
 
 // Tahrir: hamma maydon ixtiyoriy va STANDART QIYMATSIZ — aks holda yuborilmagan
@@ -49,9 +49,9 @@ const update = Joi.object({
   ombor:          Joi.string().max(80).allow('', null).optional(),
   ekspeditor:     Joi.string().max(100).allow('', null).optional(),
   jonatish_sana:  Joi.string().isoDate().allow('', null).optional(),
-  izoh:           Joi.string().allow('', null).optional(),
-  qatorlar: Joi.array().items(qatorSchema).min(1).optional()
-    .messages({ 'array.min': 'Kamida 1 ta tovar kiritilishi shart' }),
+  izoh:           Joi.string().max(2000).allow('', null).optional(),
+  qatorlar: Joi.array().items(qatorSchema).min(1).max(500).optional()
+    .messages({ 'array.min': 'Kamida 1 ta tovar kiritilishi shart', 'array.max': "Bitta arizada 500 tadan ortiq qator bo'lmasin" }),
 }).unknown(false);
 
 const holatChange = Joi.object({

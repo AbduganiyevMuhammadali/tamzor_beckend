@@ -28,9 +28,19 @@ const qatorSchema = Joi.object({
   .or('narx', 'narx_usd')
   .messages({ 'object.missing': "Kirim narxi (so'm yoki $) kiritilishi shart" });
 
+// Hujjat sanasi: YYYY-MM-DD (ixtiyoriy vaqt/ISO qismi bilan) va haqiqiy sana bo'lishi shart.
+// Joi.date() ishlatilmaydi — u qiymatni Date obyektiga aylantirib, saqlanish formatini o'zgartiradi.
+const sanaSchema = Joi.string()
+  .pattern(/^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/)
+  .custom((v, h) => {
+    const d = new Date(v.slice(0, 10) + 'T00:00:00Z');
+    return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v.slice(0, 10) ? h.error('any.invalid') : v;
+  })
+  .messages({ 'string.pattern.base': "Sana noto'g'ri (YYYY-MM-DD)", 'any.invalid': "Sana noto'g'ri (YYYY-MM-DD)" });
+
 exports.prixodSchemas = {
   create: Joi.object({
-    sana:              Joi.string().required(),
+    sana:              sanaSchema.required(),
     yetkazuvchi:       Joi.string().max(120).allow('', null).optional(),
     yetkazuvchi_id:    Joi.number().integer().allow(null).optional(),
     tolov_turi:        Joi.string().valid('naqt', 'optom', 'chaka').allow(null).optional(),
@@ -41,7 +51,7 @@ exports.prixodSchemas = {
     qatorlar:          Joi.array().items(qatorSchema).min(0).default([]),
   }),
   update: Joi.object({
-    sana:              Joi.string().optional(),
+    sana:              sanaSchema.optional(),
     yetkazuvchi:       Joi.string().max(120).allow('', null).optional(),
     yetkazuvchi_id:    Joi.number().integer().allow(null).optional(),
     tolov_turi:        Joi.string().valid('naqt', 'optom', 'chaka').allow(null).optional(),

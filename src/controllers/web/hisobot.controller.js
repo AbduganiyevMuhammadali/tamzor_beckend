@@ -10,7 +10,7 @@ const AgentModel = require('../../models/agent.model');
 const DostavchiModel = require('../../models/dostavchi.model');
 const TovarModel = require('../../models/tovar.model');
 const HttpException = require('../../utils/HttpException.utils');
-const { dostavchiTopshir, dostavchiYigildi, dostavchiTopshirildi } = require('../../utils/dostavchiInkassatsiya.utils');
+const { dostavchiTopshir } = require('../../utils/dostavchiInkassatsiya.utils');
 const { Op, fn, col, literal } = require('sequelize');
 const sequelize = require('../../db/db-sequelize');
 const { tannarxXaritasi } = require('../../utils/tahlil.utils');
@@ -43,6 +43,47 @@ function chegaraSon(v, standart, max) {
   const n = parseInt(v, 10);
   if (!Number.isFinite(n) || n < 1) return standart;
   return Math.min(n, max);
+}
+/**
+ * Ixtiyoriy date_from/date_to → mahalliy kun chegaralari (Date, bazaga UTC bo'lib boradi).
+ * Noto'g'ri sana → 400. maxKun berilsa va ikkala chegara ham bo'lsa — davr cheklanadi.
+ */
+function davrOraliq(q = {}, { maxKun = null } = {}) {
+  const dan = sanaParam(q.date_from, null, 'date_from');
+  const gacha = sanaParam(q.date_to, null, 'date_to');
+  const from = dan ? new Date(`${dan}T00:00:00`) : null;
+  const to = gacha ? new Date(`${gacha}T23:59:59.999`) : null;
+  if (maxKun && from && to && (to - from) / 86400000 > maxKun) {
+    throw new HttpException(400, `Davr ${maxKun} kundan oshmasligi kerak`);
+  }
+  return { dan, gacha, from, to };
+}
+/** Sequelize sharti: { [Op.gte]: from, [Op.lte]: to } yoki null (davr berilmagan) */
+function davrSharti({ from, to }) {
+  if (!from && !to) return null;
+  const w = {};
+  if (from) w[Op.gte] = from;
+  if (to) w[Op.lte] = to;
+  return w;
+}
+/**
+ * Kunlik GPS treki — limit HAR AGENT uchun alohida (bitta umumiy limit oxirgi agentlarni
+ * jimgina kesib tashlardi). from/to — Date (mahalliy kun chegaralari). Natija:
+ * { rows (agent_id, sana bo'yicha tartiblangan), kesildi }.
+ */
+const GPS_AGENT_LIMIT = 5000;
+async function agentGpsTrek(ids, from, to, attributes) {
+  const rows = [];
+  let kesildi = false;
+  const BOLAK = 10;   // bir vaqtda ko'pi bilan 10 ta so'rov — pool to'lib qolmasin
+  for (let i = 0; i < ids.length; i += BOLAK) {
+    const qism = await Promise.all(ids.slice(i, i + BOLAK).map(id => AgentLocationModel.findAll({
+      where: { rol: 'agent', agent_id: id, sana: { [Op.between]: [from, to] } },
+      attributes, order: [['sana', 'ASC']], raw: true, limit: GPS_AGENT_LIMIT,
+    })));
+    for (const q of qism) { if (q.length >= GPS_AGENT_LIMIT) kesildi = true; rows.push(...q); }
+  }
+  return { rows, kesildi };
 }
 
 // Barcha tovar+ombor pozitsiyalari uchun FIFO qoldiq (dona + tannarx summasi).
@@ -120,15 +161,12 @@ class HisobotController {
 
   // Umumiy statistika kartochkalari
   umumiy = async (req, res) => {
-    const { date_from, date_to, ombor } = req.query;
+    const { ombor } = req.query;
 
     const where = { tur: 'kirim', manba_tur: 'prixod' };
     if (ombor)     where.ombor = ombor;
-    if (date_from || date_to) {
-      where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) where.sana = davrW;
 
     const [kirim, oylik, prixodSon] = await Promise.all([
       // Jami kirim summasi
@@ -200,14 +238,11 @@ class HisobotController {
 
   // Turkum bo'yicha kirim
   turkumHisobot = async (req, res) => {
-    const { date_from, date_to, ombor } = req.query;
+    const { ombor } = req.query;
     const where = { tur: 'kirim', manba_tur: 'prixod' };
     if (ombor)     where.ombor = ombor;
-    if (date_from || date_to) {
-      where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) where.sana = davrW;
 
     const rows = await TovarRegisterModel.findAll({
       where,
@@ -236,7 +271,8 @@ class HisobotController {
   // Foyda taxminiy — o'rtacha kirim narxiga asoslanadi (aniq FIFO/lot-based
   // foyda MODUL 5 — WMS/yaroqlilik muddati bilan birga quriladi).
   tovarHisobot = async (req, res) => {
-    const { date_from, date_to, turkum, search } = req.query;
+    const { turkum, search } = req.query;
+    const D = davrOraliq(req.query, { maxKun: 366 });   // noto'g'ri sana → 400, davr ≤ 366 kun
 
     // Tovar nomi/turkumi TovarModel'dan olinadi (spravochnik) — tovar_register'da
     // bir xil tovar turli yozuvlarda turli turkum/nom bilan kelishi mumkin
@@ -277,13 +313,9 @@ class HisobotController {
     const chiqimMap = {};
     chiqimRows.forEach(r => { chiqimMap[r.tovar_id] = Math.abs(Number(r.chiqim_dona || 0)); });
 
-    // 3) Yetkazilgan sotuvlar (davr bo'yicha) — haqiqiy savdo hajmi/summasi/foyda uchun
-    const arizaWhere = { turi: 'sotish', holat: 'yetkazildi' };
-    if (date_from || date_to) {
-      arizaWhere.yetkazilgan_sana = {};
-      if (date_from) arizaWhere.yetkazilgan_sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   arizaWhere.yetkazilgan_sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    // 3) Yetkazilgan sotuvlar (davr bo'yicha) — haqiqiy savdo hajmi/summasi/foyda uchun.
+    // Chegaralar mahalliy kun boshi/oxiri Date sifatida uzatiladi (sequelize UTC ga o'giradi) —
+    // yetkazilgan_sana UTC saqlanadi, mahalliy "YYYY-MM-DD" satri bilan solishtirilmaydi.
     const sotuvRows = await sequelize.query(`
       SELECT aq.tovar_id,
         SUM(aq.jami_dona) AS sotilgan_dona,
@@ -293,11 +325,11 @@ class HisobotController {
       FROM ariza_qator aq
       JOIN ariza ar ON ar.id = aq.ariza_id
       WHERE ar.turi = 'sotish' AND ar.holat = 'yetkazildi' AND ar.deletedAt IS NULL
-        ${date_from ? 'AND ar.yetkazilgan_sana >= :date_from' : ''}
-        ${date_to   ? "AND ar.yetkazilgan_sana <= :date_to_end" : ''}
+        ${D.from ? 'AND ar.yetkazilgan_sana >= :dan' : ''}
+        ${D.to   ? 'AND ar.yetkazilgan_sana <= :gacha' : ''}
       GROUP BY aq.tovar_id
     `, {
-      replacements: { date_from, date_to_end: date_to ? `${date_to} 23:59:59` : null },
+      replacements: { dan: D.from, gacha: D.to },
       type: sequelize.QueryTypes.SELECT,
     });
     const sotuvMap = {};
@@ -348,14 +380,10 @@ class HisobotController {
   // Bitta tovar bo'yicha sotuv tafsiloti: kimga, qachon, qancha, kim yetkazgan
   tovarHisobotDetail = async (req, res) => {
     const { tovar_id } = req.params;
-    const { date_from, date_to } = req.query;
 
     const arizaWhere = { turi: 'sotish', holat: 'yetkazildi' };
-    if (date_from || date_to) {
-      arizaWhere.yetkazilgan_sana = {};
-      if (date_from) arizaWhere.yetkazilgan_sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   arizaWhere.yetkazilgan_sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) arizaWhere.yetkazilgan_sana = davrW;
 
     const qatorlar = await ArizaQatorModel.findAll({
       where: { tovar_id },
@@ -388,14 +416,12 @@ class HisobotController {
 
   // Top tovarlar (summasi bo'yicha)
   topTovarlar = async (req, res) => {
-    const { date_from, date_to, ombor, limit = 10 } = req.query;
+    const { ombor } = req.query;
+    const limit = chegaraSon(req.query.limit, 10, 500);
     const where = { tur: 'kirim', manba_tur: 'prixod' };
     if (ombor)     where.ombor = ombor;
-    if (date_from || date_to) {
-      where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) where.sana = davrW;
 
     const rows = await TovarRegisterModel.findAll({
       where,
@@ -410,7 +436,7 @@ class HisobotController {
       ],
       group: ['tovar_id', 'tovar_nomi', 'turkum'],
       order: [[fn('SUM', col('summa')), 'DESC']],
-      limit: Number(limit),
+      limit,
       raw: true,
     });
 
@@ -427,13 +453,9 @@ class HisobotController {
 
   // Ombor bo'yicha taqsimot (kirim, davr ichidagi chiqim, joriy qoldiq)
   omborHisobot = async (req, res) => {
-    const { date_from, date_to } = req.query;
     const dateWhere = {};
-    if (date_from || date_to) {
-      dateWhere.sana = {};
-      if (date_from) dateWhere.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   dateWhere.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) dateWhere.sana = davrW;
 
     const [kirimDavr, chiqimDavr, kirimJami, chiqimJami] = await Promise.all([
       TovarRegisterModel.findAll({
@@ -495,13 +517,9 @@ class HisobotController {
 
   // ══ OMBOR HISOBOTI — KPI qatori (joriy holat + davr faoliyati) ══
   omborKpi = async (req, res) => {
-    const { date_from, date_to } = req.query;
     const dateWhere = {};
-    if (date_from || date_to) {
-      dateWhere.sana = {};
-      if (date_from) dateWhere.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   dateWhere.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) dateWhere.sana = davrW;
 
     const [fifoQoldiq, kirimDavr, chiqimDavr, tovarSoni] = await Promise.all([
       // Asosiy Qoldiqlar hisoboti bilan bir xil FIFO mantig'i — ikkala
@@ -590,13 +608,9 @@ class HisobotController {
 
   // Eng tez sotiladigan va harakatsiz (sekin sotiladigan) tovarlar
   omborAylanish = async (req, res) => {
-    const { date_from, date_to } = req.query;
     const dateWhere = {};
-    if (date_from || date_to) {
-      dateWhere.sana = {};
-      if (date_from) dateWhere.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   dateWhere.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) dateWhere.sana = davrW;
 
     const tovarlar = await TovarModel.findAll({ where: { faol: true }, attributes: ['id', 'nomi', 'turkum'], raw: true });
     const tovarMap = {}; tovarlar.forEach(t => { tovarMap[t.id] = t; });
@@ -768,15 +782,12 @@ class HisobotController {
 
   // Register uchun jami statistika (davr bo'yicha, tur kesimida)
   registerKpi = async (req, res) => {
-    const { date_from, date_to, ombor, turkum } = req.query;
+    const { ombor, turkum } = req.query;
     const where = {};
     if (ombor)  where.ombor  = ombor;
     if (turkum) where.turkum = turkum;
-    if (date_from || date_to) {
-      where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) where.sana = davrW;
 
     const rows = await TovarRegisterModel.findAll({
       where,
@@ -853,7 +864,8 @@ class HisobotController {
   // (kirim/chiqim/qaytarma) — Qoldiqlar sahifasidagi tafsilot paneli uchun.
   qoldiqDetail = async (req, res) => {
     const { tovar_id } = req.params;
-    const { ombor, limit = 100 } = req.query;
+    const { ombor } = req.query;
+    const limit = chegaraSon(req.query.limit, 100, 2000);
 
     const where = { tovar_id };
     if (ombor) where.ombor = ombor;
@@ -861,7 +873,7 @@ class HisobotController {
     const rows = await TovarRegisterModel.findAll({
       where,
       order: [['sana', 'DESC'], ['id', 'DESC']],
-      limit: Number(limit),
+      limit,
     });
 
     // Manba hujjatlarini (prixod raqami yoki ariza+mijoz) bog'lash
@@ -1035,38 +1047,33 @@ class HisobotController {
 
   // Audit natijalari ro'yxati (mobil chekUp)
   auditRuyxat = async (req, res) => {
-    const { agent_id, date_from, date_to } = req.query;
+    const { agent_id } = req.query;
     const where = {};
     if (agent_id) where.agent_id = agent_id;
-    if (date_from || date_to) {
-      where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) where.sana = davrW;
     const rows = await AuditModel.findAll({ where, order: [['sana', 'DESC']], limit: 200 });
     res.send(rows);
   };
 
   // Sotmaslik sabablari ro'yxati (mobil clientNotSell)
   sotmaslikRuyxat = async (req, res) => {
-    const { agent_id, date_from, date_to } = req.query;
+    const { agent_id } = req.query;
     const where = {};
     if (agent_id) where.agent_id = agent_id;
-    if (date_from || date_to) {
-      where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(`${date_from}T00:00:00`);
-      if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
+    const davrW = davrSharti(davrOraliq(req.query));
+    if (davrW) where.sana = davrW;
     const rows = await SotmaslikModel.findAll({ where, order: [['sana', 'DESC']], limit: 300 });
     res.send(rows);
   };
 
   // Agent savdo hisoboti (agentlar bo'yicha savdo statistikasi)
   agentSavdo = async (req, res) => {
-    const { date_from, date_to } = req.query;
+    // Mahalliy kun chegaralari Date sifatida (createdAt UTC saqlanadi)
+    const D = davrOraliq(req.query, { maxKun: 366 });
     const arizaWhere = 'ar.turi = \'sotish\' AND ar.deletedAt IS NULL'
-      + (date_from ? ' AND ar.createdAt >= :date_from' : '')
-      + (date_to ? ' AND ar.createdAt <= :date_to_end' : '');
+      + (D.from ? ' AND ar.createdAt >= :dan' : '')
+      + (D.to ? ' AND ar.createdAt <= :gacha' : '');
     const rows = await sequelize.query(`
       SELECT a.id, a.fullname, a.plan_summa,
         COALESCE(COUNT(ar.id), 0) AS savdo_soni,
@@ -1078,7 +1085,7 @@ class HisobotController {
       GROUP BY a.id, a.fullname, a.plan_summa
       ORDER BY savdo_summa DESC
     `, {
-      replacements: { date_from, date_to_end: date_to ? `${date_to} 23:59:59` : null },
+      replacements: { dan: D.from, gacha: D.to },
       type: sequelize.QueryTypes.SELECT,
     });
     res.send(rows.map(r => {
@@ -1112,9 +1119,8 @@ class HisobotController {
 
   agentOnline = async (req, res) => {
     const C = HisobotController.ONLINE_CHEGARA;
-    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '')
-      ? req.query.sana
-      : bugunLokal();
+    const sana = sanaParam(req.query.sana, bugunLokal(), 'sana');
+    let kesildi = false;   // biror ro'yxat limitga yetib kesilgan bo'lsa — javobda bayroq
     // Trek kerakmi (xaritada yo'lni chizish uchun)
     const trekBilan = req.query.trek !== 'false';
 
@@ -1149,17 +1155,11 @@ class HisobotController {
     // Tanlangan kunning treki
     let trekMap = {};
     if (trekBilan) {
-      const trek = await AgentLocationModel.findAll({
-        where: {
-          rol: 'agent',
-          agent_id: { [Op.in]: ids },
-          sana: { [Op.between]: [sana + ' 00:00:00', sana + ' 23:59:59'] },
-        },
-        attributes: ['agent_id', 'lat', 'lng', 'sana'],
-        order: [['agent_id', 'ASC'], ['sana', 'ASC']],
-        raw: true, limit: 5000,
-      });
-      trek.forEach(t => {
+      // Mahalliy kun chegaralari Date sifatida (agent_location.sana UTC); limit har agentga alohida
+      const g = await agentGpsTrek(ids, new Date(`${sana}T00:00:00`), new Date(`${sana}T23:59:59.999`),
+        ['agent_id', 'lat', 'lng', 'sana']);
+      if (g.kesildi) kesildi = true;
+      g.rows.forEach(t => {
         if (t.lat == null || t.lng == null) return;
         (trekMap[t.agent_id] = trekMap[t.agent_id] || []).push({
           lat: Number(t.lat), lng: Number(t.lng), vaqt: t.sana,
@@ -1172,8 +1172,9 @@ class HisobotController {
       where: { sana, agent_id: { [Op.in]: ids } },
       attributes: ['agent_id', 'mijoz_id', 'mijoz_nomi', 'checkin_vaqt', 'checkout_vaqt', 'natija'],
       order: [['checkin_vaqt', 'ASC']],
-      raw: true, limit: 2000,
+      raw: true, limit: 20000,
     });
+    if (tashriflar.length >= 20000) kesildi = true;
     const tashrifMap = {};
     tashriflar.forEach(t => { (tashrifMap[t.agent_id] = tashrifMap[t.agent_id] || []).push(t); });
 
@@ -1227,6 +1228,7 @@ class HisobotController {
     res.send({
       sana,
       hozir: new Date(),
+      ...(kesildi ? { kesildi: true } : {}),
       markaz,
       chegara: C,
       agentlar: natija,
@@ -1245,7 +1247,7 @@ class HisobotController {
     const { agent_id } = req.query;
     if (!agent_id) throw new HttpException(400, 'agent_id majburiy');
     // date faqat to'g'ri YYYY-MM-DD formatda bo'lsa qabul qilinadi
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : null;
+    const date = sanaTogrimi(req.query.date) ? req.query.date : null;
 
     const where = { agent_id, rol: 'agent' };
     if (date) {
@@ -1312,7 +1314,7 @@ class HisobotController {
 
   // Bugungi (yoki berilgan kun) barcha agentlar bo'yicha yig'ilgan/topshirilgan solishtiruvi
   inkassatsiyaRuyxat = async (req, res) => {
-    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '') ? req.query.sana : bugunLokal();
+    const sana = sanaTogrimi(req.query.sana) ? req.query.sana : bugunLokal();
     // kassa.sana UTC — kun mahalliy vaqt bo'yicha ajratiladi
     const tz = tzOffset();
 
@@ -1434,9 +1436,10 @@ class HisobotController {
   // inkassatsiya faqat xodim uni kassirga topshirganini solishtiradi.
   inkassatsiyaKamomad = async (req, res) => {
     const { agent_id, dostavchi_id, sana, summa, izoh } = req.body;
-    if ((!agent_id && !dostavchi_id) || !/^\d{4}-\d{2}-\d{2}$/.test(sana || '')) {
+    if ((!agent_id && !dostavchi_id) || !sana) {
       throw new HttpException(400, 'agent_id yoki dostavchi_id va sana majburiy');
     }
+    if (!sanaTogrimi(sana)) throw new HttpException(400, "sana YYYY-MM-DD formatda bo'lishi kerak");
     const s = Math.round(Number(summa) * 100) / 100;
     if (!(s > 0)) throw new HttpException(400, "Qabul qilingan summa 0 dan katta bo'lishi kerak");
 
@@ -1453,10 +1456,11 @@ class HisobotController {
     if (dostavchi_id) {
       const dost = await DostavchiModel.findByPk(dostavchi_id);
       if (!dost) throw new HttpException(404, 'Dostavchi topilmadi');
-      const [yig, top] = await Promise.all([dostavchiYigildi(dost.id, sana), dostavchiTopshirildi(dost.id, sana)]);
-      const kamomad = +(yig.summa - top.summa).toFixed(2);
-      if (s > kamomad + 0.5) throw oshdi(kamomad);
-      const { row } = await dostavchiTopshir(dost, sana, { summa: s, jami: false, izoh: qosh(top.row?.izoh), userId: req.currentUser?.id || null });
+      // Kamomad chegarasi va izoh dostavchiTopshir ichida — qulflar ostida, eng so'nggi qiymat bilan
+      // tekshiriladi (parallel ikki so'rov kamomaddan ko'p qabul qila olmaydi)
+      const { row } = await dostavchiTopshir(dost, sana, {
+        summa: s, jami: false, maxQoshish: true, izohQosh: satr, userId: req.currentUser?.id || null,
+      });
       return res.send(row);
     }
 
@@ -1497,10 +1501,11 @@ class HisobotController {
   // shu bilan birga agent bo'yicha va umumiy jami statistika.
   inkassatsiyaHisobot = async (req, res) => {
     const today = bugunLokal();
-    const dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date_from || '')
-      ? req.query.date_from
-      : kunOldin(29);
-    const dateTo = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date_to || '') ? req.query.date_to : today;
+    const dateFrom = sanaParam(req.query.date_from, kunOldin(29), 'date_from');
+    const dateTo = sanaParam(req.query.date_to, today, 'date_to');
+    if (new Date(`${dateTo}T00:00:00`) - new Date(`${dateFrom}T00:00:00`) > 366 * 86400000) {
+      throw new HttpException(400, "Davr 366 kundan oshmasligi kerak");
+    }
     const agentId = req.query.agent_id || null;
     const tz = tzOffset();   // kassa.sana UTC — kunlar mahalliy vaqt bo'yicha
 
@@ -1592,7 +1597,7 @@ class HisobotController {
   marshrutRejaRuyxat = async (req, res) => {
     const { agent_id, sana } = req.query;
     if (!agent_id) throw new HttpException(400, 'agent_id majburiy');
-    const kun = /^\d{4}-\d{2}-\d{2}$/.test(sana || '') ? sana : bugunLokal();
+    const kun = sanaTogrimi(sana) ? sana : bugunLokal();
 
     const rejalar = await MarshrutRejaModel.findAll({
       where: { agent_id, sana: kun },
@@ -1632,15 +1637,21 @@ class HisobotController {
     }
     if (!sanaTogrimi(sana)) throw new HttpException(400, "sana YYYY-MM-DD formatda bo'lishi kerak");
     if (mijoz_idlar.length > 1000) throw new HttpException(400, "Bir kunga 1000 tadan ko'p mijoz belgilab bo'lmaydi");
-    // Boshqariladigan tranzaksiya: xato bo'lsa avtomatik rollback — ulanish osilib qolmaydi
-    await sequelize.transaction(async (t) => {
-      for (let i = 0; i < mijoz_idlar.length; i++) {
-        await MarshrutRejaModel.findOrCreate({
-          where: { agent_id, mijoz_id: mijoz_idlar[i], sana },
-          defaults: { tartib: i + 1 },
-          transaction: t,
-        });
-      }
+    const musbatButun = (v) => Number.isInteger(Number(v)) && Number(v) > 0 && String(v).trim() !== '';
+    if (!musbatButun(agent_id)) throw new HttpException(400, "agent_id noto'g'ri");
+    if (!mijoz_idlar.every(musbatButun)) throw new HttpException(400, "mijoz_idlar faqat musbat butun sonlardan iborat bo'lishi kerak");
+    // Takrorlar olib tashlanadi; tartib — birinchi uchragan o'rni
+    const idlar = [...new Set(mijoz_idlar.map(Number))];
+    // Boshqariladigan tranzaksiya: xato bo'lsa avtomatik rollback — ulanish osilib qolmaydi.
+    // Mavjudlar bitta so'rovda o'qiladi, yangilari bitta INSERT IGNORE bilan qo'shiladi
+    // (uq_marshrut_reja_agent_mijoz_sana — parallel so'rovda ham dublikat bo'lmaydi)
+    await sequelize.transaction(async (transaction) => {
+      const mavjud = await MarshrutRejaModel.findAll({
+        where: { agent_id, sana, mijoz_id: { [Op.in]: idlar } }, attributes: ['mijoz_id'], raw: true, transaction,
+      });
+      const bor = new Set(mavjud.map(r => Number(r.mijoz_id)));
+      const yangi = idlar.map((id, i) => ({ agent_id, mijoz_id: id, sana, tartib: i + 1 })).filter(r => !bor.has(r.mijoz_id));
+      if (yangi.length) await MarshrutRejaModel.bulkCreate(yangi, { ignoreDuplicates: true, transaction });
     });
     const rows = await MarshrutRejaModel.findAll({ where: { agent_id, sana } });
     res.send(rows);
@@ -1672,24 +1683,36 @@ class HisobotController {
     const WEEK_KEYS = { 1: 'Du', 2: 'Se', 3: 'Ch', 4: 'Pa', 5: 'Ju', 6: 'Sh', 7: 'Ya' };
     const mijozlar = await MijozModel.findAll({ where: { agent_id, faol: true } });
 
-    let yaratildi = 0;
-    await sequelize.transaction(async (transaction) => {
-      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-        const kunRaqam = d.getDay() === 0 ? 7 : d.getDay();   // 1=Du..7=Ya
-        const kalit = WEEK_KEYS[kunRaqam];
-        const sanaStr = kunKey(d);
-        for (const m of mijozlar) {
-          if (m.tashrif_kunlari && m.tashrif_kunlari.includes(kalit)) {
-            const [, created] = await MarshrutRejaModel.findOrCreate({
-              where: { agent_id, mijoz_id: m.id, sana: sanaStr },
-              defaults: { tartib: 1 },
-              transaction,
-            });
-            if (created) yaratildi++;
-          }
+    // Nomzodlar xotirada yig'iladi, mavjudlari bitta so'rov bilan chiqariladi va yangilari
+    // bo'laklab bitta INSERT IGNORE bilan yoziladi (unique: agent_id+mijoz_id+sana).
+    const nomzodlar = [];
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const kunRaqam = d.getDay() === 0 ? 7 : d.getDay();   // 1=Du..7=Ya
+      const kalit = WEEK_KEYS[kunRaqam];
+      const sanaStr = kunKey(d);
+      for (const m of mijozlar) {
+        if (m.tashrif_kunlari && m.tashrif_kunlari.includes(kalit)) {
+          nomzodlar.push({ agent_id, mijoz_id: m.id, sana: sanaStr, tartib: 1 });
         }
       }
-    });
+    }
+
+    let yaratildi = 0;
+    if (nomzodlar.length) {
+      await sequelize.transaction(async (transaction) => {
+        const oraliq = { agent_id, sana: { [Op.between]: [from, to] } };
+        const mavjud = await MarshrutRejaModel.findAll({ where: oraliq, attributes: ['mijoz_id', 'sana'], raw: true, transaction });
+        const bor = new Set(mavjud.map(r => `${r.mijoz_id}|${String(r.sana).slice(0, 10)}`));
+        const yangi = nomzodlar.filter(r => !bor.has(`${r.mijoz_id}|${r.sana}`));
+        const oldin = await MarshrutRejaModel.count({ where: oraliq, transaction });
+        const BOLAK = 500;
+        for (let i = 0; i < yangi.length; i += BOLAK) {
+          await MarshrutRejaModel.bulkCreate(yangi.slice(i, i + BOLAK), { ignoreDuplicates: true, transaction });
+        }
+        // Haqiqatda qo'shilganlar soni (INSERT IGNORE o'tkazib yuborganlari hisobga kirmaydi)
+        yaratildi = (await MarshrutRejaModel.count({ where: oraliq, transaction })) - oldin;
+      });
+    }
     res.send({ yaratildi });
   };
 
@@ -1698,6 +1721,10 @@ class HisobotController {
     const { agent_id } = req.query;
     const from = sanaParam(req.query.date_from, bugunLokal(), 'date_from');
     const to = sanaParam(req.query.date_to, from, 'date_to');
+    if (from > to) throw new HttpException(400, "date_from date_to'dan katta bo'lmasligi kerak");
+    if (new Date(`${to}T00:00:00`) - new Date(`${from}T00:00:00`) > 366 * 86400000) {
+      throw new HttpException(400, "Davr 366 kundan oshmasligi kerak");
+    }
 
     const rejaWhere = { sana: { [Op.between]: [from, to] } };
     if (agent_id) rejaWhere.agent_id = agent_id;
@@ -1946,9 +1973,10 @@ class HisobotController {
   }
 
   agentKunlikMarshrut = async (req, res) => {
-    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '')
-      ? req.query.sana
-      : bugunLokal();
+    const sana = sanaParam(req.query.sana, bugunLokal(), 'sana');
+    const kunBosh = new Date(`${sana}T00:00:00`);       // mahalliy kun chegaralari (UTC ga o'giriladi)
+    const kunOxir = new Date(`${sana}T23:59:59.999`);
+    const LIMIT = 20000;
     const agentId = req.query.agent_id ? parseInt(req.query.agent_id, 10) : null;
 
     // Ikki nuqta orasidagi masofa (km)
@@ -1961,23 +1989,13 @@ class HisobotController {
     };
 
     const tashrifWhere = { sana };
-    const gpsWhere = {
-      rol: 'agent',
-      sana: { [Op.between]: [sana + ' 00:00:00', sana + ' 23:59:59'] },
-    };
-    if (agentId) { tashrifWhere.agent_id = agentId; gpsWhere.agent_id = agentId; }
+    if (agentId) tashrifWhere.agent_id = agentId;
 
-    const [tashriflar, gpsNuqtalar, agentlar, rejalar] = await Promise.all([
+    const [tashriflar, agentlar, rejalar] = await Promise.all([
       TashrifModel.findAll({
         where: tashrifWhere,
         order: [['agent_id', 'ASC'], ['checkin_vaqt', 'ASC']],
-        raw: true, limit: 2000,
-      }),
-      AgentLocationModel.findAll({
-        where: gpsWhere,
-        attributes: ['agent_id', 'lat', 'lng', 'sana', 'battery'],
-        order: [['agent_id', 'ASC'], ['sana', 'ASC']],
-        raw: true, limit: 5000,
+        raw: true, limit: LIMIT,
       }),
       AgentModel.findAll({
         where: { faol: true },
@@ -1989,6 +2007,12 @@ class HisobotController {
         attributes: ['agent_id', 'mijoz_id'], raw: true,
       }),
     ]);
+    // GPS: limit har agentga alohida — ko'p agentli kunda oxirgilar treki yo'qolmaydi.
+    // Javobda faqat faol agentlar bor — trek ham faqat ular uchun olinadi.
+    const gpsIds = agentlar.map(a => a.id).filter(id => !agentId || id === agentId);
+    const gps = await agentGpsTrek(gpsIds, kunBosh, kunOxir, ['agent_id', 'lat', 'lng', 'sana', 'battery']);
+    const gpsNuqtalar = gps.rows;
+    let kesildi = gps.kesildi || tashriflar.length >= LIMIT;
 
     // Mijoz koordinatalari — tashrifda checkin_lat bo'lmasa zaxira sifatida
     const mijozIds = [...new Set([
@@ -2008,11 +2032,12 @@ class HisobotController {
       where: {
         turi: 'sotish',
         ...(agentId ? { agent_id: agentId } : {}),
-        createdAt: { [Op.between]: [new Date(`${sana}T00:00:00`), new Date(`${sana}T23:59:59.999`)] },
+        createdAt: { [Op.between]: [kunBosh, kunOxir] },
       },
       attributes: ['id', 'raqam', 'jami_summa', 'agent_id', 'mijoz_id'],
-      raw: true, limit: 2000,
+      raw: true, limit: LIMIT,
     });
+    if (kunArizalar.length >= LIMIT) kesildi = true;
     const arizaKalit = {};
     kunArizalar.forEach(a => {
       const k = `${a.agent_id}|${a.mijoz_id}`;
@@ -2142,6 +2167,7 @@ class HisobotController {
 
     res.send({
       sana,
+      ...(kesildi ? { kesildi: true } : {}),
       agentlar: natija,
       jami: {
         agent_soni:   natija.filter(a => a.tashrif_soni > 0).length,
@@ -2159,7 +2185,13 @@ class HisobotController {
     const dan   = sanaParam(req.query.dan, bugunLokal(), 'dan');
     const gacha = sanaParam(req.query.gacha, dan, 'gacha');
     if (dan > gacha) throw new HttpException(400, "dan gacha'dan katta bo'lmasligi kerak");
+    // Davr cheklanadi — aks holda limitlar katta davrda ma'lumotni jimgina kesardi
+    const MAX_KUN = 366;
+    if (new Date(`${gacha}T00:00:00`) - new Date(`${dan}T00:00:00`) > (MAX_KUN - 1) * 86400000) {
+      throw new HttpException(400, `Davr ${MAX_KUN} kundan oshmasligi kerak`);
+    }
     const agentId = req.query.agent_id ? parseInt(req.query.agent_id, 10) : null;
+    const LIMIT = 50000;
 
     const sanaSharti = { sana: { [Op.between]: [dan, gacha] } };
     const tashrifWhere = { ...sanaSharti };
@@ -2167,7 +2199,7 @@ class HisobotController {
     if (agentId) { tashrifWhere.agent_id = agentId; rejaWhere.agent_id = agentId; }
 
     const [tashriflar, rejalar, agentlar] = await Promise.all([
-      TashrifModel.findAll({ where: tashrifWhere, order: [['sana', 'DESC'], ['checkin_vaqt', 'ASC']], limit: 5000, raw: true }),
+      TashrifModel.findAll({ where: tashrifWhere, order: [['sana', 'DESC'], ['checkin_vaqt', 'ASC']], limit: LIMIT, raw: true }),
       MarshrutRejaModel.findAll({ where: rejaWhere, attributes: ['id', 'agent_id', 'mijoz_id', 'sana'], raw: true }),
       AgentModel.findAll({ attributes: ['id', 'fullname', 'telefon'], order: [['fullname', 'ASC']], raw: true }),
     ]);
@@ -2194,8 +2226,10 @@ class HisobotController {
         createdAt: { [Op.between]: [new Date(`${dan}T00:00:00`), new Date(`${gacha}T23:59:59.999`)] },
       },
       attributes: ['id', 'raqam', 'jami_summa', 'agent_id', 'mijoz_id', 'createdAt'],
-      raw: true, limit: 5000,
+      raw: true, limit: LIMIT,
     });
+    // Limitga yetilgan bo'lsa — natija to'liq emas (javobda kesildi: true)
+    const kesildi = tashriflar.length >= LIMIT || davrArizalar.length >= LIMIT;
     const arizaKalit = {};
     davrArizalar.forEach(a => {
       const sana = kunKey(new Date(a.createdAt));
@@ -2348,6 +2382,7 @@ class HisobotController {
 
     res.send({
       davr: { dan, gacha },
+      ...(kesildi ? { kesildi: true } : {}),
       kpi,
       reja_fakt: rejaFakt,
       jurnal,

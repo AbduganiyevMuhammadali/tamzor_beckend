@@ -6,6 +6,7 @@ const { ArizaModel } = require('../../models/ariza.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { agentOmbori, AGENT_PREFIKS } = require('../../utils/ombor.utils');
 const bcrypt = require('bcryptjs');
+const sequelize = require('../../db/db-sequelize');
 
 /* ── Bo'sh string va noto'g'ri qiymatlarni tozalash ───── */
 const DATE_FIELDS   = ['tugilgan_sana', 'ish_boshlagan'];
@@ -185,11 +186,17 @@ class AgentController {
 
   /* ── PATCH /agents/:id ──────────────────────────────── */
   update = async (req, res) => {
-    const agent = await AgentModel.findByPk(req.params.id);
-    if (!agent) throw new HttpException(404, 'Agent topilmadi');
-    const body = await this.mobilKirish(sanitize(req.body), agent.id);
-    await this.kanalOzgarishTekshir(agent, body);
-    await agent.update(body);
+    // Parol xeshi va login bandligi — tranzaksiyadan oldin (qulf uzoq ushlanmasin)
+    const body = await this.mobilKirish(sanitize(req.body), Number(req.params.id) || null);
+    // Tekshiruv va yozish bitta tranzaksiyada, agent qatori qulflangan holda: tekshiruvdan keyin
+    // parallel so'rov (zakaz, ism o'zgarishi) holatni o'zgartirib ulgurmaydi
+    const agent = await sequelize.transaction(async (t) => {
+      const agent = await AgentModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!agent) throw new HttpException(404, 'Agent topilmadi');
+      await this.kanalOzgarishTekshir(agent, body, t);
+      await agent.update(body, { transaction: t });
+      return agent;
+    });
     const full = await AgentModel.findByPk(agent.id, { include: INCLUDE });
     res.send(full);
   };
@@ -199,18 +206,18 @@ class AgentController {
        oqimida turibdi) taqiqlanadi;
      - avtolavkadan chiqarish yoki ismni o'zgartirish — "Agent: <ism>" omborida tovar bo'lsa
        taqiqlanadi: mashina ombori ism bilan nomlanadi, tovar eski nom ostida qolib ketadi. */
-  kanalOzgarishTekshir = async (agent, body) => {
+  kanalOzgarishTekshir = async (agent, body, transaction) => {
     const avtoYangi = body.avtolavka === undefined ? agent.avtolavka : !!body.avtolavka;
     const ismYangi  = body.fullname === undefined ? agent.fullname : body.fullname;
     if (avtoYangi && !agent.avtolavka) {
       const ochiq = await ArizaModel.count({ where: {
         agent_id: agent.id, turi: 'sotish', holat: { [Op.in]: ['yangi', 'tasdiqlangan', 'yigilmoqda', 'yolda'] },
         kanal: 'distributsiya',
-      } });
+      }, transaction });
       if (ochiq) throw new HttpException(400, `${agent.fullname}ning ${ochiq} ta ochiq zakazi bor — Won Sell'ga o'tkazishdan oldin ularni yetkazing yoki bekor qiling`);
     }
     if ((agent.avtolavka && !avtoYangi) || ismYangi !== agent.fullname) {
-      const q = await this.omborQoldigi(agent);
+      const q = await this.omborQoldigi(agent, transaction);
       if (q > 0.001) {
         throw new HttpException(400, `"${agentOmbori(agent.fullname)}" omborida ${+q.toFixed(3)} birlik tovar bor — `
           + `avval Won Sell → Qabul (yoki Ombor → Qaytarish qabul) bilan asosiy omborga qaytaring, keyin `
@@ -220,24 +227,27 @@ class AgentController {
   };
 
   // "Agent: <ism>" omboridagi jami qoldiq (avtolavka mashinasi yoki qabul kutayotgan qaytarishlar)
-  omborQoldigi = async (agent) => {
+  omborQoldigi = async (agent, transaction) => {
     const [r] = await TovarRegisterModel.findAll({
-      attributes: [[fn('SUM', col('donada')), 'q']], where: { ombor: agentOmbori(agent.fullname) }, raw: true,
+      attributes: [[fn('SUM', col('donada')), 'q']], where: { ombor: agentOmbori(agent.fullname) }, raw: true, transaction,
     });
     return parseFloat(r?.q) || 0;
   };
 
   /* ── DELETE /agents/:id ─────────────────────────────── */
   delete = async (req, res) => {
-    const agent = await AgentModel.findByPk(req.params.id);
-    if (!agent) throw new HttpException(404, 'Agent topilmadi');
-    const q = await this.omborQoldigi(agent);
-    if (q > 0.001) throw new HttpException(400, `"${agentOmbori(agent.fullname)}" omborida ${+q.toFixed(3)} birlik tovar bor — avval asosiy omborga qaytaring, keyin o'chiring`);
+    // Tekshiruv, mijozlarni bo'shatish va o'chirish — bitta tranzaksiyada (yarim bajarilib qolmaydi)
+    await sequelize.transaction(async (t) => {
+      const agent = await AgentModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!agent) throw new HttpException(404, 'Agent topilmadi');
+      const q = await this.omborQoldigi(agent, t);
+      if (q > 0.001) throw new HttpException(400, `"${agentOmbori(agent.fullname)}" omborida ${+q.toFixed(3)} birlik tovar bor — avval asosiy omborga qaytaring, keyin o'chiring`);
 
-    // Agentga biriktirilgan mijozlarni agent_idsiz qoldirish (soft)
-    await MijozModel.update({ agent_id: null }, { where: { agent_id: agent.id } });
+      // Agentga biriktirilgan mijozlarni agent_idsiz qoldirish (soft)
+      await MijozModel.update({ agent_id: null }, { where: { agent_id: agent.id }, transaction: t });
 
-    await agent.destroy();
+      await agent.destroy({ transaction: t });
+    });
     res.send({ message: "Agent o'chirildi" });
   };
 

@@ -3,10 +3,12 @@ const { MijozModel } = require('../../models/mijoz.model');
 const TerritoriyaModel = require('../../models/territoriya.model');
 const { SotmaslikModel, AgentLocationModel } = require('../../models/hisobot.model');
 const HttpException = require('../../utils/HttpException.utils');
-const { ok, fail, requireRole, WEEK_KEYS, PAGE_SIZE, mobilKalit, mobilVaqt, sababNomi, mijozRuxsat, takrorXato } = require('./shared');
+const { ok, fail, requireRole, WEEK_KEYS, PAGE_SIZE, mobilKalit, mobilVaqt, sababNomi, mijozRuxsat, takrorXato, koordinataJuft } = require('./shared');
 const sequelize = require('../../db/db-sequelize');
 const MijozReytingModel = require('../../models/mijozReyting.model');
 const { reytingYoz, reytingKorinish } = require('../../utils/reyting.utils');
+
+const MAX_GPS_NUQTA = 2000;
 
 /* Mobil xodim (agent yoki dostavchik) — reyting tarixida kim yozgani */
 const xodimOl = (req) => req.currentAgent
@@ -62,8 +64,10 @@ const mapKlientBody = (q) => {
   if (q.tel != null) data.telefon = q.tel;
   if (q.address != null) data.manzil = q.address;
   if (q.xudud != null) data.territoriya_id = q.xudud;
-  if (q.lat != null) data.lat = q.lat;
-  if (q.lon != null) data.lng = q.lon;
+  // Koordinata faqat juft va to'g'ri bo'lsa (|lat| ≤ 90, |lng| ≤ 180, chekli) yoziladi —
+  // noto'g'risi e'tiborsiz qoldiriladi (eski APK bo'sh/0 yuborishi mumkin)
+  const nuqta = koordinataJuft(q.lat, q.lon ?? q.long);
+  if (nuqta) { data.lat = nuqta.lat; data.lng = nuqta.lng; }
   return data;
 };
 
@@ -156,12 +160,21 @@ class MobileKlientController {
     if (!data.nomi) throw new HttpException(400, req.mf('Validation faild'));
     if (req.currentRole === 'agent') data.agent_id = req.currentAgent.id;
     const mobilId = mobilKalit(q.mobilId);
+    const borini = async () => (mobilId ? MijozModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'] }) : null);
+    const takrorJavob = (bor) => ok(res, { klientId: String(bor.id), takror: true }, 'Mijoz allaqachon saqlangan');
     if (mobilId) {
-      const bor = await MijozModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'] });
-      if (bor) return ok(res, { klientId: String(bor.id), takror: true }, 'Mijoz allaqachon saqlangan');
+      const bor = await borini();
+      if (bor) return takrorJavob(bor);
       data.mobil_id = mobilId;
     }
-    const klient = await MijozModel.create(data);
+    let klient;
+    try {
+      klient = await MijozModel.create(data);
+    } catch (e) {
+      // Parallel takror (oflayn navbat ikki marta yubordi) — mobil_id UNIQUE: borini qaytaramiz
+      if (takrorXato(e)) { const bor = await borini(); if (bor) return takrorJavob(bor); }
+      throw e;
+    }
     ok(res, { klientId: String(klient.id) }, 'Mijoz saqlandi');
   };
 
@@ -176,12 +189,14 @@ class MobileKlientController {
 
   // 4.7 saveLocation/ → data: { klientId }  (offline kontrakt)
   saveLocation = async (req, res, next) => {
-    const { klientId, lat, long } = req.body;
-    if (klientId && lat != null && long != null) {
+    const { klientId } = req.body;
+    // Noto'g'ri koordinata (NaN, |lat| > 90, |lng| > 180, 0/0) e'tiborsiz — eski APK kontrakti saqlanadi
+    const nuqta = koordinataJuft(req.body.lat, req.body.long ?? req.body.lng);
+    if (klientId && nuqta) {
       const klient = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id'] });
       if (!klient) throw new HttpException(404, req.mf('Not found'));
       if (!await mijozRuxsat(req, klient)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
-      await MijozModel.update({ lat, lng: long }, { where: { id: klient.id } });
+      await MijozModel.update({ lat: nuqta.lat, lng: nuqta.lng }, { where: { id: klient.id } });
     }
     ok(res, { klientId: String(klientId || '') });
   };
@@ -233,18 +248,29 @@ class MobileKlientController {
   tolovSurildi = async (req, res) => {
     const { klientId, yangiSana, izoh } = req.body;
     const mobilId = mobilKalit(req.body.mobilId);
-    if (mobilId) {
-      const bor = await MijozReytingModel.findOne({ where: { mobil_id: mobilId } });
-      if (bor) return ok(res, { klientId: String(bor.mijoz_id), reyting: bor.reyting_keyin, takror: true }, 'Allaqachon saqlangan');
-    }
+    const takror = async () => {
+      const bor = mobilId ? await MijozReytingModel.findOne({ where: { mobil_id: mobilId } }) : null;
+      if (!bor) return false;
+      ok(res, { klientId: String(bor.mijoz_id), reyting: bor.reyting_keyin, takror: true }, 'Allaqachon saqlangan');
+      return true;
+    };
+    if (await takror()) return;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(yangiSana || ''))) return fail(res, "Yangi to'lov sanasini tanlang");
     const mijoz = await MijozModel.findByPk(klientId);
     if (!mijoz) return fail(res, 'Mijoz topilmadi', 404);
-    const r = await reytingYoz(mijoz.id, {
-      tur: 'tolov_surildi', sabab: "To'lov vaqti surildi", izoh: izoh ? String(izoh).slice(0, 200) : null,
-      summa: Math.max(0, -(parseFloat(mijoz.balans) || 0)), vada_sana: yangiSana,
-      manba_tur: 'mobil', xodim: xodimOl(req), mobil_id: mobilId, sana: mobilVaqt(req.body.vaqt),
-    });
+    let r;
+    try {
+      r = await reytingYoz(mijoz.id, {
+        tur: 'tolov_surildi', sabab: "To'lov vaqti surildi", izoh: izoh ? String(izoh).slice(0, 200) : null,
+        summa: Math.max(0, -(parseFloat(mijoz.balans) || 0)), vada_sana: yangiSana,
+        manba_tur: 'mobil', xodim: xodimOl(req), mobil_id: mobilId, sana: mobilVaqt(req.body.vaqt),
+      });
+    } catch (e) {
+      // Parallel takror — mijoz_reyting.mobil_id UNIQUE: borini qaytaramiz (500 emas)
+      if (takrorXato(e) && await takror()) return;
+      throw e;
+    }
+    if (r && r.takror) { if (await takror()) return; }
     ok(res, { klientId: String(mijoz.id), ...reytingKorinish({ reyting: r.reyting, rad_ketma_ket: mijoz.rad_ketma_ket, tolov_vada_sana: yangiSana }) }, "Qayd etildi");
   };
 
@@ -253,17 +279,28 @@ class MobileKlientController {
   // bir xil ID'ga ega bo'lganda GPS izlari bir-biriga aralashib qolardi.
   sendLocation = async (req, res, next) => {
     const points = Array.isArray(req.body.location) ? req.body.location : [];
+    // Bitta so'rovda ko'pi bilan 2000 nuqta (oflayn to'plangan iz) — ortig'i rad etiladi
+    if (points.length > MAX_GPS_NUQTA) throw new HttpException(400, `Bitta so'rovda ${MAX_GPS_NUQTA} tadan ortiq nuqta yuborib bo'lmaydi`);
     const userId = (req.currentAgent && req.currentAgent.id) || null;
     const rol = req.currentRole === 'dostavchi' ? 'dostavchi' : 'agent';
-    if (points.length) {
-      await AgentLocationModel.bulkCreate(points.map(p => ({
+    // Koordinatasi noto'g'ri (NaN, |lat| > 90, |lng| > 180, 0/0) nuqtalar tashlab yuboriladi
+    const yaroqli = [];
+    for (const p of points) {
+      if (!p || typeof p !== 'object') continue;
+      const nuqta = koordinataJuft(p.lat, p.long ?? p.lng);
+      if (!nuqta) continue;
+      const bat = p.battery === undefined || p.battery === null || p.battery === '' ? null : Number(p.battery);
+      yaroqli.push({
         agent_id: userId,
         rol,
-        lat: p.lat ?? null,
-        lng: p.long ?? null,
-        battery: p.battery ?? null,
+        lat: nuqta.lat,
+        lng: nuqta.lng,
+        battery: Number.isFinite(bat) ? Math.max(-1, Math.min(1000, Math.round(bat))) : null,
         sana: parseMobileGpsDate(p.date),
-      })));
+      });
+    }
+    if (yaroqli.length) {
+      await AgentLocationModel.bulkCreate(yaroqli);
     }
     ok(res, null);
   };

@@ -10,20 +10,32 @@ const { keyingiTartib, maksRaqam } = require('../../utils/qulf.utils');
 /* Trip sheetga tayinlash mumkin bo'lgan holatlar (tayinlanmaganArizalar bilan bir xil) */
 const TAYINLASH_HOLAT = ['tasdiqlangan', 'yigilmoqda', 'yolda'];
 
+const MAX_ARIZA = 300;          // bitta so'rovda tayinlanadigan arizalar soni
+const ROYXAT_LIMIT = 1000;      // GET /trip-sheet ro'yxati (eng yangilari)
+
 /* ariza_idlar ni tozalaydi: musbat butun sonlar, takrorsiz, tartib saqlanadi */
 function idlarniTozala(arr) {
   const ids = (arr || []).map(Number);
   if (ids.some(x => !Number.isInteger(x) || x <= 0)) throw new HttpException(400, "ariza_idlar noto'g'ri");
-  return [...new Set(ids)];
+  const toza = [...new Set(ids)];
+  if (toza.length > MAX_ARIZA) throw new HttpException(400, `Bir so'rovda ${MAX_ARIZA} tadan ortiq ariza bo'lmasin`);
+  return toza;
+}
+
+/* Musbat butun son (id) yoki 400 */
+function idOl(v, nomi) {
+  const x = Number(v);
+  if (!Number.isInteger(x) || x <= 0) throw new HttpException(400, `${nomi} noto'g'ri`);
+  return x;
 }
 
 /**
  * Arizalarni tranzaksiya ichida qulflab tekshiradi: mavjud, sotish arizasi, tayinlanadigan
  * holatda va boshqa FAOL (yakunlanmagan) trip sheetda emas. Xato bo'lsa 400/404.
  */
-async function arizalarniTekshir(ids, tripId, t) {
+async function arizalarniTekshir(ids, tripId, t, dostavchiId = null) {
   const arizalar = await ArizaModel.findAll({
-    where: { id: { [Op.in]: ids } }, attributes: ['id', 'raqam', 'turi', 'holat', 'trip_sheet_id'],
+    where: { id: { [Op.in]: ids } }, attributes: ['id', 'raqam', 'turi', 'holat', 'trip_sheet_id', 'dostavchi_id'],
     order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE,
   });
   const byId = new Map(arizalar.map(a => [a.id, a]));
@@ -33,6 +45,13 @@ async function arizalarniTekshir(ids, tripId, t) {
   const notogri = arizalar.filter(a => a.turi !== 'sotish' || !TAYINLASH_HOLAT.includes(a.holat));
   if (notogri.length) {
     throw new HttpException(400, `Bu arizalarni trip sheetga qo'shib bo'lmaydi (holati mos emas): ${notogri.map(nomi).join(', ')}`);
+  }
+  // Yo'lga chiqqan (tovar boshqa dostavchi qo'lida) buyurtmani boshqa dostavchiga o'tkazib bo'lmaydi
+  if (dostavchiId) {
+    const boshqa = arizalar.filter(a => a.holat === 'yolda' && a.dostavchi_id && Number(a.dostavchi_id) !== Number(dostavchiId));
+    if (boshqa.length) {
+      throw new HttpException(400, `Bu arizalar yo'lda va boshqa dostavchida — ularni boshqa dostavchiga o'tkazib bo'lmaydi: ${boshqa.map(nomi).join(', ')}`);
+    }
   }
   const boshqaTripIds = [...new Set(arizalar.map(a => a.trip_sheet_id).filter(x => x && x !== tripId))];
   if (boshqaTripIds.length) {
@@ -64,7 +83,8 @@ class TripSheetController {
       if (date_from) where.sana[Op.gte] = date_from;
       if (date_to) where.sana[Op.lte] = date_to;
     }
-    const trips = await TripSheetModel.findAll({ where, order: [['sana', 'DESC'], ['id', 'DESC']] });
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || ROYXAT_LIMIT, 1), ROYXAT_LIMIT);
+    const trips = await TripSheetModel.findAll({ where, order: [['sana', 'DESC'], ['id', 'DESC']], limit });
     const tripIds = trips.map(t => t.id);
     const counts = tripIds.length
       ? await ArizaModel.findAll({
@@ -92,8 +112,9 @@ class TripSheetController {
   // Yangi trip sheet yaratish + arizalarni tayinlash
   // body: { dostavchi_id, sana, ariza_idlar: [1,2,3] }
   create = async (req, res) => {
-    const { dostavchi_id, sana } = req.body;
-    if (!dostavchi_id || !sana) throw new HttpException(400, 'dostavchi_id va sana majburiy');
+    const { sana } = req.body;
+    if (!req.body.dostavchi_id || !sana) throw new HttpException(400, 'dostavchi_id va sana majburiy');
+    const dostavchi_id = idOl(req.body.dostavchi_id, 'dostavchi_id');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(sana)) || Number.isNaN(new Date(sana + 'T00:00:00Z').getTime())) {
       throw new HttpException(400, "Sana noto'g'ri (YYYY-MM-DD)");
     }
@@ -104,6 +125,10 @@ class TripSheetController {
 
     const t = await sequelize.transaction();
     try {
+      // Dostavchi qatori qulflanadi — mobil reysBoshla bilan navbatma-navbat (bir kunga ikki reys ochilmasin)
+      await sequelize.query('SELECT id FROM dostavchi WHERE id = :id FOR UPDATE', { replacements: { id: dostavchi_id }, transaction: t });
+      // Arizalar qulflab tekshiriladi (snapshot qulfdan keyin olinsin)
+      if (ariza_idlar.length) await arizalarniTekshir(ariza_idlar, null, t, dostavchi_id);
       // Raqam hisoblagichdan: parallel yaratishda ham takrorlanmaydi
       const prefiks = `TS-${sana}`;
       const tartib = await keyingiTartib(prefiks, () => maksRaqam('trip_sheet', prefiks, t), t);
@@ -113,7 +138,6 @@ class TripSheetController {
       }, { transaction: t });
 
       if (ariza_idlar.length) {
-        await arizalarniTekshir(ariza_idlar, trip.id, t);
         for (let i = 0; i < ariza_idlar.length; i++) {
           await ArizaModel.update(
             { trip_sheet_id: trip.id, trip_tartib: i + 1, dostavchi_id, dostavchi_nomi: dostavchi.ism },
@@ -124,7 +148,7 @@ class TripSheetController {
       await t.commit();
       res.status(201).send(trip);
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
@@ -139,7 +163,7 @@ class TripSheetController {
       const trip = await TripSheetModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
       if (!trip) throw new HttpException(404, 'Topilmadi');
       if (trip.holat === 'yakunlandi') throw new HttpException(400, "Yakunlangan trip sheetga ariza qo'shib bo'lmaydi");
-      await arizalarniTekshir(ariza_idlar, trip.id, t);
+      await arizalarniTekshir(ariza_idlar, trip.id, t, trip.dostavchi_id);
 
       // Shu tripdagilar qayta qo'shilsa — tartibi o'zgarmaydi, faqat yangilari oxiriga
       const allaqachon = new Set((await ArizaModel.findAll({
@@ -159,10 +183,18 @@ class TripSheetController {
 
   // Hujjatni trip sheetdan olib tashlash
   removeAriza = async (req, res) => {
-    await ArizaModel.update(
-      { trip_sheet_id: null, trip_tartib: null },
-      { where: { id: req.params.arizaId, trip_sheet_id: req.params.id } },
-    );
+    const tripId = idOl(req.params.id, 'Trip sheet id');
+    const arizaId = idOl(req.params.arizaId, 'Ariza id');
+    await sequelize.transaction(async (t) => {
+      // Trip qulflanadi: parallel yakunlash / qo'shish bilan poyga bo'lmasin
+      const trip = await TripSheetModel.findByPk(tripId, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!trip) throw new HttpException(404, 'Topilmadi');
+      if (trip.holat === 'yakunlandi') throw new HttpException(400, "Yakunlangan trip sheetdan arizani olib tashlab bo'lmaydi");
+      await ArizaModel.update(
+        { trip_sheet_id: null, trip_tartib: null },
+        { where: { id: arizaId, trip_sheet_id: trip.id }, transaction: t },
+      );
+    });
     res.send({ success: true });
   };
 

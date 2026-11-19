@@ -18,6 +18,7 @@
  */
 const sequelize = require('../../db/db-sequelize');
 const U = require('../../utils/tahlil.utils');
+const HttpException = require('../../utils/HttpException.utils');
 const { xarajatTurlari } = require('../../utils/xarajat.utils');
 const { n, yax, miq, foiz, sotuvTahlil } = U;
 const { kunHisobla } = require('../../utils/avtolavka.utils');
@@ -714,7 +715,13 @@ class TahlilController {
     if (ombor) shart.push('r.ombor = :ombor');
     if (search) shart.push('r.tovar_nomi LIKE :search');
     const asos = shart.join(' AND ');
-    const toliq = HARAKAT_SQL[harakat] ? `${asos} AND ${HARAKAT_SQL[harakat]}` : asos;
+    // Faqat ma'lum kalitlar (prototip kalitlari — "constructor" va h.k. — SQL'ga tushmaydi);
+    // bo'sh yoki "hammasi" — filtrsiz, boshqa noma'lum qiymat → 400
+    const harakatBor = harakat !== undefined && harakat !== null && harakat !== '' && !['hammasi', 'barchasi', 'all'].includes(harakat);
+    if (harakatBor && (typeof harakat !== 'string' || !Object.hasOwn(HARAKAT_SQL, harakat))) {
+      throw new HttpException(400, `harakat noto'g'ri — ${Object.keys(HARAKAT_SQL).join(', ')} bo'lishi mumkin`);
+    }
+    const toliq = harakatBor ? `${asos} AND ${HARAKAT_SQL[harakat]}` : asos;
     const rep = { from: D.from, to: D.to, ombor, search: `%${search || ''}%`, limit, offset: (page - 1) * limit };
 
     const [rows, [{ jami }], kpi, omborlar] = await Promise.all([

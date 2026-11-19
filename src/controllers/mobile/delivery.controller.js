@@ -3,10 +3,12 @@ const sequelize = require('../../db/db-sequelize');
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
 const { MijozModel } = require('../../models/mijoz.model');
 const AgentModel = require('../../models/agent.model');
+const AgentRegisterModel = require('../../models/agent_register.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { TripSheetModel, YetkazishQaytarishModel } = require('../../models/tripSheet.model');
 const HttpException = require('../../utils/HttpException.utils');
-const { ok, dostavchiIdOl } = require('./shared');
+const { ok, dostavchiIdOl, mobilVaqt } = require('./shared');
+const { kunKey } = require('../../utils/tahlil.utils');
 const { shapeDoc } = require('./docShape');
 const { arizaYetkazildiEffektlari } = require('../../utils/arizaYetkazildi.utils');
 const { qulflabOl } = require('../../utils/qulf.utils');
@@ -88,8 +90,8 @@ class MobileDeliveryController {
   orderDelivery = async (req, res, next) => {
     const { docId, date1, date2 } = req.body;
     const dId = talabDostavchi(req);
-    let vaqt = date2 ? new Date(date2) : new Date();
-    if (isNaN(vaqt.getTime())) vaqt = new Date();
+    // Oflayn: haqiqiy yetkazilgan vaqt (kelajak / 7 kundan eski bo'lsa — server vaqti)
+    const vaqt = mobilVaqt(date2);
 
     // Qulf + qayta tekshiruv tranzaksiya ichida: oflayn qayta yuborish yoki ikki marta
     // bosish effektlarni (kassa/qarz/bonus) ikkinchi marta qo'llamaydi.
@@ -107,7 +109,9 @@ class MobileDeliveryController {
         { holat: 'yetkazildi', yetkazilgan_sana: vaqt, yetkazgan_dostavchi_id: dId },
         { transaction: t },
       );
-      await arizaYetkazildiEffektlari(ariza, { transaction: t, userId: null });
+      // Naqd dostavchik qo'lida: kassa yozuvi user_id = dostavchi, manba 'dostavchik' —
+      // inkassatsiya uni dostavchik yig'gan pul deb sanaydi (yetkazdim bilan bir xil)
+      await arizaYetkazildiEffektlari(ariza, { transaction: t, userId: dId, kassaManbaTur: 'dostavchik', sana: vaqt });
     });
 
     ok(res, { docId: String(docId), date1: date1 || '', date2: date2 || '' }, 'Yetkazildi');
@@ -123,6 +127,7 @@ class MobileDeliveryController {
     const { docId, data: sana, products = [] } = req.body;
     const dostavchiId = talabDostavchi(req);
     const list = Array.isArray(products) ? products : [];
+    if (list.length > 500) throw new HttpException(400, "Tovar qatorlari juda ko'p (500 tadan oshmasin)");
 
     // So'rovni avval tekshirib olamiz (tovar va miqdor) — noto'g'ri qator jim o'tkazib yuborilmaydi
     const sorov = [];
@@ -143,7 +148,8 @@ class MobileDeliveryController {
       }
       if (!sorov.length) return;
 
-      const qatorlar = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, transaction: t });
+      // Qatorlar qulflanadi — qaytarish ularni kamaytiradi (yetkazdim bilan bir xil)
+      const qatorlar = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, transaction: t, lock: t.LOCK.UPDATE });
       const avvalgi = await YetkazishQaytarishModel.findAll({ where: { ariza_id: ariza.id }, transaction: t });
 
       // Idempotentlik: oflayn navbat AYNAN shu so'rovni qayta yuborsa (har bir qator uchun
@@ -158,22 +164,25 @@ class MobileDeliveryController {
       });
       if (takror) return;
 
-      const qaytgan = {};   // tovar_id → shu buyurtmadan allaqachon qaytarilgan miqdor
-      for (const a of avvalgi) qaytgan[String(a.tovar_id)] = (qaytgan[String(a.tovar_id)] || 0) + n(a.dona);
-
+      // Qaytarish endi ariza qatorini o'zi kamaytiradi (yetkazdim kabi), shuning uchun
+      // qator.jami_dona — haqiqatda mijozda qolgan miqdor; qaytarish chegarasi shu.
+      // Bir so'rovda bir tovar bir necha marta kelsa — qatorning joriy (kamaygan) qiymati ishlatiladi.
+      const vaqt = new Date();
+      let qaytSumma = 0;
       for (const p of sorov) {
         const qator = qatorlar.find(q => String(q.tovar_id) === p.tovarId);
         if (!qator) throw new HttpException(400, `Tovar #${p.tovarId} bu buyurtmada yo'q`);
-        const qoldi = r3(n(qator.jami_dona) - (qaytgan[p.tovarId] || 0));
+        const qoldi = r3(n(qator.jami_dona));
         if (p.dona > qoldi + 0.0005) {
           throw new HttpException(400, `"${qator.tovar_nomi || `#${p.tovarId}`}" — qaytarish miqdori buyurtmadagidan ko'p. Mumkin: ${Math.max(0, qoldi)}, so'raldi: ${p.dona}`);
         }
-        qaytgan[p.tovarId] = (qaytgan[p.tovarId] || 0) + p.dona;
 
-        const dona = p.dona;
+        const dona = Math.min(p.dona, qoldi);
         const narx = n(qator.narx);
-        const summa = +(narx * dona).toFixed(2);
+        // Oxirgi dona qaytsa — qator summasining qoldig'i (yaxlitlash farqi qolmasin)
+        const summa = dona >= qoldi - 0.0005 ? +n(qator.summa).toFixed(2) : +(narx * dona).toFixed(2);
         const tur = p.tur;
+        qaytSumma += summa;
 
         await YetkazishQaytarishModel.create({
           ariza_id: ariza.id,
@@ -182,7 +191,7 @@ class MobileDeliveryController {
           dona, summa, tur,
           sabab: p.sabab,
           dostavchi_id: dostavchiId,
-          sana: new Date(),
+          sana: vaqt,
         }, { transaction: t });
 
         // Ombor effekti: qaytarma -> asosiy ombordagi qoldiqqa qaytadi (kirim),
@@ -202,8 +211,41 @@ class MobileDeliveryController {
           kirim_narx: 0,
           sotuv_narx: narx,
           summa,
-          sana: new Date(),
+          sana: vaqt,
         }, { transaction: t });
+
+        // Qator haqiqatda topshirilgan miqdorga tushadi (yetkazdim bilan bir xil)
+        await qator.update({
+          jami_dona: r3(n(qator.jami_dona) - dona),
+          dona: Math.max(0, r3(n(qator.dona) - dona)),
+          summa: Math.max(0, +(n(qator.summa) - summa).toFixed(2)),
+        }, { transaction: t });
+      }
+
+      qaytSumma = +qaytSumma.toFixed(2);
+      if (qaytSumma <= 0) return;
+      const eskiJami = n(ariza.jami_summa);
+      const yangiJami = Math.max(0, +(eskiJami - qaytSumma).toFixed(2));
+      const kamaydi = +(eskiJami - yangiJami).toFixed(2);   // jami 0 dan pastga tushmaydi
+      const yangi = { jami_summa: yangiJami };
+      // tolangan_summa jami_summa'dan oshmasin
+      if (n(ariza.tolangan_summa) > yangiJami) yangi.tolangan_summa = yangiJami;
+      await ariza.update(yangi, { transaction: t });
+
+      if (ariza.holat === 'yetkazildi' && kamaydi > 0) {
+        // Yetkazilgan buyurtma: mijoz balansi = to'lovlar − yetkazilgan savdolar (manfiy = qarz,
+        // utils/qarz.utils.js). Savdo kamaydi → balans shu summaga OSHADI (qarz kamayadi; joyida
+        // olingan naqd yangi summadan ko'p bo'lsa — ortig'i mijoz foydasiga qoladi, kassa o'zgarmaydi).
+        if (ariza.mijoz_id) {
+          await MijozModel.increment('balans', { by: kamaydi, where: { id: ariza.mijoz_id }, transaction: t });
+        }
+        // Agent plan-fakti va bonusi haqiqiy savdoga tushadi (yetkazdim'da effektlar
+        // kamaygan summadan hisoblanadi — shu bilan bir xil natija)
+        const regs = await AgentRegisterModel.findAll({ where: { ariza_id: ariza.id, tur: 'savdo' }, transaction: t, lock: t.LOCK.UPDATE });
+        for (const r of regs) {
+          const yangiSumma = Math.max(0, +(n(r.summa) - kamaydi).toFixed(2));
+          await r.update({ summa: yangiSumma, bonus_summa: Math.round(yangiSumma * n(r.bonus_foiz) / 100) }, { transaction: t });
+        }
       }
     });
 
@@ -227,7 +269,7 @@ class MobileDeliveryController {
   // GET getTripSheet/ — dostavchikning bugungi (yoki so'ralgan sana) marshrut varag'i
   getTripSheet = async (req, res, next) => {
     if (req.currentRole !== 'dostavchi') throw new HttpException(403, 'Faqat dostavchik uchun');
-    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '') ? req.query.sana : new Date().toISOString().slice(0, 10);
+    const sana = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sana || '') ? req.query.sana : kunKey(new Date());
 
     const trip = await TripSheetModel.findOne({ where: { dostavchi_id: req.currentAgent.id, sana } });
     if (!trip) { ok(res, null); return; }

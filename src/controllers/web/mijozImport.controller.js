@@ -332,6 +332,27 @@ class MijozImportController {
     const bugun = new Date();
     const sanaMatni = `${String(bugun.getDate()).padStart(2, '0')}.${String(bugun.getMonth() + 1).padStart(2, '0')}.${bugun.getFullYear()}`;
 
+    // Saqlash rejimida parallel importlar navbatma-navbat bajariladi: MySQL GET_LOCK sessiyaga
+    // bog'langan, shuning uchun alohida ulanish (lockT) butun ish davomida band qilinadi. Qulf
+    // olingandan keyin mavjud mijozlar QAYTA o'qiladi va moslanadi, saqlash tranzaksiyasi commit
+    // bo'lgach qulf qo'yib yuboriladi — ikki import bir xil mijozni ikki marta yaratmaydi.
+    if (!saqla) return this.#bajar(req, res, { qatorlar, xarita, agentXarita, sozlama, rejim, yangilash, saqla, bugun, sanaMatni });
+    const lockT = await sequelize.transaction();
+    try {
+      const [q] = await sequelize.query("SELECT GET_LOCK('mijoz_import', 30) AS ok", { transaction: lockT, type: sequelize.QueryTypes.SELECT });
+      if (Number(q && q.ok) !== 1) throw new HttpException(409, "Boshqa import hozir bajarilmoqda — birozdan so'ng qayta urinib ko'ring");
+      try {
+        await this.#bajar(req, res, { qatorlar, xarita, agentXarita, sozlama, rejim, yangilash, saqla, bugun, sanaMatni });
+      } finally {
+        await sequelize.query("SELECT RELEASE_LOCK('mijoz_import')", { transaction: lockT }).catch(() => {});
+      }
+    } finally {
+      // lockT hech narsa yozmaydi — faqat ulanishni ushlab turadi (ulanish uzilsa ham qulf MySQL'da bo'shaydi)
+      await lockT.commit().catch(() => {});
+    }
+  };
+
+  async #bajar(req, res, { qatorlar, xarita, agentXarita, sozlama, rejim, yangilash, saqla, bugun, sanaMatni }) {
     const [mavjud, hududlar, toifalar, agentlar] = await Promise.all([
       MijozModel.findAll({ attributes: ['id', 'nomi', 'telefon', 'telefon2', 'manzil', 'mo_ljal', 'territoriya_id', 'kategoriya_id', 'agent_id', 'sinf', 'narx_turi', 'balans', 'kredit_limit', 'tolov_muddati_kun', 'inn', 'hisob_raqam', 'bank', 'mfo', 'yuridik_nomi', 'tashrif_kunlari', 'lat', 'lng', 'faol'], raw: true }),
       TerritoriyaModel.findAll({ raw: true }),
@@ -351,23 +372,27 @@ class MijozImportController {
     const agentTanla = (masul) => {
       if (!masul) return { id: null, nom: null };
       const v = agentXarita[masul];
-      if (v === 'yangi') { if (!yangiAgentlar.has(masul)) yangiAgentlar.set(masul, { fullname: masul }); return { id: 'yangi:' + masul, nom: masul + ' (yangi)' }; }
+      if (v === 'yangi') { if (!yangiAgentlar.has(masul)) yangiAgentlar.set(masul, { fullname: toza(masul).slice(0, 100).trim() || 'Agent' }); return { id: 'yangi:' + masul, nom: masul + ' (yangi)' }; }
       if (v === null || v === undefined || v === '' ) return { id: null, nom: null };
       const a = agentMap.get(Number(v));
       return a ? { id: a.id, nom: a.fullname } : { id: null, nom: null };
     };
+    // Yangi hudud / toifa / agent nomi ustun hajmiga (100) qisqartiriladi — aks holda
+    // uzun nom bazada xato beradi yoki keyingi importda mavjudi bilan mos kelmaydi
+    const NOM_MAX = 100;
+    const qisqa = nom => toza(nom).slice(0, NOM_MAX).trim();
     const hududTanla = (nom) => {
-      if (!nom) return null;
-      const k = norm(nom);
+      if (!nom || !qisqa(nom)) return null;
+      const k = norm(qisqa(nom));
       if (hududMap.has(k)) return hududMap.get(k).id;
-      if (!yangiHududlar.has(k)) yangiHududlar.set(k, { nomi: toza(nom) });
+      if (!yangiHududlar.has(k)) yangiHududlar.set(k, { nomi: qisqa(nom) });
       return 'yangi:' + k;
     };
     const toifaTanla = (nom) => {
-      if (!nom) return null;
-      const k = norm(nom);
+      if (!nom || !qisqa(nom)) return null;
+      const k = norm(qisqa(nom));
       if (toifaMap.has(k)) return toifaMap.get(k).id;
-      if (!yangiToifalar.has(k)) yangiToifalar.set(k, { nomi: toza(nom) });
+      if (!yangiToifalar.has(k)) yangiToifalar.set(k, { nomi: qisqa(nom) });
       return 'yangi:' + k;
     };
 
@@ -472,7 +497,7 @@ class MijozImportController {
     javob.saqlandi = true;
     javob.qatorlar = natija.map(({ yozuv, ...q }) => q);
     res.send(javob);
-  };
+  }
 
   /* GET /mijozlar/import/shablon — bo'sh Excel namuna (bizning sarlavhalar + 2 ta misol) */
   shablon = async (req, res) => {

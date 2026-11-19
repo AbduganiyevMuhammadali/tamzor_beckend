@@ -111,6 +111,8 @@ class NarxRuyxatController {
   saveNarxlar = async (req, res) => {
     yozishHuquqi(req);
     const r = await topOrYoq(req.params.id);
+    // Validator ham cheklaydi; bu yerda — validatorsiz chaqiruvlar uchun ham himoya
+    if (Array.isArray(req.body.qatorlar) && req.body.qatorlar.length > 5000) throw new HttpException(400, 'Bir so\'rovda 5000 tadan ortiq qator yuborib bo\'lmaydi');
     const kelgan = (req.body.qatorlar || []).map(q => ({ tovar_id: Number(q.tovar_id), narx: Number(q.narx) || 0 }));
     const musbat = kelgan.filter(q => q.narx > 0);
 

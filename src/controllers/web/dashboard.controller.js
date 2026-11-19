@@ -42,7 +42,7 @@ function lastNDays(n) {
   for (let i = n - 1; i >= 0; i--) {
     const d = new Date();
     d.setDate(d.getDate() - i);
-    days.push(d.toISOString().slice(0, 10));
+    days.push(kunKey(d));   // mahalliy kun (toISOString UTC kunini berardi)
   }
   return days;
 }
@@ -662,6 +662,8 @@ class DashboardController {
     // ── SPARKLINES: har bir KPI kartasi uchun so'nggi 14 kunlik kunlik qator ──
     const SPARK_DAYS = 14;
     const days = lastNDays(SPARK_DAYS);
+    // Kunlar mahalliy (Toshkent) vaqt bo'yicha — CONVERT_TZ, boshqa dashboard bloklari kabi
+    const sparkTz = tzOffset();
     const sparkFrom = new Date(); sparkFrom.setDate(sparkFrom.getDate() - (SPARK_DAYS - 1)); sparkFrom.setHours(0,0,0,0);
 
     const [
@@ -671,60 +673,60 @@ class DashboardController {
     ] = await Promise.all([
       // Yalpi foyda (taxminiy, o'rtacha kirim narxi asosida) — kunlik yetkazilgan ariza summasi
       sequelize.query(`
-        SELECT DATE(createdAt) AS d, COALESCE(SUM(jami_summa), 0) AS v
+        SELECT DATE_FORMAT(CONVERT_TZ(createdAt, '+00:00', :tz), '%Y-%m-%d') AS d, COALESCE(SUM(jami_summa), 0) AS v
         FROM ariza WHERE turi='sotish' AND holat='yetkazildi' AND deletedAt IS NULL
           AND createdAt >= :from
-        GROUP BY DATE(createdAt)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Sof kassa oqimi — kunlik (kirim - chiqim), kumulyativ emas
       sequelize.query(`
-        SELECT DATE(sana) AS d, COALESCE(SUM(CASE WHEN tur='kirim' THEN summa ELSE -summa END), 0) AS v
-        FROM kassa WHERE sana >= :from GROUP BY DATE(sana)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        SELECT DATE_FORMAT(CONVERT_TZ(sana, '+00:00', :tz), '%Y-%m-%d') AS d, COALESCE(SUM(CASE WHEN tur='kirim' THEN summa ELSE -summa END), 0) AS v
+        FROM kassa WHERE sana >= :from GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Ombor kirim summasi (prixod/xarid) — kunlik
       sequelize.query(`
-        SELECT DATE(sana) AS d, COALESCE(SUM(summa), 0) AS v
+        SELECT DATE_FORMAT(CONVERT_TZ(sana, '+00:00', :tz), '%Y-%m-%d') AS d, COALESCE(SUM(summa), 0) AS v
         FROM tovar_register WHERE tur='kirim' AND manba_tur='prixod' AND sana >= :from
-        GROUP BY DATE(sana)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Tasdiqlangan prixodlar soni — kunlik
       sequelize.query(`
-        SELECT DATE(sana) AS d, COUNT(*) AS v
-        FROM prixod WHERE holat='tasdiqlangan' AND sana >= :from GROUP BY DATE(sana)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        SELECT DATE_FORMAT(CONVERT_TZ(sana, '+00:00', :tz), '%Y-%m-%d') AS d, COUNT(*) AS v
+        FROM prixod WHERE holat='tasdiqlangan' AND sana >= :from GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Yangi mijozlar — kunlik, kumulyativ (o'sib boruvchi jami)
       sequelize.query(`
-        SELECT DATE(createdAt) AS d, COUNT(*) AS v
-        FROM mijoz WHERE deletedAt IS NULL AND createdAt >= :from GROUP BY DATE(createdAt)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        SELECT DATE_FORMAT(CONVERT_TZ(createdAt, '+00:00', :tz), '%Y-%m-%d') AS d, COUNT(*) AS v
+        FROM mijoz WHERE deletedAt IS NULL AND createdAt >= :from GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Faol agentlar — kunlik GPS faolligi (distinct)
       sequelize.query(`
-        SELECT DATE(sana) AS d, COUNT(DISTINCT agent_id) AS v
-        FROM agent_location WHERE rol='agent' AND sana >= :from GROUP BY DATE(sana)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        SELECT DATE_FORMAT(CONVERT_TZ(sana, '+00:00', :tz), '%Y-%m-%d') AS d, COUNT(DISTINCT agent_id) AS v
+        FROM agent_location WHERE rol='agent' AND sana >= :from GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Yetkazuvchilar — statik (o'zgarmaydi), bo'sh qatordan flat chiziq hosil bo'ladi
       Promise.resolve([]),
 
       // Ombor qoldig'i — kunlik dona harakati (chiqim manfiy), kumulyativ trend
       sequelize.query(`
-        SELECT DATE(sana) AS d, COALESCE(SUM(donada), 0) AS v
-        FROM tovar_register WHERE sana >= :from GROUP BY DATE(sana)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        SELECT DATE_FORMAT(CONVERT_TZ(sana, '+00:00', :tz), '%Y-%m-%d') AS d, COALESCE(SUM(donada), 0) AS v
+        FROM tovar_register WHERE sana >= :from GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Sotuv — kunlik summa, buyurtma soni va xarid qilgan mijozlar
       sequelize.query(`
-        SELECT DATE(createdAt) AS d, COALESCE(SUM(jami_summa), 0) AS v,
+        SELECT DATE_FORMAT(CONVERT_TZ(createdAt, '+00:00', :tz), '%Y-%m-%d') AS d, COALESCE(SUM(jami_summa), 0) AS v,
           COUNT(*) AS c, COUNT(DISTINCT mijoz_id) AS m
         FROM ariza WHERE turi='sotish' AND holat<>'bekor' AND deletedAt IS NULL
           AND createdAt >= :from
-        GROUP BY DATE(createdAt)
-      `, { replacements: { from: sparkFrom }, type: sequelize.QueryTypes.SELECT }),
+        GROUP BY d
+      `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
     ]);
 
     // Kumulyativ qatorlar uchun: kunlik delta'larni o'sib boruvchi jamiga aylantirish

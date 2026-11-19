@@ -98,3 +98,8 @@ package-lock.json
 # Zaxira env fayllari — maxfiy ma'lumot bor
 .env.bak
 .env.*.bak
+
+# Frontend uchun ichki hujjatlar (repoga kirmaydi)
+FRONTEND-UCHUN.md
+FRONTEND-PROMPT.md
+API-VALIDATSIYA.md

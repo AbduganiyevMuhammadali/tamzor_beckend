@@ -26,10 +26,11 @@ const AgentModel = require('../../models/agent.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const KassaModel = require('../../models/kassa.model');
 const { TripSheetModel, YetkazishQaytarishModel, YetkazishUrinishModel } = require('../../models/tripSheet.model');
-const { ok, fail, mobilVaqt, mobilKalit } = require('./shared');
+const { ok, fail, mobilVaqt, mobilKalit, summaOl } = require('./shared');
 const { arizaYetkazildiEffektlari } = require('../../utils/arizaYetkazildi.utils');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
-const { qulflabOl } = require('../../utils/qulf.utils');
+const { qulflabOl, keyingiTartib, maksRaqam } = require('../../utils/qulf.utils');
+const DostavchiModel = require('../../models/dostavchi.model');
 
 const BRAK_OMBOR = 'Brak ombori';
 const AKTIV = ['yolda'];
@@ -226,30 +227,46 @@ class MobileDostavchikController {
   };
 
   // POST reysBoshla/ { lat, long } — mashina chiqdi
+  // Hammasi BITTA tranzaksiyada, dostavchi qatori qulflangan holda: ikki parallel so'rov
+  // (ikki marta bosish, oflayn qayta yuborish) shu kun uchun ikkita trip sheet yaratmaydi.
+  // Raqam web bilan bir xil hisoblagichdan (hujjat_raqam, keyingiTartib) — COUNT+1 emas.
   reysBoshla = async (req, res) => {
     const dId = talab(req, res); if (!dId) return;
     const vaqt = mobilVaqt(req.body.vaqt);      // oflayn: mashina haqiqatda chiqqan vaqt
     const sana = bugunKey(vaqt);
     const pos = koordinata(req.body);
-    let trip = await tripBugun(dId, sana);
-    if (trip?.holat === 'yakunlandi') return fail(res, 'Bugungi reys allaqachon yakunlangan');
-    // Yo'ldagi, hali bu reysda bo'lmagan buyurtmalar (web'da trip sheet tuzilmagan yoki
-    // reys tuzilgandan keyin jo'natilgan) — reys oxiriga qo'shiladi
-    const yangilar = await ArizaModel.findAll({
-      where: { dostavchi_id: dId, turi: 'sotish', holat: { [Op.in]: AKTIV }, ...(trip ? { [Op.or]: [{ trip_sheet_id: null }, { trip_sheet_id: { [Op.ne]: trip.id } }] } : {}) },
-      order: [['id', 'ASC']],
+    const d = req.currentRole === 'dostavchi' ? req.currentAgent : null;
+    const natija = await sequelize.transaction(async (t) => {
+      const dostavchi = await qulflabOl(DostavchiModel, dId, t, { attributes: ['id', 'ism'] });
+      if (!dostavchi) return { xato: ['Dostavchik topilmadi', 404] };
+      let trip = await TripSheetModel.findOne({ where: { dostavchi_id: dId, sana }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
+      if (trip?.holat === 'yakunlandi') return { xato: ['Bugungi reys allaqachon yakunlangan', 400] };
+      // Yo'ldagi, hali bu reysda bo'lmagan buyurtmalar (web'da trip sheet tuzilmagan yoki
+      // reys tuzilgandan keyin jo'natilgan) — reys oxiriga qo'shiladi
+      const yangilar = await ArizaModel.findAll({
+        where: { dostavchi_id: dId, turi: 'sotish', holat: { [Op.in]: AKTIV }, ...(trip ? { [Op.or]: [{ trip_sheet_id: null }, { trip_sheet_id: { [Op.ne]: trip.id } }] } : {}) },
+        // Qulfsiz o'qiladi: qulf tartibi web trip sheet bilan bir xil (hisoblagich → ariza),
+        // reysBoshla'ning o'zi dostavchi qatori qulfi bilan navbatma-navbat o'tadi
+        order: [['id', 'ASC']], transaction: t,
+      });
+      if (!trip) {
+        if (!yangilar.length) return { xato: ['Sizga bugun buyurtma tayinlanmagan', 400] };
+        const prefiks = `TS-${sana}`;
+        const tartib = await keyingiTartib(prefiks, () => maksRaqam('trip_sheet', prefiks, t), t);
+        trip = await TripSheetModel.create({
+          raqam: `${prefiks}-${String(tartib).padStart(3, '0')}`, dostavchi_id: dId,
+          dostavchi_nomi: d ? d.ism : (dostavchi.ism || req.currentAgent.fullname), sana,
+        }, { transaction: t });
+      }
+      const oxirgi = (await ArizaModel.max('trip_tartib', { where: { trip_sheet_id: trip.id }, transaction: t })) || 0;
+      for (const [i, a] of yangilar.entries()) await a.update({ trip_sheet_id: trip.id, trip_tartib: oxirgi + i + 1 }, { transaction: t });
+      if (trip.holat !== 'yolda') {
+        await trip.update({ holat: 'yolda', boshlangan_vaqt: vaqt, boshlangan_lat: pos?.lat ?? null, boshlangan_lng: pos?.lng ?? null }, { transaction: t });
+      }
+      return { trip };
     });
-    if (!trip) {
-      if (!yangilar.length) return fail(res, 'Sizga bugun buyurtma tayinlanmagan');
-      const d = req.currentRole === 'dostavchi' ? req.currentAgent : null;
-      const count = await TripSheetModel.count({ where: { sana } });
-      trip = await TripSheetModel.create({ raqam: `TS-${sana}-${pad2(count + 1).padStart(3, '0')}`, dostavchi_id: dId, dostavchi_nomi: d ? d.ism : req.currentAgent.fullname, sana });
-    }
-    const oxirgi = (await ArizaModel.max('trip_tartib', { where: { trip_sheet_id: trip.id } })) || 0;
-    for (const [i, a] of yangilar.entries()) await a.update({ trip_sheet_id: trip.id, trip_tartib: oxirgi + i + 1 });
-    if (trip.holat !== 'yolda') {
-      await trip.update({ holat: 'yolda', boshlangan_vaqt: vaqt, boshlangan_lat: pos?.lat ?? null, boshlangan_lng: pos?.lng ?? null });
-    }
+    if (natija.xato) return fail(res, natija.xato[0], natija.xato[1]);
+    const { trip } = natija;
     ok(res, { tripId: trip.id, raqam: trip.raqam, holat: trip.holat, boshlanganVaqt: trip.boshlangan_vaqt }, 'Reys boshlandi — yo‘l bo‘lsin!');
   };
 
@@ -369,7 +386,8 @@ class MobileDostavchikController {
   qarzTolov = async (req, res) => {
     const dId = talab(req, res); if (!dId) return;
     const { klientId, izoh } = req.body;
-    const summa = n(req.body.summa);
+    // Chekli, 0..1e12 (Infinity/NaN — 400)
+    const summa = summaOl(req.body.summa, { bosh: 0, xabar: "To'lov summasi noto'g'ri" });
     const vaqt = mobilVaqt(req.body.vaqt);
     const mobilId = mobilKalit(req.body.mobilId);
     const takror = async () => {
@@ -453,7 +471,7 @@ class MobileDostavchikController {
     }
     const pos = koordinata(req.body);
     const naqdRaw = req.body.naqdSumma ?? req.body.naqd;
-    const naqdElon = naqdRaw === undefined || naqdRaw === null || naqdRaw === '' ? null : Math.max(0, n(naqdRaw));
+    const naqdElon = summaOl(naqdRaw, { bosh: null, xabar: "Naqd summa noto'g'ri" });
     await trip.update({ holat: 'yakunlandi', tugagan_vaqt: vaqt, tugagan_lat: pos?.lat ?? null, tugagan_lng: pos?.lng ?? null, naqd_elon: naqdElon, izoh: req.body.izoh || trip.izoh });
     const pul = await bugungiPul(dId, sana);
     const kutilgan = Math.max(0, pul.yigildi - pul.topshirildi);

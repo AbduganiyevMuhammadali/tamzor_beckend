@@ -24,6 +24,23 @@ function sanaOl(v) {
   if (isNaN(d)) throw new HttpException(400, "Sana noto'g'ri");
   return d;
 }
+/* Qaytarish muddati: YYYY-MM-DD va haqiqiy sana (aks holda 400). Bo'sh — null */
+function muddatOl(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const m = String(v).slice(0, 10);
+  const d = new Date(`${m}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(m) || Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== m) {
+    throw new HttpException(400, "Muddat sanasi noto'g'ri (YYYY-MM-DD)");
+  }
+  return m;
+}
+/* Shaxs izohi (TEXT) — juda uzun matn rad etiladi */
+function shaxsIzoh(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const s = String(v);
+  if (s.length > 2000) throw new HttpException(400, 'Izoh 2000 belgidan oshmasin');
+  return s;
+}
 const bugunISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 /* Bitta shaxs bo'yicha yig'indilar (ro'yxat va kartochka uchun) */
@@ -63,7 +80,8 @@ async function harakatYoz(shaxs, b, userId, t) {
   if (!(summa > 0)) throw new HttpException(400, "Summa noto'g'ri");
   const sana = sanaOl(b.sana);
   const usul = USUL.includes(b.tolov_usul) ? b.tolov_usul : 'naqt';
-  const muddat = (tur === 'qarz_berdik' || tur === 'qarz_oldik' || tur.startsWith('bosh_')) && b.muddat ? String(b.muddat).slice(0, 10) : null;
+  const muddat = (tur === 'qarz_berdik' || tur === 'qarz_oldik' || tur.startsWith('bosh_')) ? muddatOl(b.muddat) : null;
+  if (b.izoh && String(b.izoh).trim().length > 255) throw new HttpException(400, 'Izoh 255 belgidan oshmasin');
   const izoh = b.izoh ? String(b.izoh).trim().slice(0, 255) : null;
   let kassa = null;
   if (T.kassa) {
@@ -129,8 +147,9 @@ class UchinchiShaxsController {
     const ism = String(req.body.ism || '').trim();
     if (!ism) throw new HttpException(400, 'Ism kiritilmagan');
     const bosh = req.body.boshlangich;
+    const izoh = shaxsIzoh(req.body.izoh);
     const s = await sequelize.transaction(async (t) => {
-      const s = await UchinchiShaxsModel.create({ ism: ism.slice(0, 150), telefon: req.body.telefon ? String(req.body.telefon).trim().slice(0, 30) : null, izoh: req.body.izoh || null }, { transaction: t });
+      const s = await UchinchiShaxsModel.create({ ism: ism.slice(0, 150), telefon: req.body.telefon ? String(req.body.telefon).trim().slice(0, 30) : null, izoh }, { transaction: t });
       if (bosh && n(bosh.summa) > 0 && (bosh.yon === 'qarzdor' || bosh.yon === 'haqdor')) {
         await harakatYoz(s, { tur: bosh.yon === 'qarzdor' ? 'bosh_qarzdor' : 'bosh_haqdor', summa: bosh.summa, sana: bosh.sana, muddat: bosh.muddat, izoh: bosh.izoh || "Tizimga o'tishdagi qoldiq" }, req.currentUser?.id, t);
       }
@@ -146,7 +165,7 @@ class UchinchiShaxsController {
     const u = {};
     if (req.body.ism !== undefined) { const ism = String(req.body.ism || '').trim(); if (!ism) throw new HttpException(400, 'Ism kiritilmagan'); u.ism = ism.slice(0, 150); }
     if (req.body.telefon !== undefined) u.telefon = req.body.telefon ? String(req.body.telefon).trim().slice(0, 30) : null;
-    if (req.body.izoh !== undefined) u.izoh = req.body.izoh || null;
+    if (req.body.izoh !== undefined) u.izoh = shaxsIzoh(req.body.izoh);
     if (req.body.faol !== undefined) u.faol = !!req.body.faol;
     await s.update(u);
     res.send(s);
