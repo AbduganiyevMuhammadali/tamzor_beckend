@@ -138,7 +138,7 @@ Test skriptlari vaqtinchalik scratchpad papkasida turibdi (`tests/integration.js
 | `webpack` `.env.pack` dagi sirlarni (`SECRET_JWT`, DB paroli) Electron paketiga joylaydi | Paketlash arxitekturasiga oid masala |
 | Mobil `LoadConfig` javobi `mobile_password` qiymatini auth'siz qaytaradi | APK bilan moslik |
 | Agent ombori kaliti agentning to'liq ismi (`agentOmbori(fullname)`); ism o'zgarsa qoldiq "yo'qoladi" | Ma'lumot migratsiyasini talab qiladi |
-| Mobil `qarzTolov`, `checkIn`, `chekUp` da ega tekshiruvi yo'q | Topshiriq doirasidan tashqarida qolgan |
+| ~~Mobil `qarzTolov`, `checkIn`, `chekUp` da ega tekshiruvi yo'q~~ | ✅ 2026-11-19 tuzatildi: `qarzTolov` — faqat dostavchiga buyurtmasi tayinlangan mijoz (aks holda 403); `checkIn` — begona mijozga tashrif yoziladi, lekin uning koordinatasi o'zgartirilmaydi; `chekUp` — audit roli ochiq bo'lmasa 403 (hozir hech kimda yo'q) |
 | Mobilda narx serverdagi narx ro'yxatidan majburan olinmaydi (faqat summa izchilligi tekshiriladi) | Agent optom yoki chakana narxni tanlaydi, dollar narxi bor — majburlash to'g'ri sotuvlarni buzadi |
 | `dostavchiInkassatsiya.utils.js` hali UTC bo'yicha `DATE(sana)` bilan guruhlaydi | Hisobot lokal kun bilan ishlaydi — ikkalasini moslashtirish kerak |
 | `inkassatsiya (agent_id/dostavchi_id, sana)` da UNIQUE indeks yo'q (kodda qulf bilan himoyalangan) | Mavjud dublikat yozuvlar bo'lishi mumkin, migratsiya oldidan tekshirish kerak |

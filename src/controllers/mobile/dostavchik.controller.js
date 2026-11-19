@@ -383,6 +383,10 @@ class MobileDostavchikController {
     if (!klientId || summa <= 0) return fail(res, "Mijoz va summa noto'g'ri");
     const mijoz = await MijozModel.findByPk(klientId);
     if (!mijoz) return fail(res, 'Mijoz topilmadi', 404);
+    // Faqat dostavchikning mijozidan: unga shu mijozning buyurtmasi tayinlangan bo'lishi kerak
+    // (aks holda istalgan dostavchik istalgan mijoz qarzini kamaytira olardi)
+    const bogliq = await ArizaModel.count({ where: { mijoz_id: mijoz.id, dostavchi_id: dId } });
+    if (!bogliq) return fail(res, 'Bu mijoz sizning marshrutingizda emas', 403);
     const eskiBalans = n(mijoz.balans);
     try {
       await sequelize.transaction(async (t) => {

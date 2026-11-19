@@ -30,7 +30,9 @@ class MobileTashrifController {
     const masofa = masofaMetr(mijoz.lat, mijoz.lng, lat, long);
     // Mijoz nuqtasi hali yo'q — agent do'kon oldida turibdi, shu nuqta mijoz manzili bo'ladi
     const nuqta = koordinata(req.body);
-    if (nuqta && (mijoz.lat == null || mijoz.lng == null)) {
+    // Koordinata faqat O'Z mijoziga yoziladi — begona mijozning manzilini boshqa agent o'zgartirmasin
+    const ozMijozi = Number(mijoz.agent_id) === Number(agent.id);
+    if (nuqta && ozMijozi && (mijoz.lat == null || mijoz.lng == null)) {
       await mijoz.update({ lat: nuqta.lat, lng: nuqta.lng });
     }
     const tashrif = await TashrifModel.create({
@@ -48,7 +50,7 @@ class MobileTashrifController {
     ok(res, {
       tashrifId: tashrif.id, masofa,
       uzoqda: masofa != null && masofa > SOTUV_RADIUS_M,
-      mijozNuqtasiBelgilandi: masofa == null && !!nuqta,
+      mijozNuqtasiBelgilandi: masofa == null && !!nuqta && ozMijozi,
     }, 'Check-in qayd qilindi');
   };
 

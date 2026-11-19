@@ -4,6 +4,7 @@ const { MijozModel } = require('../../models/mijoz.model');
 const { Op, fn, col } = require('sequelize');
 const HttpException = require('../../utils/HttpException.utils');
 const { ok, SABABLAR } = require('./shared');
+const { ochiqRollar, rolOchiqEmasXabari } = require('../../utils/mobilRollar.utils');
 
 /* ── Audit (hujjat 3.6, 3.7, 8.1, 8.2) ────────────────────────────────────── */
 class MobileAuditController {
@@ -80,7 +81,13 @@ class MobileAuditController {
   chekUp = async (req, res, next) => {
     const b = req.body || {};
     const agent = req.currentAgent || {};
+    // Audit faqat audit roli ochiq foydalanuvchiga (login `rollar`). Avval istalgan token
+    // istalgan mijoz nomidan audit yozardi.
+    if (!ochiqRollar(agent, req.currentRole).includes('audit')) {
+      throw new HttpException(403, rolOchiqEmasXabari('audit'));
+    }
     const mijoz = b.client_id ? await MijozModel.findByPk(b.client_id) : null;
+    if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
 
     await AuditModel.create({
       agent_id:     agent.id || null,
