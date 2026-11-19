@@ -12,7 +12,10 @@ SIRLAR=/home/sellz/tamzor/demo.sirlar
 pm2 stop tamzor-demo >/dev/null 2>&1 || true
 mysql -e "DROP DATABASE IF EXISTS \`$DB\`; CREATE DATABASE \`$DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; GRANT ALL PRIVILEGES ON \`$DB\`.* TO 'tamzor'@'localhost'; FLUSH PRIVILEGES;"
 # Demo instansiya muhiti: alohida port/baza, yo'naltirishsiz, GPS ish vaqti kun bo'yi (tekshiruvchi istalgan soatda ko'rsin)
-export PORT=$PORT DB_DATABASE=$DB DEMO_LOGIN= DEMO_SERVER= GPS_BOSH=00:00 GPS_OXIR=23:59
+# Alohida JWT kaliti: demo tokeni ishchi serverda (bir xil agent_id) hech qachon o'tmasin
+grep -q '^DEMO_JWT=' $SIRLAR || echo "DEMO_JWT=$(openssl rand -hex 32)" >> $SIRLAR
+SECRET_JWT=$(grep '^DEMO_JWT=' $SIRLAR | cut -d= -f2-)
+export PORT=$PORT DB_DATABASE=$DB DEMO_LOGIN= DEMO_SERVER= GPS_BOSH=00:00 GPS_OXIR=23:59 SECRET_JWT
 pm2 restart tamzor-demo --update-env >/dev/null 2>&1 || pm2 start src/server.js --name tamzor-demo --update-env
 for i in $(seq 1 60); do curl -sf "http://127.0.0.1:$PORT/api/v1/rejim" >/dev/null && break; sleep 2; done
 DB_DATABASE=$DB DEMO_API="http://127.0.0.1:$PORT/api/v1" DEMO_SIRLAR=$SIRLAR node scripts/demo/seed-demo.js
