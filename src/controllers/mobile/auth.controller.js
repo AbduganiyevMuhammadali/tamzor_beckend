@@ -44,8 +44,10 @@ async function buildUserData(user, token, rol = 'agent') {
     editLocation: isAgent,
     add_client: isAgent,
     location: true,
-    locationStart: '0001-01-01T08:00:00',
-    locationEnd: '0001-01-01T20:00:00',
+    // Ish vaqti — shu oraliqda ilova marshrutni (GPS) yozadi. .env: GPS_BOSH=08:00, GPS_OXIR=20:00
+    // (demo / tekshiruv instansiyasida 00:00–23:59 — tekshiruvchi istalgan vaqtda ko'ra olsin)
+    locationStart: `0001-01-01T${soatEnv('GPS_BOSH', '08:00')}:00`,
+    locationEnd: `0001-01-01T${soatEnv('GPS_OXIR', '20:00')}:00`,
     addClientSubKlient: false,
     serverVersion: 0,
     editCountType: false,
@@ -58,6 +60,12 @@ async function buildUserData(user, token, rol = 'agent') {
     asosiyRol: asosiyRol(user, rol),
     rollar,
   };
+}
+
+/** .env dagi HH:MM (noto'g'ri bo'lsa standart) */
+function soatEnv(kalit, standart) {
+  const v = String(process.env[kalit] || '').trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : standart;
 }
 
 /* ── Auth & User ─────────────────────────────────────────────────────────── */

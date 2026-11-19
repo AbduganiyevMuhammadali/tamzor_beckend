@@ -7,6 +7,8 @@
  * DEMO_SIRLAR fayli (git'ga kirmaydi):  REVIEW_LOGIN=...  REVIEW_PAROL=...  ADMIN_PAROL=...
  * Natija: bitta login (REVIEW_LOGIN) — distributsiya agenti + Won Sell jufti + dostavchik (dual_role).
  */
+// Sanalar Toshkent kuni bo'yicha (server UTC'da, cron 03:00 Toshkent = 22:00 UTC)
+process.env.TZ = process.env.TZ || 'Asia/Tashkent';
 const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
@@ -71,6 +73,9 @@ async function w(m, ep, b) {
   for (const [nomi, manzil, lat, lng, agent_id] of mijozlar) {
     mid.push((await w('POST', '/mijozlar', { nomi, manzil, lat, lng, agent_id, tashrif_kunlari: kunlar.join(', '), telefon: '+998901234567', narx_turi: 'chakana', kredit_limit: 3000000 })).id);
   }
+  // Bugungi marshrut: agentga o'z mijozlari, Won Sell'ga hammasi
+  await w('POST', '/hisobot/marshrut-reja', { agent_id: agent.id, sana: iso(bugun), mijoz_idlar: mid.slice(0, 3) });
+  await w('POST', '/hisobot/marshrut-reja', { agent_id: ws.id, sana: iso(bugun), mijoz_idlar: mid });
   // Won Sell mashinasi — yuk tasdiqlangan (ilovada "Yuk keldi → Sanadim")
   await w('POST', '/avtolavka/yuklash', { agent_id: ws.id, tasdiqla: true, qatorlar: tovarlar.map(t => ({ tovar_id: t.id, dona: t.blok * 4, narx: t.sotuv })) });
   // Dostavchik: 2 ta buyurtma yo'lda

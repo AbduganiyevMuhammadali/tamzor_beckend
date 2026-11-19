@@ -1,3 +1,9 @@
+// Biznes kuni (bugun, kun yopish, hisobot kunlari) jarayon vaqt mintaqasidan olinadi —
+// server UTC'da bo'lsa kun Toshkentda 05:00 da almashardi. Boshqa mintaqa: .env TZ=...
+// (dotenv'dan oldin, birinchi Date'dan oldin o'rnatiladi)
+try { require('dotenv').config(); } catch (_) {}
+process.env.TZ = process.env.TZ || 'Asia/Tashkent';
+
 const express = require("express");
 const app = express();
 require('./startup/logging')();
