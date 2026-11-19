@@ -14,6 +14,32 @@ const KATEGORIYA_NOMI = {
   qarz_qaytarish:  'Qarz qaytarish',
 };
 
+/* Web formadan tahrirlanadigan maydonlar (mijozValidator bilan bir xil).
+ * balans, reyting*, rad_ketma_ket, tolov_vada_sana, mobil_id — tizim maydonlari:
+ * ular faqat savdo/kassa/reyting oqimlari orqali o'zgaradi. */
+const TAHRIR_MAYDONLAR = [
+  'nomi', 'yuridik_nomi', 'telefon', 'telefon2', 'manzil', 'mo_ljal',
+  'territoriya_id', 'kategoriya_id', 'agent_id', 'sinf', 'narx_turi',
+  'inn', 'shartnoma_raqam', 'shartnoma_sana', 'hisob_raqam', 'bank', 'mfo',
+  'tashrif_kunlari', 'tashrif_chastota', 'lat', 'lng', 'kredit_limit', 'tolov_muddati_kun',
+  'izoh', 'faol', 'boshlangich_balans', 'boshlangich_sana', 'boshlangich_izoh',
+];
+
+/* Ro'yxat so'rovining yuqori chegarasi (all=true ham shu bilan cheklanadi) */
+const MAKS_QATOR = 5000;
+const MAKS_LIMIT = 1000;
+
+/* YYYY-MM-DD formatini tekshiradi (bo'sh — undefined) */
+const SANA_RE = /^\d{4}-\d{2}-\d{2}$/;
+function sanaTekshir(v, nomi) {
+  if (v === undefined || v === null || v === '') return undefined;
+  const s = String(v);
+  if (!SANA_RE.test(s) || Number.isNaN(new Date(s + 'T00:00:00Z').getTime())) {
+    throw new HttpException(400, `${nomi} sanasi noto'g'ri (YYYY-MM-DD)`);
+  }
+  return s;
+}
+
 const INCLUDE = [
   { model: TerritoriyaModel,     as: 'territoriya', attributes: ['id','nomi'] },
   { model: MijozKategoriyaModel, as: 'kategoriya',  attributes: ['id','nomi'] },
@@ -50,19 +76,22 @@ class MijozController {
       : tartib === 'reyting_desc' ? [['reyting', 'DESC'], ['nomi', 'ASC']] : [['nomi', 'ASC']];
 
     if (all === 'true') {
-      const rows = await MijozModel.findAll({ where, include: INCLUDE, order });
+      const rows = await MijozModel.findAll({ where, include: INCLUDE, order, limit: MAKS_QATOR });
       return res.send(rows);
     }
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    // page/limit: NaN yoki haddan katta qiymatlar cheklanadi
+    const lim = Math.min(MAKS_LIMIT, Math.max(1, parseInt(limit) || 50));
+    const pg  = Math.max(1, parseInt(page) || 1);
+    const offset = (pg - 1) * lim;
     const { count, rows } = await MijozModel.findAndCountAll({
       where, include: INCLUDE,
       order,
-      limit: parseInt(limit),
+      limit: lim,
       offset,
     });
 
-    res.send({ count, rows, page: parseInt(page), pages: Math.ceil(count / parseInt(limit)) });
+    res.send({ count, rows, page: pg, pages: Math.ceil(count / lim) });
   };
 
   /* GET /mijozlar/reyting/xulosa — faol mijozlar darajalar bo'yicha (ro'yxat tepasidagi chiplar) */
@@ -151,9 +180,13 @@ class MijozController {
   };
 
   #normalize(body) {
-    const b = { ...body };
+    // Faqat ruxsat etilgan maydonlar (balans, reyting va h.k. so'rovdan o'zgartirilmaydi)
+    const b = {};
+    for (const k of TAHRIR_MAYDONLAR) if (body && Object.prototype.hasOwnProperty.call(body, k)) b[k] = body[k];
     for (const k of ['shartnoma_sana', 'boshlangich_sana']) if (b[k] === '') b[k] = null;
     if (b.boshlangich_izoh === '') b.boshlangich_izoh = null;
+    // boshlangich_balans NOT NULL — null/bo'sh yuborilsa e'tiborsiz qoldiriladi
+    if (b.boshlangich_balans === null || b.boshlangich_balans === '') delete b.boshlangich_balans;
     return b;
   }
 
@@ -267,12 +300,16 @@ class MijozController {
     const mijoz = await MijozModel.findByPk(req.params.id, { include: INCLUDE });
     if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
 
-    const { dan, gacha } = req.query;
+    // Sanalar faqat YYYY-MM-DD; SQL ga replacements orqali beriladi (SQL injection yo'q)
+    const dan   = sanaTekshir(req.query.dan, 'dan');
+    const gacha = sanaTekshir(req.query.gacha, 'gacha');
+    const sanaRepl = { ...(dan ? { dan } : {}), ...(gacha ? { gacha } : {}) };
+    // ustun — faqat kod ichidagi o'zgarmas ifoda (foydalanuvchi qiymati emas)
     const sanaSharti = (ustun) => {
       if (!dan && !gacha) return '';
-      if (dan && gacha) return ` AND DATE(${ustun}) BETWEEN '${dan}' AND '${gacha}'`;
-      if (dan)          return ` AND DATE(${ustun}) >= '${dan}'`;
-      return ` AND DATE(${ustun}) <= '${gacha}'`;
+      if (dan && gacha) return ` AND DATE(${ustun}) BETWEEN :dan AND :gacha`;
+      if (dan)          return ` AND DATE(${ustun}) >= :dan`;
+      return ` AND DATE(${ustun}) <= :gacha`;
     };
 
     // ── OLDI: yetkazilgan savdolar ──
@@ -285,7 +322,7 @@ class MijozController {
         AND a.turi = 'sotish' AND a.holat = 'yetkazildi'
         ${sanaSharti('COALESCE(a.yetkazilgan_sana, a.createdAt)')}
       ORDER BY sana ASC`,
-      { replacements: { id: mijoz.id }, type: sequelize.QueryTypes.SELECT });
+      { replacements: { id: mijoz.id, ...sanaRepl }, type: sequelize.QueryTypes.SELECT });
 
     // ── BERDI: mijozdan tushgan pul ──
     const tolovlar = await sequelize.query(`
@@ -294,7 +331,7 @@ class MijozController {
       WHERE k.mijoz_id = :id AND k.tur = 'kirim'
         ${sanaSharti('k.sana')}
       ORDER BY k.sana ASC`,
-      { replacements: { id: mijoz.id }, type: sequelize.QueryTypes.SELECT });
+      { replacements: { id: mijoz.id, ...sanaRepl }, type: sequelize.QueryTypes.SELECT });
 
     // ── Boshlang'ich qoldiq: kartadagi balans harakatlardan farq qilsa (eski tizimdan ko'chirilgan qarz) ──
     // Butun tarix bo'yicha: qarz = Σ savdo − Σ to'lov; kartada undan ortig'i — boshlang'ich qoldiq.

@@ -20,6 +20,12 @@ const KassaModel = require('../models/kassa.model');
 async function arizaYetkazildiEffektlari(ariza, {
   transaction, userId = null, kassaManbaTur = 'ariza', tolangan = null, izoh = null, sana = null,
 } = {}) {
+  // Faqat SOTUV hujjati pul effektlarini beradi. Qaytarish (turi='qaytarish') mijozga
+  // qarz yozmaydi va agentga savdo/bonus bermaydi — u qaytarishQabul (ariza.controller)
+  // orqali faqat tovar harakati sifatida o'tadi. Ilgari web'da yaratilgan qaytarish
+  // "yetkazildi"ga o'tganda mijoz balansidan ayrilib, qarz qo'shilardi.
+  if (ariza.turi && ariza.turi !== 'sotish') return { naqd: 0, qarz: 0 };
+
   const vaqt = sana || new Date();
   const summa = parseFloat(ariza.jami_summa || 0);
   const naqdMi = ariza.tolov_turi === 'naqt' || ariza.tolov_turi === 'naqd';

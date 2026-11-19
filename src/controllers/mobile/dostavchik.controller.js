@@ -29,6 +29,7 @@ const { TripSheetModel, YetkazishQaytarishModel, YetkazishUrinishModel } = requi
 const { ok, fail, mobilVaqt, mobilKalit } = require('./shared');
 const { arizaYetkazildiEffektlari } = require('../../utils/arizaYetkazildi.utils');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
+const { qulflabOl } = require('../../utils/qulf.utils');
 
 const BRAK_OMBOR = 'Brak ombori';
 const AKTIV = ['yolda'];
@@ -52,10 +53,12 @@ const sanaMi = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 
 /* Joriy foydalanuvchining dostavchi ID'si: haqiqiy dostavchik yoki dual_role agent */
 function dostavchiId(req) {
-  if (req.currentRole === 'dostavchi') return req.currentAgent.id;
-  if (req.currentRole === 'agent' && req.currentAgent.linked_dostavchi_id) return req.currentAgent.linked_dostavchi_id;
+  if (req.currentRole === 'dostavchi') return Number(req.currentAgent.id);
+  if (req.currentRole === 'agent' && req.currentAgent.linked_dostavchi_id) return Number(req.currentAgent.linked_dostavchi_id);
   return null;
 }
+/* Buyurtma aynan shu dostavchiga tayinlanganmi (tayinlanmagan — null — ham rad etiladi) */
+const meniki = (ariza, dId) => !!ariza.dostavchi_id && Number(ariza.dostavchi_id) === Number(dId);
 function talab(req, res) {
   const id = dostavchiId(req);
   if (!id) { fail(res, 'Bu amal faqat dostavchik uchun', 403); return null; }
@@ -213,7 +216,9 @@ class MobileDostavchikController {
   // GET buyurtma/?docId= — bitta buyurtma to'liq (mijoz qarzi, urinishlar)
   buyurtma = async (req, res) => {
     const dId = talab(req, res); if (!dId) return;
-    const a = await ArizaModel.findOne({ where: { id: req.query.docId, dostavchi_id: dId }, include: INCLUDE });
+    const docId = parseInt(req.query.docId, 10);
+    if (!Number.isInteger(docId) || docId <= 0) return fail(res, 'docId kerak', 400);
+    const a = await ArizaModel.findOne({ where: { id: docId, dostavchi_id: dId }, include: INCLUDE });
     if (!a) return fail(res, 'Buyurtma topilmadi yoki sizga tayinlanmagan', 404);
     const urinishlar = await YetkazishUrinishModel.findAll({ where: { ariza_id: a.id }, order: [['sana', 'DESC']], limit: 5 });
     ok(res, { ...buyurtmaShakli(a, koordinata(req.query)),
@@ -256,22 +261,34 @@ class MobileDostavchikController {
     const pos = koordinata(req.body);
     const vaqt = mobilVaqt(req.body.vaqt);      // oflayn: mijozga haqiqatda topshirilgan vaqt
     const oflayn = req.body.oflayn === true || req.body.oflayn === 'true';
-    const ariza = await ArizaModel.findOne({ where: { id: docId }, include: INCLUDE });
-    if (!ariza) return fail(res, 'Buyurtma topilmadi', 404);
-    if (ariza.dostavchi_id && ariza.dostavchi_id !== dId) return fail(res, 'Bu buyurtma boshqa dostavchiga tayinlangan', 403);
-    if (ariza.holat === 'yetkazildi') return ok(res, { docId: String(ariza.id), allaqachon: true }, 'Allaqachon yetkazilgan');
-    if (!AKTIV.includes(ariza.holat)) return fail(res, `Buyurtma "${ariza.holat}" holatida — yetkazib bo'lmaydi`);
+    // Tez rad etish (qulfsiz) — yakuniy tekshiruv baribir tranzaksiya ichida qulf bilan
+    const oldin = await ArizaModel.findByPk(docId, { attributes: ['id', 'raqam', 'holat', 'dostavchi_id'] });
+    if (!oldin) return fail(res, 'Buyurtma topilmadi', 404);
+    if (!meniki(oldin, dId)) return fail(res, 'Bu buyurtma sizga tayinlanmagan', 403);
+    if (oldin.holat === 'yetkazildi') return ok(res, { docId: String(oldin.id), allaqachon: true }, 'Allaqachon yetkazilgan');
 
     const qaytarish = (Array.isArray(req.body.qaytarish) ? req.body.qaytarish : [])
       .map(q => ({ tovarId: String(q.tovarId), dona: n(q.dona ?? q.count), tur: q.tur === 'brak' ? 'brak' : 'qaytarma', sabab: q.sabab || null }))
       .filter(q => q.dona > 0);
-    const masofa = pos && ariza.mijoz?.lat != null ? masofaMetr(ariza.mijoz.lat, ariza.mijoz.lng, pos.lat, pos.lng) : null;
 
+    // Holat tekshiruvi tranzaksiya ichida, qulflangan qatorda: oflayn qayta yuborish yoki
+    // ikki marta bosish ikkinchi marta qaytarish/kassa/qarz yozmaydi.
+    let ariza, masofa = null;
     const natija = await sequelize.transaction(async (t) => {
+      ariza = await qulflabOl(ArizaModel, docId, t);
+      if (!ariza) return { xato: ['Buyurtma topilmadi', 404] };
+      if (!meniki(ariza, dId)) return { xato: ['Bu buyurtma sizga tayinlanmagan', 403] };
+      if (ariza.holat === 'yetkazildi') return { allaqachon: true };
+      if (ariza.turi !== 'sotish' || !AKTIV.includes(ariza.holat)) return { xato: [`Buyurtma "${ariza.holat}" holatida — yetkazib bo'lmaydi`, 400] };
+
+      const qatorlar = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, transaction: t, lock: t.LOCK.UPDATE });
+      const mijoz = ariza.mijoz_id ? await MijozModel.findByPk(ariza.mijoz_id, { attributes: ['id', 'lat', 'lng'], transaction: t }) : null;
+      masofa = pos && mijoz && mijoz.lat != null ? masofaMetr(mijoz.lat, mijoz.lng, pos.lat, pos.lng) : null;
+
       // 1. Qisman qaytarish / brak — qatorlar kamayadi, tovar omborga qaytadi
       let qaytSumma = 0;
       for (const q of qaytarish) {
-        const qator = (ariza.qatorlar || []).find(x => String(x.tovar_id) === q.tovarId);
+        const qator = qatorlar.find(x => String(x.tovar_id) === q.tovarId);
         if (!qator) continue;
         const dona = Math.min(q.dona, n(qator.jami_dona));
         if (dona <= 0) continue;
@@ -287,21 +304,24 @@ class MobileDostavchikController {
         // Qator va buyurtma summasi haqiqatda topshirilganga tushadi
         await qator.update({ jami_dona: n(qator.jami_dona) - dona, dona: Math.max(0, n(qator.dona) - dona), summa: +(n(qator.summa) - summa).toFixed(2) }, { transaction: t });
       }
-      if (qaytSumma > 0) ariza.jami_summa = +(n(ariza.jami_summa) - qaytSumma).toFixed(2);
+      const jamiSumma = qaytSumma > 0 ? Math.max(0, +(n(ariza.jami_summa) - qaytSumma).toFixed(2)) : n(ariza.jami_summa);
 
       // 2. Holat + kim/qayerda yetkazgani
-      const tolangan = naqd === undefined || naqd === null ? null : Math.max(0, Math.min(n(ariza.jami_summa), n(naqd)));
+      const tolangan = naqd === undefined || naqd === null ? null : Math.max(0, Math.min(jamiSumma, n(naqd)));
       await ariza.update({
-        holat: 'yetkazildi', yetkazilgan_sana: vaqt, dostavchi_id: ariza.dostavchi_id || dId, ...(oflayn ? { oflayn: true } : {}),
+        holat: 'yetkazildi', yetkazilgan_sana: vaqt, ...(oflayn ? { oflayn: true } : {}),
         yetkazgan_dostavchi_id: dId, yetkazish_lat: pos?.lat ?? null, yetkazish_lng: pos?.lng ?? null, yetkazish_masofa_m: masofa,
-        tolangan_summa: tolangan ?? (ariza.tolov_turi === 'naqt' || ariza.tolov_turi === 'naqd' ? n(ariza.jami_summa) : 0),
-        jami_summa: ariza.jami_summa,
+        tolangan_summa: tolangan ?? (ariza.tolov_turi === 'naqt' || ariza.tolov_turi === 'naqd' ? jamiSumma : 0),
+        jami_summa: jamiSumma,
         izoh: izoh ? `${ariza.izoh ? ariza.izoh + ' | ' : ''}Dostavchik: ${izoh}`.slice(0, 2000) : ariza.izoh,
       }, { transaction: t });
 
       // 3. Kassa / qarz / agent bonusi
       return arizaYetkazildiEffektlari(ariza, { transaction: t, userId: dId, kassaManbaTur: 'dostavchik', tolangan, sana: vaqt });
     });
+
+    if (natija && natija.xato) return fail(res, natija.xato[0], natija.xato[1]);
+    if (natija && natija.allaqachon) return ok(res, { docId: String(ariza.id), allaqachon: true }, 'Allaqachon yetkazilgan');
 
     ok(res, {
       docId: String(ariza.id), docNumber: ariza.raqam, summa: n(ariza.jami_summa),
@@ -325,16 +345,24 @@ class MobileDostavchikController {
       return true;
     };
     if (await takror()) return;
-    const ariza = await ArizaModel.findOne({ where: { id: docId }, include: [{ model: MijozModel, as: 'mijoz', attributes: ['lat', 'lng'] }] });
-    if (!ariza) return fail(res, 'Buyurtma topilmadi', 404);
-    if (!AKTIV.includes(ariza.holat)) return fail(res, `Buyurtma "${ariza.holat}" holatida`);
     const s = SABABLAR.find(x => x.id === sabab) ? sabab : 'boshqa';
-    const masofa = pos && ariza.mijoz?.lat != null ? masofaMetr(ariza.mijoz.lat, ariza.mijoz.lng, pos.lat, pos.lng) : null;
+    let natija;
     try {
-      await YetkazishUrinishModel.create({ ariza_id: ariza.id, dostavchi_id: dId, sabab: s, izoh: izoh || null, lat: pos?.lat ?? null, lng: pos?.lng ?? null, masofa_m: masofa, sana: vaqt, mobil_id: mobilId });
+      natija = await sequelize.transaction(async (t) => {
+        const ariza = await qulflabOl(ArizaModel, docId, t);
+        if (!ariza) return { xato: ['Buyurtma topilmadi', 404] };
+        if (!meniki(ariza, dId)) return { xato: ['Bu buyurtma sizga tayinlanmagan', 403] };
+        if (!AKTIV.includes(ariza.holat)) return { xato: [`Buyurtma "${ariza.holat}" holatida`, 400] };
+        const mijoz = ariza.mijoz_id ? await MijozModel.findByPk(ariza.mijoz_id, { attributes: ['id', 'lat', 'lng'], transaction: t }) : null;
+        const masofa = pos && mijoz && mijoz.lat != null ? masofaMetr(mijoz.lat, mijoz.lng, pos.lat, pos.lng) : null;
+        await YetkazishUrinishModel.create({ ariza_id: ariza.id, dostavchi_id: dId, sabab: s, izoh: izoh || null, lat: pos?.lat ?? null, lng: pos?.lng ?? null, masofa_m: masofa, sana: vaqt, mobil_id: mobilId }, { transaction: t });
+        const urinish = Number(ariza.yetkazish_urinish || 0) + 1;
+        await ariza.update({ yetkazish_urinish: urinish, yetkazish_izoh: `${(SABABLAR.find(x => x.id === s) || {}).nom}${izoh ? ' — ' + izoh : ''}`.slice(0, 255) }, { transaction: t });
+        return { id: ariza.id, urinish };
+      });
     } catch (e) { if (takrorXato(e) && await takror()) return; throw e; }
-    await ariza.update({ yetkazish_urinish: Number(ariza.yetkazish_urinish || 0) + 1, yetkazish_izoh: `${(SABABLAR.find(x => x.id === s) || {}).nom}${izoh ? ' — ' + izoh : ''}`.slice(0, 255) });
-    ok(res, { docId: String(ariza.id), urinish: ariza.yetkazish_urinish }, 'Qayd etildi — buyurtma navbatda qoladi');
+    if (natija.xato) return fail(res, natija.xato[0], natija.xato[1]);
+    ok(res, { docId: String(natija.id), urinish: natija.urinish }, 'Qayd etildi — buyurtma navbatda qoladi');
   };
 
   // POST qarzTolov/ { klientId, summa, izoh, docId? } — eski qarzni undirish

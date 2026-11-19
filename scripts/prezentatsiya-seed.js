@@ -29,17 +29,23 @@
  * Sinov (yozmaydi):  npm run demo:prezentatsiya -- --sinov
  * Tozalash:          npm run demo:prezentatsiya -- --tozala
  *
- * XAVFSIZLIK: yaratilgan har bir yozuv demo_prez_log ga yoziladi; o'zgartirilgan
- * mavjud qiymatlar (mijoz/yetkazuvchi balansi, iyuldan qolib ketgan arizalar
- * holati) demo_prez_balans / demo_prez_ariza ga saqlanadi. --tozala hammasini
- * aniq asl holiga qaytaradi.
+ * XAVFSIZLIK: yaratilgan har bir yozuvning id'si AYNAN qo'shilgan paytda
+ * demo_prez_log ga yoziladi (ilgari "MAX(id) dan kattalar" olinardi — shu orada
+ * real foydalanuvchi yaratgan qatorlar ham o'chib ketardi). Balans o'zgarishlari
+ * DELTA sifatida demo_prez_delta ga yoziladi va --tozala faqat shu deltani
+ * teskari qo'llaydi (snapshot bilan ustidan yozmaydi — oradagi real to'lovlar
+ * saqlanadi). Iyuldan qolib ketgan arizalar holati faqat skript qo'ygan holatda
+ * turgan bo'lsa qaytariladi (demo_prez_ariza2).
+ * NODE_ENV=production da ishlamaydi (faqat --majburiy bilan).
  *
- * DIQQAT: seed-agent-nazorat.js 1-avgustdan keyingi BARCHA tashrif/reja/GPS ni
- * o'chiradi — u ishga tushirilsa, bu skriptni qayta ishga tushiring.
+ * Eslatma: seed-agent-nazorat.js endi faqat o'zi yaratgan yozuvlarni o'chiradi
+ * (demo_yozuv jurnali) — bu skript ma'lumotiga tegmaydi.
  */
 
 require('dotenv').config();
 const sequelize = require('../src/db/db-sequelize');
+const { ishlabChiqarishTaqiq } = require('./lib/demo-utils');
+ishlabChiqarishTaqiq('prezentatsiya-seed');
 sequelize.options.logging = false;
 
 // Mavjud demo ma'lumot tugagan kundan keyingi kun. Bazada boshqa davr bo'lsa DEMO_BOSHLANISH bilan
@@ -223,17 +229,30 @@ async function tozala() {
   if (!(await jadvalBormi('demo_prez_log'))) return false;
   const t = await sequelize.transaction();
   try {
-    // 1. O'zgartirilgan mavjud qiymatlarni qaytaramiz
+    // 1. Skript qo'llagan balans DELTALARINI teskari qaytaramiz (snapshot emas):
+    //    seed'dan keyin kiritilgan real to'lov/qarzlar saqlanib qoladi
+    if (await jadvalBormi('demo_prez_delta')) {
+      await sequelize.query(`UPDATE mijoz m JOIN (SELECT row_id, SUM(delta) d FROM demo_prez_delta
+                               WHERE jadval = 'mijoz' GROUP BY row_id) z ON z.row_id = m.id
+                             SET m.balans = COALESCE(m.balans, 0) - z.d`, { transaction: t });
+      await sequelize.query(`UPDATE yetkazuvchi y JOIN (SELECT row_id, SUM(delta) d FROM demo_prez_delta
+                               WHERE jadval = 'yetkazuvchi' GROUP BY row_id) z ON z.row_id = y.id
+                             SET y.balans = COALESCE(y.balans, 0) - z.d`, { transaction: t });
+    }
     if (await jadvalBormi('demo_prez_balans')) {
-      await sequelize.query(`UPDATE mijoz m JOIN demo_prez_balans z ON z.jadval = 'mijoz' AND z.row_id = m.id
-                             SET m.balans = z.balans`, { transaction: t });
-      await sequelize.query(`UPDATE yetkazuvchi y JOIN demo_prez_balans z ON z.jadval = 'yetkazuvchi' AND z.row_id = y.id
-                             SET y.balans = z.balans`, { transaction: t });
+      // Eski versiya snapshot'i — ustidan yozish real o'zgarishlarni yo'qotadi, shuning uchun qo'llanmaydi
+      console.warn('  Diqqat: eski demo_prez_balans snapshot topildi — balanslar avtomatik qaytarilmadi.');
+      console.warn('  Mijoz/yetkazuvchi balanslarini oldi-berdi tarixidan qayta hisoblang.');
+    }
+    // Arizalar holati: faqat hozir ham skript qo'ygan holatda turganlari qaytariladi
+    if (await jadvalBormi('demo_prez_ariza2')) {
+      await sequelize.query(`UPDATE ariza a JOIN demo_prez_ariza2 z ON z.id = a.id
+                             SET a.holat = z.holat, a.yetkazilgan_sana = z.yetkazilgan_sana,
+                                 a.bekor_sababi = z.bekor_sababi
+                             WHERE a.holat = z.yangi_holat`, { transaction: t });
     }
     if (await jadvalBormi('demo_prez_ariza')) {
-      await sequelize.query(`UPDATE ariza a JOIN demo_prez_ariza z ON z.id = a.id
-                             SET a.holat = z.holat, a.yetkazilgan_sana = z.yetkazilgan_sana,
-                                 a.bekor_sababi = z.bekor_sababi`, { transaction: t });
+      console.warn('  Diqqat: eski demo_prez_ariza snapshot topildi — ariza holatlari avtomatik qaytarilmadi.');
     }
     // 2. Yaratilgan yozuvlarni o'chiramiz (bolalardan boshlab)
     for (const j of LOG_JADVALLAR) {
@@ -246,7 +265,7 @@ async function tozala() {
     await t.rollback();
     throw e;
   }
-  await sequelize.query('DROP TABLE IF EXISTS demo_prez_log, demo_prez_balans, demo_prez_ariza');
+  await sequelize.query('DROP TABLE IF EXISTS demo_prez_log, demo_prez_balans, demo_prez_ariza, demo_prez_delta, demo_prez_ariza2');
   return true;
 }
 
@@ -1079,22 +1098,25 @@ const qiymat = (v) => {
   if (v instanceof Date) return dbVaqt(v);
   return v === undefined ? null : v;
 };
+/* Shu ishga tushirishda qo'shilgan qatorlar: jadval → [id] (demo_prez_log uchun) */
+const yangiIdlar = {};
 async function bitta(jadval, row, t) {
   const cols = Object.keys(row);
   const [id] = await sequelize.query(
     `INSERT INTO \`${jadval}\` (${cols.map(c => '`' + c + '`').join(',')}) VALUES (${cols.map(() => '?').join(',')})`,
     { replacements: cols.map(c => qiymat(row[c])), transaction: t });
+  (yangiIdlar[jadval] = yangiIdlar[jadval] || []).push(id);
   return id;
 }
+/* Qatorma-qator: har bir id aniq ma'lum (bulk INSERT'da parallel yozuvlar bilan aralashishi mumkin).
+   Ustunlar to'plami bulk versiyadagidek — yo'q maydon NULL bo'ladi. */
 async function kop(jadval, rows, t) {
   if (!rows.length) return;
   const cols = [...new Set(rows.flatMap(r => Object.keys(r)))];
-  for (let i = 0; i < rows.length; i += 250) {
-    const b = rows.slice(i, i + 250);
-    await sequelize.query(
-      `INSERT INTO \`${jadval}\` (${cols.map(c => '`' + c + '`').join(',')})
-       VALUES ${b.map(() => '(' + cols.map(() => '?').join(',') + ')').join(',')}`,
-      { replacements: b.flatMap(r => cols.map(c => qiymat(r[c]))), transaction: t });
+  for (const r of rows) {
+    const row = {};
+    cols.forEach(c => { row[c] = r[c]; });
+    await bitta(jadval, row, t);
   }
 }
 
@@ -1103,19 +1125,28 @@ async function yozish(S, D) {
   // DDL tranzaksiyani yopib qo'yadi — jadvallarni oldindan yaratamiz
   await sequelize.query(`CREATE TABLE IF NOT EXISTS demo_prez_log (
     jadval VARCHAR(40) NOT NULL, row_id INT NOT NULL, PRIMARY KEY (jadval, row_id))`);
-  await sequelize.query(`CREATE TABLE IF NOT EXISTS demo_prez_balans (
-    jadval VARCHAR(40) NOT NULL, row_id INT NOT NULL, balans DECIMAL(18,2), PRIMARY KEY (jadval, row_id))`);
-  await sequelize.query(`CREATE TABLE IF NOT EXISTS demo_prez_ariza (
-    id INT PRIMARY KEY, holat VARCHAR(30), yetkazilgan_sana DATETIME NULL, bekor_sababi VARCHAR(255) NULL)`);
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS demo_prez_delta (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, jadval VARCHAR(40) NOT NULL, row_id INT NOT NULL,
+    delta DECIMAL(20,2) NOT NULL, KEY (jadval, row_id))`);
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS demo_prez_ariza2 (
+    id INT PRIMARY KEY, holat VARCHAR(30), yetkazilgan_sana DATETIME NULL, bekor_sababi VARCHAR(255) NULL,
+    yangi_holat VARCHAR(30) NOT NULL)`);
+
+  /* Balansni maqsad qiymatga keltiradi, lekin DELTA sifatida: yangi = joriy + d,
+     d jurnalga yoziladi, --tozala faqat d ni ayiradi */
+  const deltaQollash = async (jadval, rows, t) => {
+    for (const r of rows) {
+      const d = Math.round(((Number(r.maqsad) || 0) - (Number(r.joriy) || 0)) * 100) / 100;
+      if (!d) continue;
+      await sequelize.query(`UPDATE \`${jadval}\` SET balans = COALESCE(balans, 0) + ? WHERE id = ?`,
+        { replacements: [d, r.id], transaction: t });
+      await sequelize.query(`INSERT INTO demo_prez_delta (jadval, row_id, delta) VALUES (?, ?, ?)`,
+        { replacements: [jadval, r.id, d], transaction: t });
+    }
+  };
 
   const t = await sequelize.transaction();
   try {
-    // Suv belgisi: shu id dan kattalari — shu ishga tushirishda yaratilgan
-    const belgi = {};
-    for (const j of LOG_JADVALLAR) {
-      const [r] = await sequelize.query(`SELECT COALESCE(MAX(id), 0) m FROM \`${j}\``, { transaction: t });
-      belgi[j] = r[0].m;
-    }
 
     for (const y of R.yetk) {
       y.id = await bitta('yetkazuvchi', { ism: y.ism, ...y.yangi, balans: 0,
@@ -1157,7 +1188,14 @@ async function yozish(S, D) {
       chegirma_summa: 0, qabul_dona: q.qabul_dona ?? null, createdAt: a.createdAt, updatedAt: a.createdAt,
     }))), t);
 
-    for (const r of R.reja) r.id = await bitta('marshrut_reja', r, t);
+    // (agent, mijoz, sana) unique — shu kunga reja boshqa skript (demo:all) yoki qo'lda allaqachon
+    // tuzilgan bo'lsa, mavjudidan foydalanamiz (log'ga yozilmaydi → --tozala uni o'chirmaydi)
+    for (const r of R.reja) {
+      const [bor] = await sequelize.query(
+        'SELECT id FROM marshrut_reja WHERE agent_id = ? AND mijoz_id = ? AND sana = ? LIMIT 1',
+        { replacements: [qiymat(r.agent_id), qiymat(r.mijoz_id), qiymat(r.sana)], transaction: t, type: sequelize.QueryTypes.SELECT });
+      r.id = bor ? bor.id : await bitta('marshrut_reja', r, t);
+    }
     await kop('tashrif', R.tashrif, t);
     await kop('tovar_register', R.register, t);
     await kop('kassa', R.kassa, t);
@@ -1169,43 +1207,45 @@ async function yozish(S, D) {
     await kop('audit_natija', R.audit, t);
     await kop('agent_location', R.gps, t);
 
-    // Iyuldan qolib ketgan arizalar — asl holati zaxiraga
+    // Iyuldan qolib ketgan arizalar — asl holati va skript qo'ygan holat zaxiraga
     for (const e of R.eskiYopish) {
-      await sequelize.query(`INSERT IGNORE INTO demo_prez_ariza (id, holat, yetkazilgan_sana, bekor_sababi)
-                             SELECT id, holat, yetkazilgan_sana, bekor_sababi FROM ariza WHERE id = ?`,
-        { replacements: [e.id], transaction: t });
+      await sequelize.query(`INSERT IGNORE INTO demo_prez_ariza2 (id, holat, yetkazilgan_sana, bekor_sababi, yangi_holat)
+                             SELECT id, holat, yetkazilgan_sana, bekor_sababi, ? FROM ariza WHERE id = ?`,
+        { replacements: [e.holat, e.id], transaction: t });
       await sequelize.query(`UPDATE ariza SET holat = ?, yetkazilgan_sana = ?, bekor_sababi = ? WHERE id = ?`,
         { replacements: [e.holat, qiymat(e.yetkazilgan_sana), e.bekor_sababi, e.id], transaction: t });
     }
 
     /* Balanslar: oldi-berdi tarixidan qayta hisoblanadi (manfiy = qarz).
        Ilgari demo-seed qarzdorlarga MUSBAT balans yozgan edi — ular "avans"
-       bo'lib ko'rinib, Top qarzdorlar bo'sh chiqardi. Asl qiymat zaxirada. */
-    await sequelize.query(`INSERT IGNORE INTO demo_prez_balans (jadval, row_id, balans)
-                           SELECT 'mijoz', id, balans FROM mijoz WHERE id <= ?`,
-      { replacements: [belgi.mijoz], transaction: t });
-    await sequelize.query(`
-      UPDATE mijoz m
+       bo'lib ko'rinib, Top qarzdorlar bo'sh chiqardi. Farq DELTA bo'lib
+       qo'llanadi (balans = balans + d — atomar) va demo_prez_delta ga yoziladi; parallel
+       real to'lov o'z o'zgarishini saqlaydi, --tozala aynan d ni ayiradi. */
+    const [mBal] = await sequelize.query(`
+      SELECT m.id, m.balans joriy, COALESCE(b.s, 0) - COALESCE(o.s, 0) maqsad
+      FROM mijoz m
       LEFT JOIN (SELECT mijoz_id, SUM(jami_summa) s FROM ariza WHERE deletedAt IS NULL AND turi = 'sotish'
                    AND holat = 'yetkazildi' GROUP BY mijoz_id) o ON o.mijoz_id = m.id
       LEFT JOIN (SELECT mijoz_id, SUM(summa) s FROM kassa WHERE tur = 'kirim' AND mijoz_id IS NOT NULL
                    GROUP BY mijoz_id) b ON b.mijoz_id = m.id
-      SET m.balans = COALESCE(b.s, 0) - COALESCE(o.s, 0)
       WHERE m.deletedAt IS NULL`, { transaction: t });
+    await deltaQollash('mijoz', mBal, t);
 
     // Yetkazuvchi: harakatlar tarixidan (to'lov − qarz), hisobot bilan mos
-    await sequelize.query(`INSERT IGNORE INTO demo_prez_balans (jadval, row_id, balans)
-                           SELECT 'yetkazuvchi', id, balans FROM yetkazuvchi WHERE id <= ?`,
-      { replacements: [belgi.yetkazuvchi], transaction: t });
-    await sequelize.query(`
-      UPDATE yetkazuvchi y
+    const [yBal] = await sequelize.query(`
+      SELECT y.id, y.balans joriy, COALESCE(h.s, 0) maqsad
+      FROM yetkazuvchi y
       LEFT JOIN (SELECT yetkazuvchi_id, SUM(CASE WHEN tur = 'tolov' THEN summa ELSE -summa END) s
-                 FROM yetkazuvchi_harakatlar GROUP BY yetkazuvchi_id) h ON h.yetkazuvchi_id = y.id
-      SET y.balans = COALESCE(h.s, 0)`, { transaction: t });
+                 FROM yetkazuvchi_harakatlar GROUP BY yetkazuvchi_id) h ON h.yetkazuvchi_id = y.id`, { transaction: t });
+    await deltaQollash('yetkazuvchi', yBal, t);
 
-    for (const j of LOG_JADVALLAR) {
-      await sequelize.query(`INSERT IGNORE INTO demo_prez_log (jadval, row_id) SELECT ?, id FROM \`${j}\` WHERE id > ?`,
-        { replacements: [j, belgi[j]], transaction: t });
+    // Faqat shu skript qo'shgan id'lar (bitta()/kop() yig'gan ro'yxat)
+    for (const [j, ids] of Object.entries(yangiIdlar)) {
+      for (let i = 0; i < ids.length; i += 500) {
+        const b = ids.slice(i, i + 500);
+        await sequelize.query(`INSERT IGNORE INTO demo_prez_log (jadval, row_id) VALUES ${b.map(() => '(?,?)').join(',')}`,
+          { replacements: b.flatMap(id => [j, id]), transaction: t });
+      }
     }
     await t.commit();
   } catch (e) {

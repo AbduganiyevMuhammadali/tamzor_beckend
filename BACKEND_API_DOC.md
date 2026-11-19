@@ -1409,3 +1409,32 @@ Kichik sex: xom ashyo → sof mahsulot (+ qo'shimcha mahsulot), tannarx bilan sk
 | POST | `/ishlab/:id/nusxa` | Shu partiyani takrorlash — yangi qoralama |
 
 `qoshimcha.narx` — birlik bahosi (tannarxdan ayiriladi). `xom_ashyo.narx` — faqat ombordagi tannarx noma'lum bo'lsa ishlatiladi. Ombor jurnali: `/tahlil/jurnal?harakat=ishlab` (turi o'zgarishidagi ko'chirish — `harakat=kochirish`). `GET /tovar?turi=xom_ashyo|tovar` — turi bo'yicha filtr.
+
+---
+
+## 23. MOBIL ROLLAR (.env) VA `mobilSozlama/` (2026-11-19, Flutter ilova)
+
+Qaysi rol oynalari ochilishini server `.env` belgilaydi:
+```ini
+MOBIL_ROLLAR=agent,avtolavka,dostavchik,tasdiq,audit   # bo'sh — hammasi yoqilgan
+MOBIL_MIN_VERSIYA=1.0.0
+```
+Kalitlar: `agent` (distributsiya), `avtolavka`, `dostavchik`, `tasdiq` (`getConfirms`/`postConfirm`), `audit` (`chekUp`).
+
+### 23.1 `GET mobilSozlama/` — token kerak emas
+Ilova server manzili kiritilganda **bir marta** o'qiydi va keshlaydi (Sozlamalar → "Yangilash" bilan qayta o'qiladi).
+```json
+{ "error": false, "message": "", "error_code": 200, "data": {
+    "sozlamaVersiya": 1, "serverVaqt": "2026-11-19T06:20:00.000Z", "biznesRejim": "distributsiya",
+    "rollar": ["agent", "avtolavka", "dostavchik"],
+    "rollarNomi": { "agent": "Distributsiya agenti", "avtolavka": "Avtolavka (ko'chma savdo)", "dostavchik": "Dostavchik" },
+    "minIlovaVersiya": "1.0.0", "sotuvRadiusM": 300,
+    "chek": { "nomi": "…", "telefon": "…", "manzil": "…", "izoh": "Xaridingiz uchun rahmat!" } } }
+```
+`chek` — web Sozlamalar → Chek rekvizitlari (`sozlama.chek_*`).
+
+### 23.2 Server tomonda tekshiruv
+- **Login (`Login/`)**: foydalanuvchining asosiy roli (`agent` / `avtolavka` / `dostavchik`) o'chirilgan bo'lsa — `error_code: 403`. Javobga qo'shildi: `asosiyRol`, `rollar` (= `.env` ∩ foydalanuvchi rollari). `isAvtolavka`, `isDeliver`, `isConfirmation` ham shu kesishma bilan beriladi (eski APK ham o'chirilgan oynani ko'rmaydi).
+- **Har bir token'li so'rov**: asosiy rol keyin o'chirilsa — `403` (405 emas, ilova logout qilmaydi — xabar ko'rsatadi).
+- **Route guruhlari**: dostavchik endpoint'lari (9, 16-trip, 17) `dostavchik`, `getConfirms`/`postConfirm` — `tasdiq`, `chekUp` — `audit` roli o'chiq bo'lsa `403` (dual_role agent uchun ham).
+

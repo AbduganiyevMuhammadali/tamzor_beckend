@@ -18,6 +18,7 @@ const { zaxiraTekshir, mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { arizaYetkazildiEffektlari } = require('../../utils/arizaYetkazildi.utils');
 const { yetkazilganSotuvniBekorQil, adminTekshir } = require('../../utils/sotuvBekor.utils');
 const { ASOSIY_OMBOR, XOM_ASHYO_OMBOR, AGENT_PREFIKS, agentOmbori, agentNomi } = require('../../utils/ombor.utils');
+const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 
 /* Savdo kanali: avtolavka hujjati agentning o'z omboridan chiqadi ("Agent: <ism>"),
    distributsiya buyurtmasi — asosiy ombordan (zakaz → tasdiq → yig'ish → dostavchik). */
@@ -109,6 +110,58 @@ function calcQator(q) {
   };
 }
 
+const n = v => parseFloat(v) || 0;
+
+// Tahrirlash faqat ombordan chiqim yozilmaguncha ("yolda"dan oldin) mumkin
+const TAHRIR_HOLAT = ['yangi', 'tasdiqlangan', 'yigilmoqda'];
+// Ro'yxat chegarasi: sahifa uchun va all=true (eksport/forma) uchun
+const ROYXAT_MAX_LIMIT = 500;
+const ROYXAT_ALL_MAX   = 5000;
+
+// Klient yuborishi mumkin bo'lgan maydonlar (qolganlari — tolangan_summa, yetkazilgan_sana,
+// dostavchi_id, trip_sheet_id, tasdiqlagan_id, tolov_sana, mobil_id, id ... — faqat server yozadi)
+const ARIZA_MAYDONLAR = ['turi', 'mijoz_id', 'mijoz_nomi', 'agent_id', 'agent_nomi',
+  'chegirma_foiz', 'bonus_summa', 'tolov_turi', 'ombor', 'jonatish_sana', 'izoh'];
+const QATOR_MAYDONLAR = ['tovar_id', 'tovar_nomi', 'turkum', 'shtrix_kod', 'narx', 'blok', 'dona', 'hajm', 'chegirma_foiz'];
+
+function tanla(obj, maydonlar) {
+  const r = {};
+  for (const k of maydonlar) if (obj[k] !== undefined) r[k] = obj[k];
+  return r;
+}
+
+// Qatorlarni hisoblaydi va tekshiradi: narx >= 0, miqdor > 0 (manfiy blok/dona yo'q)
+function qatorlarniHisobla(qatorlar) {
+  let jami = 0;
+  const processed = (qatorlar || []).map(q => {
+    const nomi = q.tovar_nomi || (q.tovar_id ? `#${q.tovar_id}` : 'tovar');
+    if (n(q.narx) < 0) throw new HttpException(400, `"${nomi}": narx manfiy bo'lishi mumkin emas`);
+    if (n(q.blok) < 0 || n(q.dona) < 0 || n(q.blokdagi_soni) < 0) {
+      throw new HttpException(400, `"${nomi}": miqdor manfiy bo'lishi mumkin emas`);
+    }
+    const calc = calcQator(q);
+    if (!(calc.jami_dona > 0)) throw new HttpException(400, `"${nomi}": miqdor 0 dan katta bo'lishi kerak`);
+    jami += calc.summa;
+    return { ...tanla(q, QATOR_MAYDONLAR), ...calc };
+  });
+  return { processed, jami };
+}
+
+// Umumiy chegirma: summa berilsa — o'sha, aks holda foizdan. Buyurtma summasidan oshmaydi.
+function chegirmaHisobla(jami, chFoiz, chSummaXom) {
+  const chSumma = parseFloat(chSummaXom || (jami * chFoiz / 100)) || 0;
+  if (chSumma < 0) throw new HttpException(400, "Chegirma manfiy bo'lishi mumkin emas");
+  if (chSumma > jami + 0.005) {
+    throw new HttpException(400, `Chegirma (${chSumma.toFixed(2)}) buyurtma summasidan (${jami.toFixed(2)}) oshib ketdi`);
+  }
+  return chSumma;
+}
+
+// Arizaning qatorlarini tranzaksiya ichida qulflab o'qiydi (ariza allaqachon qulflangan bo'lishi kerak)
+function qatorlarniQulflabOl(arizaId, t) {
+  return ArizaQatorModel.findAll({ where: { ariza_id: arizaId }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
+}
+
 class ArizaController {
 
   // ── GET /arizalar ─────────────────────────────────────────
@@ -163,19 +216,22 @@ class ArizaController {
     if (shartlar.length) where[Op.and] = shartlar;
 
     if (all === 'true') {
-      const rows = await ArizaModel.findAll({ where, include: INCLUDE, order: [['createdAt','DESC']] });
+      // all=true ham cheksiz emas — eng yangi ROYXAT_ALL_MAX ta
+      const rows = await ArizaModel.findAll({ where, include: INCLUDE, order: [['createdAt','DESC']], limit: ROYXAT_ALL_MAX });
       return res.send(rows);
     }
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), ROYXAT_MAX_LIMIT);
+    const sahifa = Math.max(parseInt(page, 10) || 1, 1);
+    const offset = (sahifa - 1) * lim;
     const { count, rows } = await ArizaModel.findAndCountAll({
       where, include: INCLUDE,
       order: [['createdAt','DESC']],
-      limit: parseInt(limit), offset,
+      limit: lim, offset,
       distinct: true,
     });
 
-    res.send({ count, rows, page: parseInt(page), pages: Math.ceil(count / parseInt(limit)) });
+    res.send({ count, rows, page: sahifa, pages: Math.ceil(count / lim) });
   };
 
   // ── GET /arizalar/:id ─────────────────────────────────────
@@ -187,51 +243,52 @@ class ArizaController {
 
   // ── POST /arizalar ────────────────────────────────────────
   create = async (req, res) => {
+    const { qatorlar } = req.body;
+    // Faqat ruxsat etilgan maydonlar (mass assignment: tolangan_summa, dostavchi_id va h.k. klientdan olinmaydi)
+    const body = tanla(req.body, ARIZA_MAYDONLAR);
+
+    // Qatorlardan jami summa hisoblash (miqdor > 0, narx >= 0, chegirma <= summa)
+    const { processed: processedQatorlar, jami } = qatorlarniHisobla(qatorlar);
+    const chFoiz   = parseFloat(body.chegirma_foiz  || 0);
+    const chSumma  = chegirmaHisobla(jami, chFoiz, req.body.chegirma_summa);
+    const jami_net = jami - chSumma;
+    const sotishMi = (body.turi || 'sotish') === 'sotish';
+
     const t = await sequelize.transaction();
     try {
-      const { qatorlar, ...body } = req.body;
+      // Tovar qatorlari BIRINCHI bo'lib qulflanadi (tranzaksiya snapshot'i qulfdan keyin olinsin):
+      // shu tovarlarni parallel band qilayotgan buyurtmalar navbatma-navbat o'tadi
+      if (sotishMi) await tovarlarniQulfla(processedQatorlar.map(q => q.tovar_id), t);
 
       // Mijoz/agent nomlarini avtomatik to'ldirish
       if (body.mijoz_id && !body.mijoz_nomi) {
-        const m = await MijozModel.findByPk(body.mijoz_id, { attributes: ['nomi'] });
+        const m = await MijozModel.findByPk(body.mijoz_id, { attributes: ['nomi'], transaction: t });
         if (m) body.mijoz_nomi = m.nomi;
       }
       if (body.agent_id && !body.agent_nomi) {
-        const a = await AgentModel.findByPk(body.agent_id, { attributes: ['fullname'] });
+        const a = await AgentModel.findByPk(body.agent_id, { attributes: ['fullname'], transaction: t });
         if (a) body.agent_nomi = a.fullname;
       }
 
-      // Qatorlardan jami summa hisoblash
-      let jami = 0;
-      const processedQatorlar = (qatorlar || []).map(q => {
-        const calc = calcQator(q);
-        jami += calc.summa;
-        return { ...q, ...calc };
-      });
       await turkumToldir(processedQatorlar, t);   // forma turkum yubormaydi — tovardan olinadi
-
-      // Chegirma umumiy
-      const chFoiz   = parseFloat(body.chegirma_foiz  || 0);
-      const chSumma  = parseFloat(body.chegirma_summa || (jami * chFoiz / 100));
-      const jami_net = jami - chSumma;
 
       // Kredit limit / muddati o'tgan qarz tekshiruvi (naqd to'lov qarz hosil qilmaydi)
       const naqdMi = body.tolov_turi === 'naqt' || body.tolov_turi === 'naqd';
       if (body.mijoz_id && !naqdMi) {
-        const mijozKredit = await MijozModel.findByPk(body.mijoz_id);
-        const kredit = await kreditTekshir(mijozKredit, jami_net);
+        const mijozKredit = await MijozModel.findByPk(body.mijoz_id, { transaction: t });
+        const kredit = await kreditTekshir(mijozKredit, jami_net, t);
         if (kredit.bloklangan) {
           throw new HttpException(400, kredit.xabar);
         }
       }
 
       // Zakaz faqat skladda mavjud tovardan (boshqa ochiq buyurtmalarga band qilingani ayiriladi)
-      if ((body.turi || 'sotish') === 'sotish') {
+      if (sotishMi) {
         await kanalTekshir(body, t);
         await zaxiraTekshir(processedQatorlar, { ombor: body.ombor || ASOSIY_OMBOR, transaction: t });
       }
 
-      const raqam = await generateRaqam();
+      const raqam = await generateRaqam(t);
 
       const ariza = await ArizaModel.create({
         ...body,
@@ -263,40 +320,74 @@ class ArizaController {
       const full = await ArizaModel.findByPk(ariza.id, { include: INCLUDE });
       res.status(201).send(full);
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
 
   // ── PATCH /arizalar/:id ───────────────────────────────────
   update = async (req, res) => {
-    const ariza = await ArizaModel.findByPk(req.params.id);
-    if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
-    if (['yetkazildi','bekor'].includes(ariza.holat))
-      throw new HttpException(400, "Yakunlangan arizani tahrirlash mumkin emas");
+    const { qatorlar } = req.body;
+    const body = tanla(req.body, ARIZA_MAYDONLAR);
 
     const t = await sequelize.transaction();
+    let arizaId;
     try {
-      const { qatorlar, ...body } = req.body;
+      // Hujjat qulflanib qayta o'qiladi: parallel holat o'zgarishi (masalan "yolda" — chiqim
+      // yozilgan) bilan tahrir aralashmasin
+      const ariza = await qulflabOl(ArizaModel, req.params.id, t);
+      if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
+      arizaId = ariza.id;
+      if (!TAHRIR_HOLAT.includes(ariza.holat)) {
+        throw new HttpException(400, ['yetkazildi', 'bekor'].includes(ariza.holat)
+          ? "Yakunlangan arizani tahrirlash mumkin emas"
+          : `"${ariza.holat}" holatidagi arizani tahrirlash mumkin emas (tovar ombordan chiqqan)`);
+      }
+      if (body.turi !== undefined && body.turi !== ariza.turi) {
+        throw new HttpException(400, "Ariza turini o'zgartirib bo'lmaydi");
+      }
+      delete body.turi;
 
       if (ariza.turi === 'sotish' && ariza.kanal === 'distributsiya'
           && (body.agent_id !== undefined || body.mijoz_id !== undefined)) {
         await kanalTekshir({ agent_id: body.agent_id, mijoz_id: body.mijoz_id }, t);
       }
 
+      const eskiJami = n(ariza.jami_summa);
+      let processed = null;
+      let jami;
       if (qatorlar?.length) {
-        let jami = 0;
-        const processed = qatorlar.map(q => {
-          const calc = calcQator(q);
-          jami += calc.summa;
-          return { ...q, ...calc };
-        });
+        ({ processed, jami } = qatorlarniHisobla(qatorlar));
+        if (ariza.turi === 'sotish') await tovarlarniQulfla(processed.map(q => q.tovar_id), t);
         await turkumToldir(processed, t);
-        const chFoiz  = parseFloat(body.chegirma_foiz || ariza.chegirma_foiz || 0);
-        const chSumma = parseFloat(body.chegirma_summa || (jami * chFoiz / 100));
+      } else if (body.chegirma_foiz !== undefined || req.body.chegirma_summa !== undefined) {
+        // Faqat chegirma o'zgardi — jami mavjud qatorlardan qayta hisoblanadi
+        const bor = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, transaction: t });
+        jami = bor.reduce((s, q) => s + n(q.summa), 0);
+      }
+      if (jami !== undefined) {
+        const chFoiz  = parseFloat(body.chegirma_foiz ?? ariza.chegirma_foiz ?? 0) || 0;
+        const chSumma = chegirmaHisobla(jami, chFoiz, req.body.chegirma_summa);
         body.jami_summa     = parseFloat((jami - chSumma).toFixed(2));
         body.chegirma_summa = parseFloat(chSumma.toFixed(2));
+      }
 
+      // Kredit limit — summa oshsa, mijoz yoki to'lov turi o'zgarsa qayta tekshiriladi
+      if (ariza.turi === 'sotish') {
+        const yangiJami  = body.jami_summa !== undefined ? body.jami_summa : eskiJami;
+        const mijozId    = body.mijoz_id !== undefined ? body.mijoz_id : ariza.mijoz_id;
+        const tolovTuri  = body.tolov_turi !== undefined ? body.tolov_turi : ariza.tolov_turi;
+        const naqdMi     = tolovTuri === 'naqt' || tolovTuri === 'naqd';
+        const eskiNaqd   = ariza.tolov_turi === 'naqt' || ariza.tolov_turi === 'naqd';
+        const ozgardi    = yangiJami > eskiJami + 0.005 || mijozId !== ariza.mijoz_id || (eskiNaqd && !naqdMi);
+        if (mijozId && !naqdMi && ozgardi) {
+          const mijozKredit = await MijozModel.findByPk(mijozId, { transaction: t });
+          const kredit = await kreditTekshir(mijozKredit, yangiJami, t);
+          if (kredit.bloklangan) throw new HttpException(400, kredit.xabar);
+        }
+      }
+
+      if (processed) {
         if (ariza.turi === 'sotish') {
           await zaxiraTekshir(processed, { ombor: body.ombor || ariza.ombor || ASOSIY_OMBOR, istisnoArizaId: ariza.id, transaction: t });
         }
@@ -310,13 +401,13 @@ class ArizaController {
 
       await ariza.update(body, { transaction: t });
       await t.commit();
-
-      const full = await ArizaModel.findByPk(ariza.id, { include: INCLUDE });
-      res.send(full);
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
+
+    const full = await ArizaModel.findByPk(arizaId, { include: INCLUDE });
+    res.send(full);
   };
 
   // ── PATCH /arizalar/:id/holat ────────────────────────────
@@ -327,153 +418,172 @@ class ArizaController {
   //   yetkazildi   → mijoz balansiga summa yoziladi (qarz)
   //   bekor        → agar chiqim bo'lgan bo'lsa, ombordan QAYTARILADI
   changeHolat = async (req, res) => {
-    const ariza = await ArizaModel.findByPk(req.params.id, { include: INCLUDE });
-    if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
-
     const { holat: yangiHolat, bekor_sababi, dostavchi_id } = req.body;
-    const eskiHolat = ariza.holat;
 
-    // ─── YETKAZILGAN → BEKOR: faqat Admin (takror / xato yozilgan sotuv). HOLAT_NEXT'da yo'q —
-    // oddiy jarayon emas: tovar omborga, naqd kassadan, qarz mijozdan, bonus agentdan teskari
-    // yoziladi (utils/sotuvBekor.utils.js, Won Sell jurnali ham shu funksiyani ishlatadi) ───
-    if (eskiHolat === 'yetkazildi' && yangiHolat === 'bekor') {
-      adminTekshir(req.currentUser);
-      const natija = await yetkazilganSotuvniBekorQil(ariza, { sabab: bekor_sababi, user: req.currentUser });
-      const full = await ArizaModel.findByPk(ariza.id, { include: INCLUDE });
-      return res.send({
-        ...full.toJSON(), _holat_ozgardi: true, _yangi_holat: 'bekor', _keyingi_holat: [],
-        _bekor: { tovar: natija.tovar, naqd: natija.naqd, qarz: natija.qarz, bonus: natija.bonus, ogohlantirishlar: natija.ogohlantirishlar },
-      });
-    }
-
-    const ruxsat = HOLAT_NEXT[eskiHolat] || [];
-
-    if (!ruxsat.includes(yangiHolat)) {
-      throw new HttpException(400,
-        `"${eskiHolat}" holatidan "${yangiHolat}" holatiga o'tish mumkin emas`
-      );
-    }
-
-    const qatorlar = ariza.qatorlar || [];
-    const ombor    = ariza.ombor || 'Основной склад';
-
+    // Hujjat va uning holati TRANZAKSIYA ICHIDA qulflab o'qiladi va o'tish shu yangi
+    // nusxada tekshiriladi: ikki parallel PATCH'dan ikkinchisi birinchisi commit bo'lguncha
+    // kutadi, so'ng yangilangan holatni ko'rib rad etiladi (ikki marta chiqim yoki ikki
+    // marta kassa/qarz/bonus yozilmaydi).
+    let arizaId, natijaBekor = null;
     const t = await sequelize.transaction();
     try {
-      const updates = { holat: yangiHolat };
+      const ariza = await qulflabOl(ArizaModel, req.params.id, t);
+      if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
+      arizaId = ariza.id;
+      const eskiHolat = ariza.holat;
 
-      // ─── TASDIQLANGAN: hali dostavchi tayinlanmaydi — bu mahsulot tayyor
-      // bo'lgach ("yolda" bosqichida, skladchi tomonidan) belgilanadi ───
-      if (yangiHolat === 'tasdiqlangan') {
-        updates.tasdiqlagan_id   = req.currentUser?.id || null;
-        updates.tasdiqlagan_sana = new Date();
-      }
+      // ─── YETKAZILGAN → BEKOR: faqat Admin (takror / xato yozilgan sotuv). HOLAT_NEXT'da yo'q —
+      // oddiy jarayon emas: tovar omborga, naqd kassadan, qarz mijozdan, bonus agentdan teskari
+      // yoziladi (utils/sotuvBekor.utils.js, Won Sell jurnali ham shu funksiyani ishlatadi) ───
+      if (eskiHolat === 'yetkazildi' && yangiHolat === 'bekor') {
+        adminTekshir(req.currentUser);
+        natijaBekor = await yetkazilganSotuvniBekorQil(ariza, { sabab: bekor_sababi, user: req.currentUser, transaction: t });
+        await t.commit();
+      } else {
+        const ruxsat = HOLAT_NEXT[eskiHolat] || [];
 
-      // ─── YIG'ILMOQDA: ombor zaxirasini tekshirish (yetmasa bloklaymiz) ───
-      if (yangiHolat === 'yigilmoqda') {
-        for (const q of qatorlar) {
-          if (!q.tovar_id) continue;
-          const qoldiq = await omborQoldigi(q.tovar_id, ombor, t);
-          const kerak  = parseFloat(q.jami_dona || 0);
-          if (kerak > qoldiq) {
-            throw new HttpException(400,
-              `"${q.tovar_nomi}" omborida yetarli emas. Kerak: ${kerak} kg, mavjud: ${qoldiq} kg`
-            );
+        if (!ruxsat.includes(yangiHolat)) {
+          throw new HttpException(400,
+            `"${eskiHolat}" holatidan "${yangiHolat}" holatiga o'tish mumkin emas`
+          );
+        }
+        // Qaytarish hujjati sotuv jarayonidan (yig'ish → chiqim → yetkazildi) o'tmaydi —
+        // u "Qaytarishni qabul qilish" (qaytarishQabul) orqali omborga kiradi
+        if (ariza.turi === 'qaytarish' && ['yigilmoqda', 'yolda', 'yetkazildi'].includes(yangiHolat)) {
+          throw new HttpException(400, "Qaytarish hujjati sotuv jarayonidan o'tmaydi — u qabul qilish orqali omborga kiradi");
+        }
+
+        const qatorlar = await qatorlarniQulflabOl(ariza.id, t);
+        const ombor    = ariza.ombor || 'Основной склад';
+
+        // Zaxira tekshiruvi/chiqimdan oldin tovar qatorlari qulflanadi — parallel
+        // yo'lga chiqarishlar bir qoldiqni ikki marta ishlatmaydi
+        if (yangiHolat === 'yigilmoqda' || yangiHolat === 'yolda') {
+          await tovarlarniQulfla(qatorlar.map(q => q.tovar_id), t);
+        }
+
+        const updates = { holat: yangiHolat };
+
+        // ─── TASDIQLANGAN: hali dostavchi tayinlanmaydi — bu mahsulot tayyor
+        // bo'lgach ("yolda" bosqichida, skladchi tomonidan) belgilanadi ───
+        if (yangiHolat === 'tasdiqlangan') {
+          updates.tasdiqlagan_id   = req.currentUser?.id || null;
+          updates.tasdiqlagan_sana = new Date();
+        }
+
+        // ─── YIG'ILMOQDA: ombor zaxirasini tekshirish (yetmasa bloklaymiz) ───
+        if (yangiHolat === 'yigilmoqda') {
+          for (const q of qatorlar) {
+            if (!q.tovar_id) continue;
+            const qoldiq = await omborQoldigi(q.tovar_id, ombor, t);
+            const kerak  = parseFloat(q.jami_dona || 0);
+            if (kerak > qoldiq) {
+              throw new HttpException(400,
+                `"${q.tovar_nomi}" omborida yetarli emas. Kerak: ${kerak} kg, mavjud: ${qoldiq} kg`
+              );
+            }
           }
         }
-      }
 
-      // ─── YO'LDA: mahsulot tayyor — dostavchi shu yerda tayinlanadi (ixtiyoriy),
-      // so'ng tovarlar ombordan CHIQIM bo'ladi ───
-      if (yangiHolat === 'yolda') {
-        if (dostavchi_id) {
-          const d = await DostavchiModel.findByPk(dostavchi_id, { transaction: t });
-          if (d) {
-            updates.dostavchi_id   = d.id;
-            updates.dostavchi_nomi = d.ism;
+        // ─── YO'LDA: mahsulot tayyor — dostavchi shu yerda tayinlanadi (ixtiyoriy),
+        // so'ng tovarlar ombordan CHIQIM bo'ladi ───
+        if (yangiHolat === 'yolda') {
+          if (dostavchi_id) {
+            const d = await DostavchiModel.findByPk(dostavchi_id, { transaction: t });
+            if (d) {
+              updates.dostavchi_id   = d.id;
+              updates.dostavchi_nomi = d.ism;
+            }
           }
-        }
-        Object.assign(updates, await reysMaydonlari(ariza, updates.dostavchi_id || ariza.dostavchi_id, t));
-        // Yana bir bor zaxira tekshiramiz (yig'ish va yo'l orasida o'zgargan bo'lishi mumkin)
-        for (const q of qatorlar) {
-          if (!q.tovar_id) continue;
-          const qoldiq = await omborQoldigi(q.tovar_id, ombor, t);
-          const kerak  = parseFloat(q.jami_dona || 0);
-          if (kerak > qoldiq) {
-            throw new HttpException(400,
-              `"${q.tovar_nomi}" omborida yetarli emas (yo'lga chiqarish). Kerak: ${kerak}, mavjud: ${qoldiq}`
-            );
+          Object.assign(updates, await reysMaydonlari(ariza, updates.dostavchi_id || ariza.dostavchi_id, t));
+          // Yana bir bor zaxira tekshiramiz (yig'ish va yo'l orasida o'zgargan bo'lishi mumkin)
+          for (const q of qatorlar) {
+            if (!q.tovar_id) continue;
+            const qoldiq = await omborQoldigi(q.tovar_id, ombor, t);
+            const kerak  = parseFloat(q.jami_dona || 0);
+            if (kerak > qoldiq) {
+              throw new HttpException(400,
+                `"${q.tovar_nomi}" omborida yetarli emas (yo'lga chiqarish). Kerak: ${kerak}, mavjud: ${qoldiq}`
+              );
+            }
           }
-        }
-        // Chiqim yozuvlari (manfiy donada)
-        await TovarRegisterModel.bulkCreate(
-          qatorlar.filter(q => q.tovar_id).map(q => ({
-            tovar_id:   q.tovar_id,
-            tovar_nomi: q.tovar_nomi,
-            turkum:     q.turkum || null,
-            ombor,
-            tur:        'chiqim',
-            manba_tur:  'sotuv',
-            manba_id:   ariza.id,
-            donada:     -Math.abs(parseFloat(q.jami_dona || 0)),
-            bloklarda:  -Math.abs(parseFloat(q.blok || 0)),
-            qutilarda:  0,
-            hajm:       0,
-            kirim_narx: 0,
-            sotuv_narx: parseFloat(q.narx || 0),
-            summa:      -Math.abs(parseFloat(q.summa || 0)),
-            sana:       new Date(),
-          })),
-          { transaction: t }
-        );
-      }
-
-      // ─── YETKAZILDI: to'lov/qarz + agent plan-fakt + bonus + kassa ───
-      if (yangiHolat === 'yetkazildi') {
-        updates.yetkazilgan_sana = new Date();
-        await arizaYetkazildiEffektlari(ariza, { transaction: t, userId: req.currentUser?.id || null });
-      }
-
-      // ─── BEKOR: agar tovar allaqachon ombordan chiqqan bo'lsa, qaytaramiz ───
-      if (yangiHolat === 'bekor') {
-        updates.bekor_sababi = bekor_sababi || null;
-        await reytingQaytar({ manba_tur: 'ariza', manba_id: ariza.id }, t);   // zakaz uchun berilgan reyting balli qaytadi
-        // Faqat "yolda" bo'lgan (chiqim qilingan) arizada qaytarish kerak
-        if (eskiHolat === 'yolda') {
-          const chiqimlar = await TovarRegisterModel.findAll({
-            where: { manba_tur: 'sotuv', manba_id: ariza.id, tur: 'chiqim' },
-            transaction: t,
-          });
-          // Teskari (kirim) yozuvlar bilan qaytaramiz
-          for (const c of chiqimlar) {
-            await TovarRegisterModel.create({
-              tovar_id:   c.tovar_id,
-              tovar_nomi: c.tovar_nomi,
-              turkum:     c.turkum,
-              ombor:      c.ombor,
-              tur:        'qaytarma_kirim',
-              manba_tur:  'qaytarma',
+          // Chiqim yozuvlari (manfiy donada)
+          await TovarRegisterModel.bulkCreate(
+            qatorlar.filter(q => q.tovar_id).map(q => ({
+              tovar_id:   q.tovar_id,
+              tovar_nomi: q.tovar_nomi,
+              turkum:     q.turkum || null,
+              ombor,
+              tur:        'chiqim',
+              manba_tur:  'sotuv',
               manba_id:   ariza.id,
-              donada:     Math.abs(parseFloat(c.donada)),
-              bloklarda:  Math.abs(parseFloat(c.bloklarda || 0)),
+              donada:     -Math.abs(parseFloat(q.jami_dona || 0)),
+              bloklarda:  -Math.abs(parseFloat(q.blok || 0)),
               qutilarda:  0,
               hajm:       0,
               kirim_narx: 0,
-              sotuv_narx: parseFloat(c.sotuv_narx || 0),
-              summa:      Math.abs(parseFloat(c.summa || 0)),
+              sotuv_narx: parseFloat(q.narx || 0),
+              summa:      -Math.abs(parseFloat(q.summa || 0)),
               sana:       new Date(),
-            }, { transaction: t });
+            })),
+            { transaction: t }
+          );
+        }
+
+        // ─── YETKAZILDI: to'lov/qarz + agent plan-fakt + bonus + kassa ───
+        if (yangiHolat === 'yetkazildi') {
+          updates.yetkazilgan_sana = new Date();
+          await arizaYetkazildiEffektlari(ariza, { transaction: t, userId: req.currentUser?.id || null });
+        }
+
+        // ─── BEKOR: agar tovar allaqachon ombordan chiqqan bo'lsa, qaytaramiz ───
+        if (yangiHolat === 'bekor') {
+          updates.bekor_sababi = bekor_sababi || null;
+          await reytingQaytar({ manba_tur: 'ariza', manba_id: ariza.id }, t);   // zakaz uchun berilgan reyting balli qaytadi
+          // Faqat "yolda" bo'lgan (chiqim qilingan) arizada qaytarish kerak
+          if (eskiHolat === 'yolda') {
+            const chiqimlar = await TovarRegisterModel.findAll({
+              where: { manba_tur: 'sotuv', manba_id: ariza.id, tur: 'chiqim' },
+              transaction: t,
+            });
+            // Teskari (kirim) yozuvlar bilan qaytaramiz
+            for (const c of chiqimlar) {
+              await TovarRegisterModel.create({
+                tovar_id:   c.tovar_id,
+                tovar_nomi: c.tovar_nomi,
+                turkum:     c.turkum,
+                ombor:      c.ombor,
+                tur:        'qaytarma_kirim',
+                manba_tur:  'qaytarma',
+                manba_id:   ariza.id,
+                donada:     Math.abs(parseFloat(c.donada)),
+                bloklarda:  Math.abs(parseFloat(c.bloklarda || 0)),
+                qutilarda:  0,
+                hajm:       0,
+                kirim_narx: 0,
+                sotuv_narx: parseFloat(c.sotuv_narx || 0),
+                summa:      Math.abs(parseFloat(c.summa || 0)),
+                sana:       new Date(),
+              }, { transaction: t });
+            }
           }
         }
-      }
 
-      await ariza.update(updates, { transaction: t });
-      await t.commit();
+        await ariza.update(updates, { transaction: t });
+        await t.commit();
+      }
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
 
-    const full = await ArizaModel.findByPk(ariza.id, { include: INCLUDE });
+    const full = await ArizaModel.findByPk(arizaId, { include: INCLUDE });
+    if (natijaBekor) {
+      return res.send({
+        ...full.toJSON(), _holat_ozgardi: true, _yangi_holat: 'bekor', _keyingi_holat: [],
+        _bekor: { tovar: natijaBekor.tovar, naqd: natijaBekor.naqd, qarz: natijaBekor.qarz, bonus: natijaBekor.bonus, ogohlantirishlar: natijaBekor.ogohlantirishlar },
+      });
+    }
     res.send({
       ...full.toJSON(),
       _holat_ozgardi: true,
@@ -528,27 +638,28 @@ class ArizaController {
   // PATCH /arizalar/:id/qabul
   // body: { qatorlar: [{ id, qabul_dona }], izoh }
   qaytarishQabul = async (req, res) => {
-    const ariza = await ArizaModel.findByPk(req.params.id, { include: INCLUDE });
-    if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
-
-    if (ariza.turi !== 'qaytarish') {
-      throw new HttpException(400, 'Bu ariza qaytarish emas');
-    }
-    if (ariza.holat !== 'qabul_kutilmoqda') {
-      throw new HttpException(400,
-        `Ariza "${ariza.holat}" holatida — faqat "qabul_kutilmoqda" qabul qilinadi`);
-    }
-
     const { qatorlar: kelgan = [], izoh } = req.body;
     const qabulMap = {};
-    kelgan.forEach(q => { qabulMap[q.id] = q.qabul_dona; });
-
-    const agentOmbor  = ariza.ombor || agentOmbori(ariza.agent_nomi);
+    (Array.isArray(kelgan) ? kelgan : []).forEach(q => { qabulMap[q.id] = q.qabul_dona; });
     const asosiyOmbor = ASOSIY_OMBOR;
-    const qatorlar = ariza.qatorlar || [];
 
     const t = await sequelize.transaction();
     try {
+      // Qulflab qayta o'qish: ikki marta "qabul" bosilsa tovar ikki marta ko'chmasin
+      const ariza = await qulflabOl(ArizaModel, req.params.id, t);
+      if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
+
+      if (ariza.turi !== 'qaytarish') {
+        throw new HttpException(400, 'Bu ariza qaytarish emas');
+      }
+      if (ariza.holat !== 'qabul_kutilmoqda') {
+        throw new HttpException(400,
+          `Ariza "${ariza.holat}" holatida — faqat "qabul_kutilmoqda" qabul qilinadi`);
+      }
+
+      const agentOmbor = ariza.ombor || agentOmbori(ariza.agent_nomi);
+      const qatorlar   = await qatorlarniQulflabOl(ariza.id, t);
+
       const chiqim = [], kirim = [];
       let jamiQabul = 0, jamiFarq = 0;
 
@@ -619,7 +730,7 @@ class ArizaController {
         },
       });
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
@@ -690,15 +801,20 @@ class ArizaController {
     for (const id of ariza_idlar) {
       const t = await sequelize.transaction();
       try {
-        const ariza = await ArizaModel.findByPk(id, { include: INCLUDE, transaction: t });
+        // Qulflab o'qish — parallel changeHolat/topluYolda bilan ikki marta chiqim yozilmasin
+        const ariza = await qulflabOl(ArizaModel, id, t);
         if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
 
         if (!(HOLAT_NEXT[ariza.holat] || []).includes('yolda')) {
           throw new HttpException(400, `"${ariza.holat}" holatidan yo'lga chiqarib bo'lmaydi`);
         }
+        if (ariza.turi === 'qaytarish') {
+          throw new HttpException(400, "Qaytarish hujjati yo'lga chiqarilmaydi");
+        }
 
-        const qatorlar = ariza.qatorlar || [];
+        const qatorlar = await qatorlarniQulflabOl(ariza.id, t);
         const ombor    = ariza.ombor || 'Основной склад';
+        await tovarlarniQulfla(qatorlar.map(q => q.tovar_id), t);
 
         for (const q of qatorlar) {
           if (!q.tovar_id) continue;
@@ -741,7 +857,7 @@ class ArizaController {
         await t.commit();
         muvaffaqiyat.push({ ariza_id: ariza.id, raqam: ariza.raqam });
       } catch (e) {
-        await t.rollback();
+        if (!t.finished) await t.rollback();
         xatolar.push({
           ariza_id: id,
           xato: e instanceof HttpException ? e.message : (e.message || 'Xatolik'),
@@ -760,11 +876,12 @@ class ArizaController {
 
   // ── DELETE /arizalar/:id ──────────────────────────────────
   delete = async (req, res) => {
-    const ariza = await ArizaModel.findByPk(req.params.id);
-    if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
-    if (['yetkazildi','tasdiqlangan','yolda','yigilmoqda'].includes(ariza.holat))
-      throw new HttpException(400, "Bu holatdagi arizani o'chirib bo'lmaydi");
     await sequelize.transaction(async (t) => {
+      // Holat qulflangan nusxada tekshiriladi (parallel tasdiqlash/yo'lga chiqarish bilan poyga yo'q)
+      const ariza = await qulflabOl(ArizaModel, req.params.id, t);
+      if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
+      if (['yetkazildi','tasdiqlangan','yolda','yigilmoqda'].includes(ariza.holat))
+        throw new HttpException(400, "Bu holatdagi arizani o'chirib bo'lmaydi");
       await reytingQaytar({ manba_tur: 'ariza', manba_id: ariza.id }, t);
       await ariza.destroy({ transaction: t });
     });
@@ -785,10 +902,11 @@ class ArizaController {
       ArizaModel.count({ where: w({ holat: { [Op.in]: ['yolda','yigilmoqda'] } }) }),
       ArizaModel.count({ where: w({ holat: 'yetkazildi' }) }),
       ArizaModel.count({ where: w({ holat: 'bekor' }) }),
+      // Summa yetkazilgan kun bo'yicha (yaratilgan kun emas); eski yozuvlarda sana bo'lmasa — createdAt
       ArizaModel.findOne({
         where: {
           holat: 'yetkazildi',
-          createdAt: { [Op.gte]: new Date(new Date().setHours(0,0,0,0)) },
+          [Op.and]: [sequelize.where(fn('COALESCE', col('yetkazilgan_sana'), col('createdAt')), Op.gte, new Date(new Date().setHours(0,0,0,0)))],
         },
         attributes: [[fn('COALESCE', fn('SUM', col('jami_summa')), 0), 'summa']],
         raw: true,
@@ -796,7 +914,7 @@ class ArizaController {
       ArizaModel.findOne({
         where: {
           holat: 'yetkazildi',
-          createdAt: { [Op.gte]: new Date(new Date().getFullYear(), new Date().getMonth(), 1) },
+          [Op.and]: [sequelize.where(fn('COALESCE', col('yetkazilgan_sana'), col('createdAt')), Op.gte, new Date(new Date().getFullYear(), new Date().getMonth(), 1))],
         },
         attributes: [[fn('COALESCE', fn('SUM', col('jami_summa')), 0), 'summa']],
         raw: true,

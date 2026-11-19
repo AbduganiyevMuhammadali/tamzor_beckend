@@ -23,11 +23,18 @@
  * Yozuvlar avtolavka_hujjat/avtolavka_qator (agent bo'yicha), ariza/kassa/
  * tovar_register (manba orqali) va demo_avto_log jadvali orqali topiladi;
  * --tozala hammasini o'chiradi, asosiy ombor qoldig'i o'z-o'zidan tiklanadi.
+ *
+ * demo_avto_log'ga har qatorning id'si AYNAN qo'shilgan paytda yoziladi
+ * (ilgari "MAX(id) dan kattalar" deb olinardi — shu orada real foydalanuvchi
+ * yaratgan qatorlar ham demo deb belgilanib, --tozala bilan o'chib ketardi).
+ * NODE_ENV=production da ishlamaydi (faqat --majburiy bilan).
  */
 
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const sequelize = require('../src/db/db-sequelize');
+const { ishlabChiqarishTaqiq } = require('./lib/demo-utils');
+ishlabChiqarishTaqiq('seed-avtolavka');
 sequelize.options.logging = false;
 
 const TAG        = 'DEMO-AVTO';
@@ -103,22 +110,20 @@ async function jadvalBormi(nom) {
   return r[0].c > 0;
 }
 const qiymat = (v) => (v instanceof Date ? dbVaqt(v) : v === undefined ? null : v);
+/* Skript qo'shgan qatorlar: jadval → [id]. Faqat shu ro'yxat demo_avto_log'ga yoziladi. */
+const yangiIdlar = {};
 async function bitta(jadval, row, t) {
   const cols = Object.keys(row);
   const [id] = await sequelize.query(
     `INSERT INTO \`${jadval}\` (${cols.map(c => '`' + c + '`').join(',')}) VALUES (${cols.map(() => '?').join(',')})`,
     { replacements: cols.map(c => qiymat(row[c])), transaction: t });
+  (yangiIdlar[jadval] = yangiIdlar[jadval] || []).push(id);
   return id;
 }
+/* Ko'p qatorli INSERT o'rniga qatorma-qator: har id aniq ma'lum bo'ladi
+   (bulk INSERT'da parallel yozuvlar bilan id'lar aralashishi mumkin) */
 async function kop(jadval, rows, t) {
-  if (!rows.length) return;
-  const cols = [...new Set(rows.flatMap(r => Object.keys(r)))];
-  for (let i = 0; i < rows.length; i += 300) {
-    const b = rows.slice(i, i + 300);
-    await sequelize.query(
-      `INSERT INTO \`${jadval}\` (${cols.map(c => '`' + c + '`').join(',')}) VALUES ${b.map(() => '(' + cols.map(() => '?').join(',') + ')').join(',')}`,
-      { replacements: b.flatMap(r => cols.map(c => qiymat(r[c]))), transaction: t });
-  }
+  for (const r of rows) await bitta(jadval, r, t);
 }
 
 /* ── Tozalash ── */
@@ -132,17 +137,21 @@ async function tozala() {
       JOIN demo_avto_log l ON l.jadval = 'agent' AND l.row_id = a.id`);
     if (agentlar.length) {
       const ids = agentlar.map(a => a.id);
-      const omborlar = agentlar.map(a => ('Agent: ' + a.fullname).slice(0, 80));
-      const r = { ids, omborlar };
+      // Demo agentlarning mijozlari (ham jurnal orqali) — kassa.user_id boshqa jadvallar
+      // (dostavchi/user) id'lari bilan ustma-ust tushishi mumkin, shuning uchun mijoz bilan cheklaymiz
+      const mijozIds = (await q(`SELECT row_id id FROM demo_avto_log WHERE jadval = 'mijoz'`)).map(x => x.id);
+      const r = { ids, mijozIds: mijozIds.length ? mijozIds : [0] };
       const d = (sql) => sequelize.query(sql, { replacements: r, transaction: t });
       await d(`DELETE FROM tovar_register WHERE manba_tur IN ('yuklash','qabul')
                AND manba_id IN (SELECT id FROM avtolavka_hujjat WHERE agent_id IN (:ids))`);
-      await d(`DELETE FROM tovar_register WHERE ombor IN (:omborlar)`);
+      /* Ilgari ombor NOMI bo'yicha ham o'chirilardi ('Agent: <ism>') — bir xil ismli
+         real agent omboriga tegib ketishi mumkin edi. Agent omboridagi demo
+         yozuvlar baribir yuklash/qabul/sotuv manbalari orqali topiladi. */
       await d(`DELETE FROM tovar_register WHERE manba_tur IN ('sotuv','qaytarma')
                AND manba_id IN (SELECT id FROM ariza WHERE agent_id IN (:ids))`);
       await d(`DELETE FROM avtolavka_qator WHERE hujjat_id IN (SELECT id FROM avtolavka_hujjat WHERE agent_id IN (:ids))`);
       await d(`DELETE FROM avtolavka_hujjat WHERE agent_id IN (:ids)`);
-      await d(`DELETE FROM kassa WHERE user_id IN (:ids) AND manba_tur IN ('mijoz','avtolavka')`);
+      await d(`DELETE FROM kassa WHERE user_id IN (:ids) AND manba_tur IN ('mijoz','avtolavka') AND mijoz_id IN (:mijozIds)`);
       await d(`DELETE FROM kassa WHERE manba_tur = 'ariza' AND manba_id IN (SELECT id FROM ariza WHERE agent_id IN (:ids))`);
       await d(`DELETE FROM agent_register WHERE agent_id IN (:ids)`);
       await d(`DELETE FROM ariza_qator WHERE ariza_id IN (SELECT id FROM ariza WHERE agent_id IN (:ids))`);
@@ -166,8 +175,6 @@ async function seed() {
   await tozala();
   await sequelize.query(`CREATE TABLE IF NOT EXISTS demo_avto_log (jadval VARCHAR(40) NOT NULL, row_id INT NOT NULL, PRIMARY KEY (jadval, row_id))`);
 
-  const belgi = {};
-  for (const j of LOG_JADVALLAR) belgi[j] = (await q(`SELECT COALESCE(MAX(id),0) m FROM \`${j}\``))[0].m;
 
   /* Tovarlar: asosiy ombordagi qoldiq + narxlar (controller bilan bir xil manba) */
   const tovarlar = await q(`
@@ -438,9 +445,13 @@ async function seed() {
       await sequelize.query('UPDATE mijoz SET balans = ? WHERE id = ?', { replacements: [-m.qarz, m.id], transaction: t });
     }
 
-    for (const j of LOG_JADVALLAR) {
-      await sequelize.query(`INSERT IGNORE INTO demo_avto_log (jadval, row_id) SELECT ?, id FROM \`${j}\` WHERE id > ?`,
-        { replacements: [j, belgi[j]], transaction: t });
+    // Faqat shu skript qo'shgan id'lar (bitta()/kop() yig'gan ro'yxat)
+    for (const [j, ids] of Object.entries(yangiIdlar)) {
+      for (let i = 0; i < ids.length; i += 500) {
+        const b = ids.slice(i, i + 500);
+        await sequelize.query(`INSERT IGNORE INTO demo_avto_log (jadval, row_id) VALUES ${b.map(() => '(?,?)').join(',')}`,
+          { replacements: b.flatMap(id => [j, id]), transaction: t });
+      }
     }
     await t.commit();
     return { natija, vanlar };

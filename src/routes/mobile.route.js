@@ -5,10 +5,17 @@ const mobileAuth = require('../middleware/mobileAuth.middleware');
 const uploadAudit = require('../middleware/uploadAudit.middleware');
 const uploadKassa = require('../middleware/uploadKassa.middleware');
 const h = require('../middleware/awaitHandlerFactory.middleware');
+const mobilRol = require('../middleware/mobilRol.middleware');
+
+// .env MOBIL_ROLLAR — rol o'chirilgan bo'lsa shu guruh 403 qaytaradi
+const dostavchik = mobilRol('dostavchik');
+const tasdiq = mobilRol('tasdiq');
+const audit = mobilRol('audit');
 
 /* ── 14. Bootstrap config (token kerak emas) ─────────────────────────────────── */
 router.get('/url1c',      h(c.url1c));
 router.get('/LoadConfig', h(c.loadConfig));
+router.get('/mobilSozlama', h(c.mobilSozlama));   // yangi ilova: rollar, chek rekvizitlari
 
 /* ── 1. Auth (token kerak emas) ────────────────────────────────────────── */
 router.post('/Login',    h(c.login));
@@ -53,11 +60,11 @@ router.post('/tolovSurildi',  mobileAuth(), h(c.tolovSurildi));   // mijoz reyti
 router.post('/savePayment',   mobileAuth(), uploadKassa.single('chek'), h(c.savePayment));
 
 /* ── 7. Delivery ───────────────────────────────────────────────────────── */
-router.get('/getDokDelivery',          mobileAuth(), h(c.getDokDelivery));
-router.get('/getDokDeliveryLocation',  mobileAuth(), h(c.getDokDeliveryLocation));
-router.post('/orderDelivery',          mobileAuth(), h(c.orderDelivery));
-router.post('/returnDeliveryProducts', mobileAuth(), h(c.returnDeliveryProducts));
-router.get('/getReturnDocDelivery',    mobileAuth(), h(c.getReturnDocDelivery));
+router.get('/getDokDelivery',          mobileAuth(), dostavchik, h(c.getDokDelivery));
+router.get('/getDokDeliveryLocation',  mobileAuth(), dostavchik, h(c.getDokDeliveryLocation));
+router.post('/orderDelivery',          mobileAuth(), dostavchik, h(c.orderDelivery));
+router.post('/returnDeliveryProducts', mobileAuth(), dostavchik, h(c.returnDeliveryProducts));
+router.get('/getReturnDocDelivery',    mobileAuth(), dostavchik, h(c.getReturnDocDelivery));
 
 /* ── 8. Offline (Weekly Clients) ───────────────────────────────────────── */
 router.get('/getKlientOfflineMonday',    mobileAuth(), h(c.getKlientOfflineMonday));
@@ -72,7 +79,7 @@ router.get('/getKlientOfflineAllWeek',   mobileAuth(), h(c.getKlientOfflineAllWe
 /* ── 9. Audit ──────────────────────────────────────────────────────────── */
 router.get('/getReason',  mobileAuth(), h(c.getReason));
 router.post('/SendMedia', mobileAuth(), uploadAudit.array('img', 10), h(c.sendMedia));
-router.post('/chekUp',    mobileAuth(), h(c.chekUp));
+router.post('/chekUp',    mobileAuth(), audit, h(c.chekUp));
 
 /* ── 10. Regions & Locations ───────────────────────────────────────────── */
 router.get('/region',   mobileAuth(), h(c.region));
@@ -80,8 +87,8 @@ router.get('/getXudud', mobileAuth(), h(c.getXudud));
 router.get('/city',     mobileAuth(), h(c.city));
 
 /* ── 11. Confirmations & Filters ───────────────────────────────────────── */
-router.get('/getConfirms',  mobileAuth(), h(c.getConfirms));
-router.post('/postConfirm', mobileAuth(), h(c.postConfirm));
+router.get('/getConfirms',  mobileAuth(), tasdiq, h(c.getConfirms));
+router.post('/postConfirm', mobileAuth(), tasdiq, h(c.postConfirm));
 router.get('/getBronFiltr', mobileAuth(), h(c.getBronFiltr));
 
 /* ── 12. History ───────────────────────────────────────────────────────── */
@@ -106,9 +113,9 @@ router.get('/bugungiTashriflar',   mobileAuth(), h(c.bugungiTashriflar));
 router.get('/marshrutReja',        mobileAuth(), h(c.marshrutReja));
 
 /* ── 16. Trip Sheet (dostavchik marshrut varag'i) ────────────────────────── */
-router.get('/getTripSheet',        mobileAuth(), h(c.getTripSheet));
-router.post('/startTrip',          mobileAuth(), h(c.startTrip));
-router.post('/finishTrip',         mobileAuth(), h(c.finishTrip));
+router.get('/getTripSheet',        mobileAuth(), dostavchik, h(c.getTripSheet));
+router.post('/startTrip',          mobileAuth(), dostavchik, h(c.startTrip));
+router.post('/finishTrip',         mobileAuth(), dostavchik, h(c.finishTrip));
 
 /* ── 17. Avtolavka (ko'chma savdo agenti) ────────────────────────────────── */
 router.get('/avtolavkaHolat',      mobileAuth(), h(c.avtolavkaHolat));
@@ -126,15 +133,15 @@ router.get('/kunYakuni',           mobileAuth(), h(c.kunYakuni));
 router.post('/kunniYopish',        mobileAuth(), h(c.kunniYopish));
 
 /* ── 18. Dostavchik (pre-sale yetkazish) ─────────────────────────────────── */
-router.get('/dostavchikHolat',     mobileAuth(), h(c.dostavchikHolat));
-router.get('/dostavchikSinxron',   mobileAuth(), h(c.dostavchikSinxron));
-router.get('/marshrut',            mobileAuth(), h(c.marshrut));
-router.get('/buyurtma',            mobileAuth(), h(c.buyurtma));
-router.post('/reysBoshla',         mobileAuth(), h(c.reysBoshla));
-router.post('/yetkazdim',          mobileAuth(), h(c.yetkazdim));
-router.post('/yetkazilmadi',       mobileAuth(), h(c.yetkazilmadi));
-router.post('/qarzTolov',          mobileAuth(), h(c.qarzTolov));
-router.get('/dostavchikKunYakuni', mobileAuth(), h(c.dKunYakuni));
-router.post('/reysYakunla',        mobileAuth(), h(c.reysYakunla));
+router.get('/dostavchikHolat',     mobileAuth(), dostavchik, h(c.dostavchikHolat));
+router.get('/dostavchikSinxron',   mobileAuth(), dostavchik, h(c.dostavchikSinxron));
+router.get('/marshrut',            mobileAuth(), dostavchik, h(c.marshrut));
+router.get('/buyurtma',            mobileAuth(), dostavchik, h(c.buyurtma));
+router.post('/reysBoshla',         mobileAuth(), dostavchik, h(c.reysBoshla));
+router.post('/yetkazdim',          mobileAuth(), dostavchik, h(c.yetkazdim));
+router.post('/yetkazilmadi',       mobileAuth(), dostavchik, h(c.yetkazilmadi));
+router.post('/qarzTolov',          mobileAuth(), dostavchik, h(c.qarzTolov));
+router.get('/dostavchikKunYakuni', mobileAuth(), dostavchik, h(c.dKunYakuni));
+router.post('/reysYakunla',        mobileAuth(), dostavchik, h(c.reysYakunla));
 
 module.exports = router;

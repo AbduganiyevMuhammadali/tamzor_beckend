@@ -2,8 +2,10 @@
  * LOGIN TASHXISI — serverga kira olmasangiz shuni ishga tushiring.
  *
  *   node scripts/login-tekshir.js                    # holatni ko'rsatadi
- *   node scripts/login-tekshir.js --tikla            # Admin parolini 123456 ga qaytaradi
- *   node scripts/login-tekshir.js --tikla YangiParol # boshqa parol bilan
+ *   node scripts/login-tekshir.js --tikla YangiParol # Admin/Programmer parolini o'rnatadi
+ *
+ * --tikla uchun parol MAJBURIY argument (kamida 8 belgi). Standart (123456 kabi)
+ * parol ishlatilmaydi — zaif parol bilan qayta tiklash xavfsizlik teshigi edi.
  */
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
@@ -50,15 +52,23 @@ const SINOV = ['123456', 'admin', 'admin123', '12345678', 'password', '1234'];
     const tiklaIdx = process.argv.indexOf('--tikla');
     if (tiklaIdx !== -1) {
       const yangi = process.argv[tiklaIdx + 1] && !process.argv[tiklaIdx + 1].startsWith('--')
-        ? process.argv[tiklaIdx + 1] : '123456';
+        ? process.argv[tiklaIdx + 1] : null;
+      if (!yangi) {
+        console.error('  XATO: yangi parolni ko\'rsating: node scripts/login-tekshir.js --tikla <YangiParol>');
+        process.exit(1);
+      }
+      if (yangi.length < 8 || SINOV.includes(yangi)) {
+        console.error('  XATO: parol kamida 8 belgi bo\'lishi va oddiy (123456, admin...) bo\'lmasligi kerak');
+        process.exit(1);
+      }
       const hash = await bcrypt.hash(yangi, 8);
       await sequelize.query(
         'UPDATE user SET password = ?, deletedAt = NULL WHERE username IN (?, ?)',
         { replacements: [hash, 'Admin', 'Programmer'] });
-      console.log(`  Admin va Programmer paroli "${yangi}" ga o'rnatildi.`);
+      console.log('  Admin va Programmer paroli yangilandi.');
       console.log('');
     } else {
-      console.log('  Parolni tiklash: node scripts/login-tekshir.js --tikla');
+      console.log('  Parolni tiklash: node scripts/login-tekshir.js --tikla <YangiParol>');
       console.log('');
     }
     process.exit(0);

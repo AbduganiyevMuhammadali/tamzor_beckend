@@ -14,6 +14,7 @@
 const sequelize = require('../db/db-sequelize');
 const HttpException = require('./HttpException.utils');
 const { ASOSIY_OMBOR } = require('./ombor.utils');
+const { tovarlarniQulfla } = require('./qulf.utils');
 
 const OCHIQ_HOLAT = ['yangi', 'tasdiqlangan', 'yigilmoqda'];
 const n = v => parseFloat(v) || 0;
@@ -64,6 +65,12 @@ async function zaxiraTekshir(qatorlar, { ombor = ASOSIY_OMBOR, istisnoArizaId = 
     kerak.set(id, x);
   }
   if (!kerak.size) return;
+  // Tranzaksiya berilsa — shu tovar qatorlari qulflanadi: bir xil tovarni parallel band
+  // qilayotgan buyurtmalar navbatma-navbat tekshiriladi (ikkalasi bir qoldiqni ko'rib
+  // sklad minusga tushmasin). Qulf commit/rollback'gacha turadi.
+  // MUHIM (InnoDB REPEATABLE READ): tranzaksiyadagi birinchi oddiy SELECT snapshot
+  // oladi — eng ishonchlisi chaqiruvchi tovarlarniQulfla'ni tranzaksiya boshida chaqirishi.
+  if (transaction) await tovarlarniQulfla([...kerak.keys()], transaction);
   const qoldiq = await mavjudQoldiq({ tovarIds: [...kerak.keys()], ombor, istisnoArizaId, transaction });
   const yetmaydi = [];
   for (const [id, x] of kerak) {

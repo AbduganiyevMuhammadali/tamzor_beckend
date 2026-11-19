@@ -84,14 +84,29 @@ function telefonNormal(v) {
 }
 function sonParse(v) {
   if (v === null || v === undefined || v === '') return null;
-  if (typeof v === 'number') return v;
-  let s = String(v).replace(/[^\d,.\-]/g, '');
-  if (!s || s === '-') return null;
-  // "1 234,50" → vergul kasr; "1,234,567" → vergul minglik
-  if (s.includes(',') && !s.includes('.')) s = /,\d{1,2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, '');
-  else s = s.replace(/,/g, '');
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const matn = String(v).trim();
+  const manfiy = /^[-−–]/.test(matn) || /^\(.*\)$/.test(matn);
+  // Bo'sh joy (oddiy/NBSP/ingichka), valyuta va boshqa belgilar olib tashlanadi — faqat raqam , .
+  let s = matn.replace(/[^\d,.]/g, '');
+  if (!s || !/\d/.test(s)) return null;
+  const nuqta = (s.match(/\./g) || []).length, vergul = (s.match(/,/g) || []).length;
+  if (nuqta && vergul) {
+    // Ikkalasi bor: oxirgisi — kasr, qolgani minglik ("1.250.000,50" / "1,250,000.50")
+    const kasr = s.lastIndexOf(',') > s.lastIndexOf('.') ? ',' : '.';
+    const ming = kasr === ',' ? '.' : ',';
+    s = s.split(ming).join('').replace(kasr, '.');
+  } else if (nuqta > 1 || vergul > 1) {
+    // Bir xil belgi bir necha marta — minglik ajratgich ("1.250.000", "1,250,000")
+    s = s.replace(/[.,]/g, '');
+  } else if (vergul === 1) {
+    // Bitta vergul: aniq 3 xona — minglik ("1,250"), aks holda kasr ("1,5", "41,311081")
+    s = /^\d{1,3},\d{3}$/.test(s) ? s.replace(',', '') : s.replace(',', '.');
+  }
+  // Bitta nuqta — kasr ("12.5", "41.311")
   const x = parseFloat(s);
-  return Number.isFinite(x) ? x : null;
+  if (!Number.isFinite(x)) return null;
+  return manfiy ? -x : x;
 }
 function sanaMatn(v) {
   if (v instanceof Date && !isNaN(v)) return `${String(v.getDate()).padStart(2, '0')}.${String(v.getMonth() + 1).padStart(2, '0')}.${v.getFullYear()}`;
@@ -235,7 +250,8 @@ function qatorniTayyorla(r, xarita, sozlama) {
   m.tolov_muddati_kun = muddat && muddat > 0 ? Math.round(muddat) : null;
   const kunlar = toza(ol('tashrif_kunlari'));
   if (kunlar) {
-    const t = kunlar.split(/[,;/ ]+/).map(x => x.slice(0, 2)).map(x => x[0].toUpperCase() + x.slice(1).toLowerCase()).filter(x => KUNLAR.includes(x));
+    // "Du," kabi oxirgi ajratgich bo'sh bo'lak beradi — bo'sh bo'laklar tashlanadi
+    const t = kunlar.split(/[,;/ ]+/).filter(Boolean).map(x => x.slice(0, 2)).map(x => x[0].toUpperCase() + x.slice(1).toLowerCase()).filter(x => KUNLAR.includes(x));
     m.tashrif_kunlari = t.length ? [...new Set(t)].join(', ') : null;
     if (!t.length) ogoh.push("tashrif kunlari tushunarsiz (Du, Se, Ch… kutiladi)");
   } else m.tashrif_kunlari = null;
@@ -375,7 +391,12 @@ class MijozImportController {
       if (tk) fayldaTel.set(tk, n1);
       fayldaNom.set(nk, n1);
 
-      const bor = (tk && telIndeks.get(tk)) || nomIndeks.get(nk) || null;
+      // Nom bo'yicha moslash faqat qatorda telefon bo'lmasa yoki tizimdagi mijozda telefon bo'lmasa —
+      // aks holda telefoni boshqa, nomi bir xil BOSHQA mijoz ustidan yozib yuborilardi
+      const nomBor = nomIndeks.get(nk) || null;
+      const bor = (tk && telIndeks.get(tk))
+        || (nomBor && (!tk || (!tel9(nomBor.telefon) && !tel9(nomBor.telefon2))) ? nomBor : null)
+        || null;
       if (bor) {
         qator.mavjudId = bor.id;
         if (!yangilash) { qator.holat = 'ozgarishsiz'; qator.sabab = 'Tizimda bor (yangilash o\'chirilgan)'; natija.push(qator); return; }

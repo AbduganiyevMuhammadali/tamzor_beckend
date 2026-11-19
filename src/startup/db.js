@@ -3,10 +3,13 @@ const db = require('../db/db-sequelize');
 
 module.exports = async function(){
     //await db.sync();
-    db.authenticate()
+    return db.authenticate()
     .then(() => {
         console.log('Baza bilan aloqa ulandi');
         // migration();
+    })
+    .catch(err => {
+        console.error('Baza bilan aloqa o\'rnatilmadi:', err.message);
     })
     // .catch(err => { Global exception hadler borligi uchun
     //     console.error('Baza bilan aloqa uzildi xatolik ->:', err);

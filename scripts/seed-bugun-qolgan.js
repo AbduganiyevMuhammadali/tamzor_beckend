@@ -19,6 +19,8 @@
 
 require('dotenv').config();
 const sequelize = require('../src/db/db-sequelize');
+// NODE_ENV=production da ishlamaydi (faqat --majburiy bilan)
+require('./lib/demo-utils').ishlabChiqarishTaqiq('seed-bugun-qolgan');
 sequelize.options.logging = false;
 
 const TAG       = '[demo-bugun]';

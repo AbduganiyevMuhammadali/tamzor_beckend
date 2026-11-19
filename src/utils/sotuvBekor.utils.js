@@ -36,6 +36,7 @@ const { TashrifModel } = require('../models/marshrut.model');
 const { InkassatsiyaModel } = require('../models/inkassatsiya.model');
 const { AvtolavkaHujjatModel } = require('../models/avtolavka.model');
 const HttpException = require('./HttpException.utils');
+const { qulflabOl } = require('./qulf.utils');
 
 const SOTUV_KASSA_MANBALAR = ['ariza', 'avtolavka', 'sklad', 'dostavchik'];
 const ADMIN_ROLLAR = ['Admin', 'Programmer'];
@@ -66,6 +67,17 @@ async function yetkazilganSotuvniBekorQil(ariza, { sabab, user, transaction = nu
   if (sababMatn.length < 3) throw new HttpException(400, 'Bekor qilish sababini yozing (kamida 3 ta belgi)');
 
   const ish = async (t) => {
+    /* Hujjat tranzaksiya ichida QULFLAB qayta o'qiladi: chaqiruvchi uni tranzaksiyadan
+       tashqarida yuklagan bo'lishi mumkin. Ikki parallel "bekor" so'rovidan ikkinchisi
+       birinchisi commit bo'lguncha kutadi, so'ng holat='bekor'ni ko'rib rad etiladi —
+       aks holda kassa qatorlari allaqachon o'chgani uchun qarz=jami deb mijozga ikkinchi
+       marta pul qaytarilardi. */
+    const tashqi = ariza;
+    ariza = await qulflabOl(ArizaModel, tashqi.id, t);
+    if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
+    if (ariza.turi !== 'sotish') throw new HttpException(400, 'Faqat sotuv hujjati bekor qilinadi');
+    if (ariza.holat !== 'yetkazildi') throw new HttpException(400, `Hujjat "${ariza.holat}" holatida — bu amal faqat yetkazilgan sotuv uchun`);
+
     const jami = n(ariza.jami_summa);
     const kim = user.fullname || user.username || `user#${user.id}`;
 
@@ -117,6 +129,11 @@ async function yetkazilganSotuvniBekorQil(ariza, { sabab, user, transaction = nu
     const p = (v) => String(v).padStart(2, '0');
     const muhr = `${sababMatn} · bekor qildi: ${kim}, ${p(vaqt.getDate())}.${p(vaqt.getMonth() + 1)}.${vaqt.getFullYear()} ${p(vaqt.getHours())}:${p(vaqt.getMinutes())}`;
     await ariza.update({ holat: 'bekor', bekor_sababi: muhr.slice(0, 255) }, { transaction: t });
+    // Chaqiruvchining (tranzaksiyadan tashqarida yuklangan) nusxasi ham yangi holatni ko'rsin
+    if (tashqi !== ariza && typeof tashqi.setDataValue === 'function') {
+      tashqi.setDataValue('holat', ariza.holat);
+      tashqi.setDataValue('bekor_sababi', ariza.bekor_sababi);
+    }
     // Mijoz reytingi: shu sotuv uchun berilgan ball qaytadi
     await require('./reyting.utils').reytingQaytar({ manba_tur: 'ariza', manba_id: ariza.id }, t);
 

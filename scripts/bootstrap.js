@@ -20,22 +20,38 @@
  *
  * XAVFSIZ: mavjud yozuvlarga tegmaydi — faqat yo'qlarini qo'shadi.
  * Qayta ishga tushirish zararsiz (idempotent).
+ *
+ * PAROLLAR: yangi yaratilgan har bir foydalanuvchi/agent/dostavchiga TASODIFIY
+ * parol beriladi va oxirida BIR MARTA ekranga chiqariladi (bazada faqat hash).
+ * Demo uchun ma'lum parol kerak bo'lsa: BOOTSTRAP_PAROL=... yoki --parol <qiymat>
+ * (kamida 8 belgi).
  */
 
 require('dotenv').config();
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const sequelize = require('../src/db/db-sequelize');
 sequelize.options.logging = false;
 
 const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 
+/* Parol manbai: --parol argument > BOOTSTRAP_PAROL env > tasodifiy (har biriga alohida) */
+const parolArgIdx = process.argv.indexOf('--parol');
+const BERILGAN_PAROL = (parolArgIdx !== -1 ? process.argv[parolArgIdx + 1] : null) || process.env.BOOTSTRAP_PAROL || null;
+if (BERILGAN_PAROL && BERILGAN_PAROL.length < 8) {
+  console.error('  XATO: --parol / BOOTSTRAP_PAROL kamida 8 belgi bo\'lishi kerak');
+  process.exit(1);
+}
+const yangiParol = () => BERILGAN_PAROL || crypto.randomBytes(9).toString('base64url');
+const yaratilganKirishlar = [];   // [{ tur, login, parol }] — oxirida bir marta chiqariladi
+
 /* ── Ma'lumot namunalari ─────────────────────────────────── */
-/* Odatda bu ikkisini '20220930123409-default-users' migratsiyasi yaratadi
-   (parol: 123456). Bu yerdagi ro'yxat — migratsiya o'tmagan yoki user
-   jadvali qo'lda tozalangan holat uchun zaxira. */
+/* Odatda bu ikkisini '20220930123409-default-users' migratsiyasi yaratadi.
+   Bu yerdagi ro'yxat — migratsiya o'tmagan yoki user jadvali qo'lda
+   tozalangan holat uchun zaxira. Parol — tasodifiy (yuqoriga qarang). */
 const FOYDALANUVCHILAR = [
-  { id: 0, username: 'Programmer', fullname: 'Dasturchi',     role: 'Programmer', parol: '123456' },
-  { id: 1, username: 'Admin',      fullname: 'Administrator', role: 'Admin',      parol: '123456' },
+  { id: 0, username: 'Programmer', fullname: 'Dasturchi',     role: 'Programmer' },
+  { id: 1, username: 'Admin',      fullname: 'Administrator', role: 'Admin' },
 ];
 
 const TERRITORIYALAR = ["Farg'ona shahar", "Marg'ilon", 'Qo\'qon'];
@@ -88,11 +104,13 @@ async function bootstrap() {
   /* ── 1. FOYDALANUVCHILAR ── */
   for (const u of FOYDALANUVCHILAR) {
     if (await bor('user', 'username = ?', [u.username])) continue;
-    const hash = await bcrypt.hash(u.parol, 10);
+    const parol = yangiParol();
+    const hash = await bcrypt.hash(parol, 10);
     await sequelize.query(
       `INSERT INTO user (id, username, password, fullname, role, createdAt, updatedAt)
        VALUES (?,?,?,?,?,NOW(),NOW())`,
       { replacements: [u.id, u.username, hash, u.fullname, u.role] });
+    yaratilganKirishlar.push({ tur: 'web', login: u.username, parol });
     n.user++;
   }
 
@@ -127,7 +145,9 @@ async function bootstrap() {
   for (let i = 0; i < AGENTLAR.length; i++) {
     const a = AGENTLAR[i];
     if (await bor('agent', 'fullname = ?', [a.fullname])) continue;
-    const hash = await bcrypt.hash('123456', 10);
+    const parol = yangiParol();
+    const hash = await bcrypt.hash(parol, 10);
+    yaratilganKirishlar.push({ tur: 'agent (mobil)', login: a.login, parol });
     await sequelize.query(
       `INSERT INTO agent (fullname, telefon, login, parol, territoriya_id, plan_summa,
                           bonus_foiz, faol, createdAt, updatedAt)
@@ -141,7 +161,9 @@ async function bootstrap() {
   /* ── 5. DOSTAVCHILAR ── */
   for (const d of DOSTAVCHILAR) {
     if (await bor('dostavchi', 'ism = ?', [d.ism])) continue;
-    const hash = await bcrypt.hash('123456', 10);
+    const parol = yangiParol();
+    const hash = await bcrypt.hash(parol, 10);
+    yaratilganKirishlar.push({ tur: 'dostavchi (mobil)', login: d.login, parol });
     await sequelize.query(
       `INSERT INTO dostavchi (ism, telefon, transport, mashina_raqam, login, parol,
                               faol, createdAt, updatedAt)
@@ -217,12 +239,13 @@ async function bootstrap() {
     console.log(`  Tovar         : ${q(n.tovar, c.tv)}`);
     console.log(`  Mijoz         : ${q(n.mijoz, c.m)}`);
     console.log('');
-    console.log('  ── Kirish ma\'lumotlari ──');
-    console.log('    Admin      : Admin / 123456');
-    console.log('    Programmer : Programmer / 123456');
-    console.log('    Agent va dostavchi (mobil): 123456');
-    console.log('');
-    console.log('  DIQQAT: ishlab chiqarishga chiqarishdan oldin parollarni almashtiring.');
+    if (yaratilganKirishlar.length) {
+      // Parollar faqat SHU YERDA bir marta ko'rsatiladi — bazada faqat hash saqlanadi
+      console.log('  ── Yangi yaratilgan kirish ma\'lumotlari (saqlab qo\'ying, qayta ko\'rsatilmaydi) ──');
+      for (const k of yaratilganKirishlar) console.log(`    ${k.tur.padEnd(18)}: ${k.login} / ${k.parol}`);
+    } else {
+      console.log('  Yangi foydalanuvchi yaratilmadi — mavjud parollar o\'zgarmadi.');
+    }
     console.log('');
     console.log('  Keyingi qadam: npm run demo:all  (savdo, to\'lov, tashrif ma\'lumoti)');
     console.log('');

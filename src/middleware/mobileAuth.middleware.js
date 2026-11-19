@@ -3,6 +3,7 @@ const AgentModel = require('../models/agent.model');
 const DostavchiModel = require('../models/dostavchi.model');
 const jwt = require('jsonwebtoken');
 const { secret_jwt } = require('../startup/config');
+const { asosiyRol, asosiyRolYoqilgan, rolOchiqEmasXabari } = require('../utils/mobilRollar.utils');
 
 /**
  * Mobil ilova uchun auth middleware.
@@ -23,7 +24,12 @@ const mobileAuth = () => {
         throw new HttpException(401, req.mf('Access denied. No credentials sent!'));
       }
 
-      const decoded = jwt.verify(token, secret_jwt);
+      let decoded;
+      try {
+        decoded = jwt.verify(token, secret_jwt, { algorithms: ['HS256'] });
+      } catch (e) {
+        throw new HttpException(401, req.mf('Authentication failed!'));
+      }
 
       // Token'dagi rolga qarab: agent_id → agent, dostavchi_id → dostavchik.
       // Ikkalasida ham req.currentAgent to'ldiriladi (endpointlar umumiy ishlatadi),
@@ -42,11 +48,17 @@ const mobileAuth = () => {
         throw new HttpException(401, req.mf('Authentication failed!'));
       }
 
+      // Server sozlamasi (.env MOBIL_ROLLAR): foydalanuvchining asosiy roli yoqilmagan bo'lsa
+      // 403 — 401 emas, aks holda ilova uni token xatosi deb logout qilib yuboradi.
+      if (!asosiyRolYoqilgan(user, rol)) {
+        throw new HttpException(403, rolOchiqEmasXabari(asosiyRol(user, rol)));
+      }
+
       req.currentAgent = user;
       req.currentRole = rol;
       next();
     } catch (e) {
-      e.status = 401;
+      // Faqat token xatolari 401 (ilova logout qiladi); baza xatosi 500 bo'lib qoladi
       next(e);
     }
   };

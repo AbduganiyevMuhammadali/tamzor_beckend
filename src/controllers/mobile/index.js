@@ -21,6 +21,7 @@ module.exports = {
   // 14. Bootstrap config
   url1c: config.url1c,
   loadConfig: config.loadConfig,
+  mobilSozlama: config.mobilSozlama,
 
   // 1. Auth & User
   login: auth.login,

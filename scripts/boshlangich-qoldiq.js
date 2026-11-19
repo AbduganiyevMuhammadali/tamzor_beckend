@@ -18,6 +18,8 @@
  * `--narxsiz` — tannarxi yo'q qoldiqni ham kiritadi (ombor qiymati 0 chiqadi; keyin Ombor →
  *   Prixod'da BOSHLANGICH hujjatni bekor qilib, narxlarni yozib qayta tasdiqlash mumkin).
  * `--tozala` — shu skript yaratgan hujjat va tovarlarni (boshqa harakati bo'lmasa) o'chiradi.
+ *   Tovar "shu skript yaratgan" deb faqat demo_yozuv jurnalidagi id bo'yicha topiladi —
+ *   JSON'dagi SKU'ga mos kelgan, lekin skriptdan OLDIN mavjud bo'lgan tovar hech qachon o'chirilmaydi.
  */
 process.chdir(require('path').join(__dirname, '..'));
 require('dotenv').config();
@@ -29,12 +31,16 @@ const { PrixodModel, PrixodQatorModel } = require('../src/models/prixod.model');
 const TovarRegisterModel = require('../src/models/tovar_register.model');
 const prixodController = require('../src/controllers/web/prixod.controller');
 const { ASOSIY_OMBOR } = require('../src/utils/ombor.utils');
+const D = require('./lib/demo-utils');
+const SKRIPT = 'boshlangich-qoldiq';
 
 const HUJJAT = 'BOSHLANGICH';
 const argv = process.argv.slice(2);
 const fayl = argv.find(a => !a.startsWith('--'));
 const sanaArg = argv[argv.indexOf('--sana') + 1];
-const sana = argv.includes('--sana') && /^\d{4}-\d{2}-\d{2}$/.test(sanaArg || '') ? sanaArg : new Date().toISOString().slice(0, 10);
+// Standart — bugungi MAHALLIY sana (toISOString UTC kunini beradi)
+const bugunLokal = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const sana = argv.includes('--sana') && /^\d{4}-\d{2}-\d{2}$/.test(sanaArg || '') ? sanaArg : bugunLokal();
 const n = (v) => { const x = parseFloat(String(v ?? '').replace(',', '.').replace(/\s/g, '')); return isNaN(x) ? 0 : x; };
 
 // Controller'ni HTTP'siz chaqirish uchun soxta req/res
@@ -51,15 +57,23 @@ async function tozala() {
     await p.destroy({ force: true });
     console.log(`Hujjat #${p.id} (${HUJJAT}) o'chirildi`);
   }
-  // Skript ochgan tovar kartalari — faqat boshqa harakati bo'lmaganlari
-  const royxat = JSON.parse(fs.readFileSync(fayl, 'utf8'));
-  for (const q of royxat) {
-    const t = await TovarModel.findOne({ where: { shtrix_kod: String(q.sku) } });
+  // Skript ochgan tovar kartalari — faqat jurnaldagi (shu skript YARATGAN) id'lar
+  // va faqat boshqa harakati bo'lmaganlari. SKU bo'yicha mos kelgan, lekin oldindan
+  // mavjud bo'lgan tovarlar jurnalda yo'q — ular hech qachon o'chirilmaydi.
+  if (!(await D.jurnalBormi(sequelize))) {
+    console.log("  Jurnal (demo_yozuv) yo'q — tovar kartalari o'chirilmadi (qaysi biri skriptniki ekani noma'lum)");
+    return;
+  }
+  const ids = await D.idlar(sequelize, SKRIPT, 'tovar');
+  for (const id of ids) {
+    const t = await TovarModel.findByPk(id, { paranoid: false });
     if (!t) continue;
     const harakat = await TovarRegisterModel.count({ where: { tovar_id: t.id } });
     if (harakat) { console.log(`  ${t.nomi}: ombor harakati bor — qoldirildi`); continue; }
     await t.destroy({ force: true });
   }
+  await sequelize.query(`DELETE FROM demo_yozuv WHERE skript = ? AND jadval = 'tovar'
+                         AND yozuv_id NOT IN (SELECT id FROM tovar)`, { replacements: [SKRIPT] });
 }
 
 async function kiritish() {
@@ -74,6 +88,7 @@ async function kiritish() {
   if (narxsiz.length) console.log(`DIQQAT: ${narxsiz.length} ta tovar tannarxsiz kiritilmoqda — ombor qiymati va foyda hisobotlari to'liq bo'lmaydi`);
 
   // 1. Tovar kartalari (SKU = shtrix kod bo'yicha; bor bo'lsa yangilanadi)
+  await D.jurnalTayyorla(sequelize);
   const tovarlar = {};
   let yangi = 0;
   for (const q of royxat) {
@@ -85,7 +100,11 @@ async function kiritish() {
     };
     let t = await TovarModel.findOne({ where: { shtrix_kod: sku }, paranoid: false });
     if (t) { await t.restore(); await t.update(maydonlar); }
-    else { t = await TovarModel.create({ ...maydonlar, shtrix_kod: sku }); yangi++; }
+    else {
+      t = await TovarModel.create({ ...maydonlar, shtrix_kod: sku }); yangi++;
+      // Faqat YANGI ochilgan karta jurnalga yoziladi — --tozala faqat shularni o'chira oladi
+      await D.belgila(sequelize, SKRIPT, 'tovar', [t.id]);
+    }
     tovarlar[sku] = t;
   }
 

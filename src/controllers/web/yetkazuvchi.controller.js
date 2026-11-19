@@ -80,6 +80,10 @@ class YetkazuvchiController extends BaseController {
     if (!y) throw new HttpException(404, 'Yetkazuvchi topilmadi');
 
     const { summa, tolov_turi, izoh, sana } = req.body;
+    if (!Number.isFinite(Number(summa)) || Number(summa) <= 0) throw new HttpException(400, "Summa noto'g'ri");
+    // Sana tekshiruvi: Invalid Date bazaga yozilib 500 bermasin
+    const sanaQiymat = sana ? new Date(sana) : new Date();
+    if (Number.isNaN(sanaQiymat.getTime())) throw new HttpException(400, "Sana noto'g'ri (YYYY-MM-DD)");
     const t = await sequelize.transaction();
     try {
       await y.increment('balans', { by: Number(summa), transaction: t });
@@ -90,7 +94,7 @@ class YetkazuvchiController extends BaseController {
         summa:      Number(summa),
         tolov_turi: tolov_turi || null,
         izoh:       izoh || null,
-        sana:       sana ? new Date(sana) : new Date(),
+        sana:       sanaQiymat,
       }, { transaction: t });
 
       // Kassadan CHIQIM — yetkazuvchiga to'lov
@@ -102,7 +106,7 @@ class YetkazuvchiController extends BaseController {
         manba_tur:  'yetkazuvchi',
         manba_id:   y.id,
         izoh:       izoh || `${y.ism} ga to'lov`,
-        sana:       sana ? new Date(sana) : new Date(),
+        sana:       sanaQiymat,
       }, { transaction: t });
 
       await t.commit();
@@ -116,15 +120,17 @@ class YetkazuvchiController extends BaseController {
 
   // Ledger tarixi
   harakatlar = async (req, res) => {
-    const { page = 1, limit = 100 } = req.query;
-    const offset = (Number(page) - 1) * Number(limit);
+    // NaN / haddan katta qiymatlar cheklanadi
+    const lim = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
+    const pg  = Math.max(1, parseInt(req.query.page) || 1);
+    const offset = (pg - 1) * lim;
     const { count, rows } = await YetkazuvchiHarakatlarModel.findAndCountAll({
       where: { yetkazuvchi_id: req.params.id },
       order: [['sana', 'DESC'], ['id', 'DESC']],
-      limit: Number(limit),
+      limit: lim,
       offset,
     });
-    res.send({ data: rows, total: count, page: Number(page), pages: Math.ceil(count / Number(limit)) });
+    res.send({ data: rows, total: count, page: pg, pages: Math.ceil(count / lim) });
   };
 }
 

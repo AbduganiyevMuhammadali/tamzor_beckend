@@ -15,6 +15,7 @@ const HttpException = require('./HttpException.utils');
 const { ASOSIY_OMBOR, XOM_ASHYO_OMBOR, turOmbori, omborNomi } = require('./ombor.utils');
 const { mavjudQoldiq } = require('./zaxira.utils');
 const { tannarxXaritasi } = require('./tahlil.utils');
+const { tovarlarniQulfla } = require('./qulf.utils');
 
 const MANBA = 'kochirish';
 const EPS = 0.0005;
@@ -29,6 +30,9 @@ const yax = (v, d = 2) => Math.round(n(v) * 10 ** d) / 10 ** d;
  */
 async function qoldiqniKochir({ tovar, dan, ga, transaction, band = 'xato', narx = null }) {
   if (!dan || !ga || dan === ga) return 0;
+  // Qoldiq o'qilishidan OLDIN tovar qatori qulflanadi — parallel yuklash/sotuv/chiqim shu tovar
+  // bo'yicha kutadi, ko'chirilgan miqdor eskirgan qoldiqdan hisoblanmaydi (ombor minusga tushmaydi)
+  if (transaction) await tovarlarniQulfla([tovar.id], transaction);
   const m = (await mavjudQoldiq({ tovarIds: [tovar.id], ombor: dan, transaction })).get(Number(tovar.id)) || { fizik: 0, band: 0, mavjud: 0 };
   if (band === 'xato' && m.band > EPS) {
     throw new HttpException(400, `"${tovar.nomi}" ${omborNomi(dan)}da ochiq buyurtmalarga band qilingan (${yax(m.band, 3)}). `
@@ -74,8 +78,12 @@ async function tartibsizQoldiq({ transaction } = {}) {
 
 /** Noto'g'ri omborda turgan erkin qoldiqni turi omboriga ko'chiradi (band qismi joyida qoladi) */
 async function tartibla({ transaction } = {}) {
-  const royxat = await tartibsizQoldiq({ transaction });
+  // Nomzodlar ro'yxati tranzaksiyadan TASHQARIDA o'qiladi: aks holda (REPEATABLE READ) snapshot
+  // qulfdan oldin olinib, keyingi qoldiq o'qishlari eskirgan bo'lardi. Avval hamma tovar qatori
+  // qulflanadi, so'ng har biri qoldiqniKochir ichida qulf ostida yangidan o'qiladi.
+  const royxat = await tartibsizQoldiq(transaction ? {} : { transaction });
   if (!royxat.length) return [];
+  if (transaction) await tovarlarniQulfla(royxat.map(r => r.tovar_id), transaction);
   const narx = await tannarxXaritasi(new Date());
   const natija = [];
   for (const r of royxat) {

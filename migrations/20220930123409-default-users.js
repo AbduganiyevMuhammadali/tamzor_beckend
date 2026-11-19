@@ -51,9 +51,11 @@ module.exports = {
   },
 
   async down (queryInterface, Sequelize) {
+    // up() qo'shgan ikki standart foydalanuvchini username bo'yicha o'chiramiz
+    // (paranoid emas — jismoniy o'chirish, up() qayta ishlaganda dublikat bo'lmasin)
     const transaction = await queryInterface.sequelize.transaction();
     try {
-
+      await queryInterface.bulkDelete('user', { username: ['Programmer', 'Admin'] }, { transaction });
       await transaction.commit();
     } catch (errors) {
       await transaction.rollback();

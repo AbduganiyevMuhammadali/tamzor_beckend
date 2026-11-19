@@ -38,6 +38,11 @@ NODE_ENV=production
 # Mobil ilova shu manzilga ulanadi (serverning tarmoqdagi IP'si)
 MOBILE_API_IP=192.168.1.100
 MOBILE_API_PORT=3003
+
+# Mobil ilovada qaysi rollar ochiladi (bo'sh — hammasi)
+# agent | avtolavka | dostavchik | tasdiq | audit
+MOBIL_ROLLAR=agent,avtolavka,dostavchik,tasdiq,audit
+MOBIL_MIN_VERSIYA=1.0.0
 ```
 
 `SECRET_JWT` uchun tasodifiy satr:
@@ -76,19 +81,31 @@ Barchasi **idempotent** — qayta ishga tushirish xavfsiz, dublikat hosil qilmay
 
 | Kim | Login | Parol |
 |---|---|---|
-| Administrator | `Admin` | `admin123` |
-| Dasturchi | `Programmer` | `123456` |
-| Agent (mobil) | `sherzod`, `dilshod`, `bekzod`, `otabek` | `123456` |
-| Dostavchi (mobil) | `jasur`, `islom`, `ravshan` | `123456` |
+| Administrator | `Admin` | `123456` (migratsiya yaratadi) |
+| Dasturchi | `Programmer` | `123456` (migratsiya yaratadi) |
+| Agent (mobil) | `sherzod`, `dilshod`, `bekzod`, `otabek` | `db:bootstrap` oxirida ekranga chiqaradi |
+| Dostavchi (mobil) | `jasur`, `islom`, `ravshan` | `db:bootstrap` oxirida ekranga chiqaradi |
 
-**Ishlab chiqarishga chiqarishdan oldin parollarni almashtiring.**
+`db:bootstrap` har bir agent/dostavchiga tasodifiy parol beradi va uni **bir marta**
+ekranga chiqaradi. Demo uchun hammasiga bir xil parol kerak bo'lsa:
+
+```bash
+node scripts/bootstrap.js --parol DemoParol2026     # yoki BOOTSTRAP_PAROL=... (kamida 8 belgi)
+```
+
+**Ishlab chiqarishga chiqarishdan oldin Admin va Programmer parolini almashtiring.**
+
+`.env` dagi `SECRET_JWT` kamida 16 belgi bo'lishi shart — aks holda server ishga tushmaydi.
 
 Parol ishlamasa — tashxis va tiklash:
 
 ```bash
-npm run login:tekshir              # kim bor, paroli nima
-node scripts/login-tekshir.js --tikla   # Admin parolini 123456 ga qaytarish
+npm run login:tekshir                                # kim bor
+node scripts/login-tekshir.js --tikla YangiParol123  # Admin/Programmer parolini o'rnatish (kamida 8 belgi)
 ```
+
+Demo skriptlar `NODE_ENV=production` da ishlamaydi (`--majburiy` bayrog'isiz) va
+`--tozala` faqat skriptning o'zi yozgan qatorlarni o'chiradi.
 
 ## Demo ma'lumotni yangilash
 

@@ -2,8 +2,17 @@
 /**
  * Test ma'lumotlarni to'ldirish skripti — barcha sahifalar ishlashi uchun.
  * Ishlatish: node scripts/seed-test-data.js
+ *
+ * NODE_ENV=production da ishlamaydi (faqat --majburiy bilan).
+ * Mobil login paroli: SEED_PAROL env (kamida 8 belgi) yoki tasodifiy —
+ * oxirida bir marta ekranga chiqariladi. Ombor nomi — asosiy sklad konstantasi
+ * ('Основной склад', utils/ombor.utils.js); ilgari 'Asosiy sklad' yozilib,
+ * qoldiq hisoblarida alohida "ombor" bo'lib qolardi.
  */
 require('dotenv').config();
+const { ishlabChiqarishTaqiq } = require('./lib/demo-utils');
+ishlabChiqarishTaqiq('seed-test-data');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const sequelize = require('../src/db/db-sequelize');
 
@@ -29,6 +38,11 @@ function daysAgo(n) {
 }
 function dateOnly(d) {
   return d.toISOString().slice(0, 10);
+}
+const SEED_PAROL = process.env.SEED_PAROL || crypto.randomBytes(9).toString('base64url');
+if (process.env.SEED_PAROL && process.env.SEED_PAROL.length < 8) {
+  console.error('SEED_PAROL kamida 8 belgi bo\'lishi kerak');
+  process.exit(1);
 }
 function rnd(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -59,7 +73,7 @@ async function main() {
   console.log(`✓ mijoz_kategoriya: ${kategoriyalar.length}`);
 
   // ── 3. AGENT ──
-  const agentParol = await bcrypt.hash('test123', 8);
+  const agentParol = await bcrypt.hash(SEED_PAROL, 10);
   const agentData = [
     { fullname: 'Sherzod Karimov', telefon: '+998901112233', territoriya_id: territoriyalar[0].id, plan_summa: 50000000, bonus_foiz: 2.5, kredit_limit: 5000000, transport: 'avto', tashrif_kunlari: 'Du,Se,Ch,Pa,Ju', faol: true },
     { fullname: 'Dilshod Yusupov', telefon: '+998901112244', territoriya_id: territoriyalar[1].id, plan_summa: 40000000, bonus_foiz: 2.0, kredit_limit: 4000000, transport: 'moto', tashrif_kunlari: 'Du,Ch,Ju', faol: true },
@@ -99,7 +113,7 @@ async function main() {
   console.log(`✓ mijoz: ${mijozlar.length}`);
 
   // ── 5. DOSTAVCHI ──
-  const dostavchiParol = await bcrypt.hash('test123', 8);
+  const dostavchiParol = await bcrypt.hash(SEED_PAROL, 10);
   const dostavchiData = [
     { ism: "Jasur Toshmatov", telefon: '+998907773311', transport: 'mashina', mashina_raqam: '01A123BC', faol: true, login: 'dostavchi1', parol: dostavchiParol },
     { ism: "Islom Ne'matov", telefon: '+998907773322', transport: 'mashina', mashina_raqam: '01B456DE', faol: true },
@@ -222,7 +236,7 @@ async function main() {
       agent_id: agent.id, agent_nomi: agent.fullname,
       jami_summa: jamiSumma,
       tolov_turi: tolovTuri,
-      ombor: 'Asosiy sklad',
+      ombor: 'Основной склад',
       dostavchi_id: dostavchi ? dostavchi.id : null,
       dostavchi_nomi: dostavchi ? dostavchi.ism : null,
       jonatish_sana: dateOnly(sana),
@@ -237,7 +251,7 @@ async function main() {
     if (holat === 'yolda' || holat === 'yetkazildi') {
       tovarRegisterRows.push(...qatorlar.map(q => ({
         tovar_id: q.tovar_id, tovar_nomi: q.tovar_nomi, turkum: q.turkum,
-        ombor: 'Asosiy sklad', tur: 'chiqim', manba_tur: 'sotuv', manba_id: ariza.id,
+        ombor: 'Основной склад', tur: 'chiqim', manba_tur: 'sotuv', manba_id: ariza.id,
         donada: -q.dona, bloklarda: 0, qutilarda: 0, hajm: 0,
         kirim_narx: 0, sotuv_narx: q.narx, summa: -q.summa, sana,
       })));
@@ -456,6 +470,8 @@ async function main() {
   console.log(`✓ agent_location: ${locationRows.length}`);
 
   console.log('\n✅ Barcha test ma\'lumotlar muvaffaqiyatli qo\'shildi!');
+  // Parol faqat shu yerda bir marta ko'rsatiladi (bazada hash)
+  console.log(`Mobil login: agent "test", dostavchi "dostavchi1" — parol: ${SEED_PAROL}`);
   process.exit(0);
 }
 

@@ -3,7 +3,8 @@ const Joi = require('joi');
 const KUNLAR = ['Du', 'Se', 'Ch', 'Pa', 'Ju', 'Sh', 'Ya'];
 const TRANSPORT = ['avto', 'moto', 'piyoda', 'velosiped', 'boshqa'];
 
-const create = Joi.object({
+// Default qiymatlarsiz asos — tahrir (PATCH) sxemasi shundan olinadi
+const asos = Joi.object({
   fullname:          Joi.string().min(2).max(100).required()
                        .messages({ 'string.empty': 'Ism majburiy', 'any.required': 'Ism majburiy' }),
   telefon:           Joi.string().max(20).allow('', null).optional(),
@@ -26,7 +27,7 @@ const create = Joi.object({
   mashina_raqam:     Joi.string().max(20).allow('', null).optional(),
   radius_km:         Joi.number().min(0).max(1000).allow(null).optional(),
   izoh:              Joi.string().allow('', null).optional(),
-  faol:              Joi.boolean().default(true),
+  faol:              Joi.boolean().optional(),
   avtolavka:         Joi.boolean().optional(),
   // Mobil ilova kirishi (login bo'sh — agent ilovaga kirmaydi; parol bo'sh — o'zgarmaydi)
   login:             Joi.string().trim().max(50).allow('', null).optional(),
@@ -34,7 +35,10 @@ const create = Joi.object({
                        .messages({ 'string.min': 'Parol kamida 4 belgi' }),
 });
 
-const update = create
+const create = asos.keys({ faol: Joi.boolean().default(true) });
+
+// Tahrirda default YO'Q: faol yuborilmasa o'zgarmaydi (o'chirilgan agent qayta yoqilmaydi)
+const update = asos
   .fork(['fullname', 'plan_summa'], f => f.optional())
   .unknown(false);
 

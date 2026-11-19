@@ -1,5 +1,6 @@
 const { MarshrutRejaModel, TashrifModel } = require('../../models/marshrut.model');
 const { MijozModel } = require('../../models/mijoz.model');
+const { ArizaModel } = require('../../models/ariza.model');
 const HttpException = require('../../utils/HttpException.utils');
 const { ok, requireRole, mobilVaqt } = require('./shared');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
@@ -60,8 +61,9 @@ class MobileTashrifController {
     if (!tashrifId && !klientId) throw new HttpException(400, 'tashrifId yoki klientId majburiy');
 
     const agentId = (req.currentAgent || {}).id;
+    // Faqat O'Z tashrifi (boshqa agentning tashrifini yopib bo'lmaydi)
     const tashrif = tashrifId
-      ? await TashrifModel.findByPk(tashrifId)
+      ? await TashrifModel.findOne({ where: { id: tashrifId, agent_id: agentId } })
       : await TashrifModel.findOne({ where: { agent_id: agentId, mijoz_id: klientId, checkout_vaqt: null }, order: [['id', 'DESC']] });
     if (!tashrif) {
       if (tashrifId) throw new HttpException(404, req.mf('Not found'));
@@ -72,13 +74,21 @@ class MobileTashrifController {
     const checkoutVaqt = mobilVaqt(req.body.vaqt);
     const davomiylik = Math.round((checkoutVaqt.getTime() - new Date(tashrif.checkin_vaqt).getTime()) / 1000);
 
+    // Ilova natija/arizaId yubormasa — mavjud qiymat saqlanadi (masalan createAriza tashrifga
+    // yozgan natija='savdo' va ariza_id null/'ochiq' bilan ustidan yozilmaydi).
+    // arizaId faqat shu agentning hujjati bo'lsa qabul qilinadi.
+    let arizaIdYangi = tashrif.ariza_id || null;
+    if (arizaId) {
+      const a = await ArizaModel.findOne({ where: { id: arizaId, agent_id: agentId }, attributes: ['id'] });
+      if (a) arizaIdYangi = a.id;
+    }
     await tashrif.update({
       checkout_vaqt: checkoutVaqt,
       checkout_lat: lat ?? null,
       checkout_lng: long ?? null,
       davomiylik_sek: davomiylik,
-      natija: natija === 'savdo' || natija === 'sotmaslik' ? natija : 'ochiq',
-      ariza_id: arizaId || null,
+      natija: natija === 'savdo' || natija === 'sotmaslik' ? natija : (tashrif.natija || 'ochiq'),
+      ariza_id: arizaIdYangi,
     });
     ok(res, { tashrifId: tashrif.id, davomiylik_sek: davomiylik }, 'Check-out qayd qilindi');
   };

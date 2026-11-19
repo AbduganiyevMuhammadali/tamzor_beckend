@@ -4,6 +4,7 @@ const { secret_jwt } = require('../../startup/config');
 const HttpException = require('../../utils/HttpException.utils');
 const BaseController = require('../BaseController');
 const { ok } = require('./shared');
+const { ochiqRollar, asosiyRol, asosiyRolYoqilgan, rolOchiqEmasXabari } = require('../../utils/mobilRollar.utils');
 
 const AgentModel = require('../../models/agent.model');
 const DostavchiModel = require('../../models/dostavchi.model');
@@ -18,6 +19,8 @@ async function buildUserData(user, token, rol = 'agent') {
   // dual_role — faqat agent jadvalida bor (sinov/aralash rol uchun): shu
   // agent bitta hisob bilan ham sotuv, ham yetkazib berish oynalarini ko'radi.
   const isDualRoleAgent = isAgent && !!user.dual_role;
+  // .env MOBIL_ROLLAR bilan kesishma — o'chirilgan rol oynasi ochilmaydi
+  const rollar = ochiqRollar(user, rol);
   return {
     token: token || '',
     password: '',
@@ -31,13 +34,13 @@ async function buildUserData(user, token, rol = 'agent') {
     isAgent,
     // Ko'chma savdo agenti: ilova "Mening mashinam", yuklash so'rovi va
     // kun yakuni ekranlarini ko'rsatadi (mobile/avtolavka.controller.js)
-    isAvtolavka: isAgent && !!user.avtolavka,
-    isDeliver: !isAgent || isDualRoleAgent,
+    isAvtolavka: isAgent && !!user.avtolavka && rollar.includes('avtolavka'),
+    isDeliver: (!isAgent || isDualRoleAgent) && rollar.includes('dostavchik'),
     // Dostavchik ilovasi uchun: mashina raqami va transport
     mashina: isAgent ? (user.mashina_raqam || '') : (user.mashina_raqam || ''),
     transport: user.transport || '',
     isAudit: false,
-    isConfirmation: isAgent,
+    isConfirmation: isAgent && rollar.includes('tasdiq'),
     editLocation: isAgent,
     add_client: isAgent,
     location: true,
@@ -51,6 +54,9 @@ async function buildUserData(user, token, rol = 'agent') {
     oneSell: false,
     returnView: !isAgent,
     editPrice: isAgent,
+    // Yangi Flutter ilova uchun: asosiy rol va ochiq rollar ro'yxati
+    asosiyRol: asosiyRol(user, rol),
+    rollar,
   };
 }
 
@@ -80,6 +86,10 @@ class MobileAuthController extends BaseController {
     }
     if (!user.faol) {
       throw new HttpException(400, req.mf('Unauthorized'));
+    }
+    // Asosiy roli serverda (.env MOBIL_ROLLAR) o'chirilgan bo'lsa — kirish yo'q
+    if (!asosiyRolYoqilgan(user, rol)) {
+      throw new HttpException(403, rolOchiqEmasXabari(asosiyRol(user, rol)));
     }
 
     // Token ichiga rol yoziladi: agent_id yoki dostavchi_id

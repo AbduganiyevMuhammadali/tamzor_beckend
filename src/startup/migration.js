@@ -21,10 +21,13 @@ const umzug = new Umzug({
   },
 });
 
+// Migratsiya natijasini qaytaradi: true — muvaffaqiyatli, false — xato (server.js qaror qiladi)
 module.exports = async function(){
     try{
         await umzug.up();
+        return true;
     }catch(e){
-        console.log('Xatolik', e);
+        console.error('Migratsiya xatosi:', e);
+        return false;
     }
 }

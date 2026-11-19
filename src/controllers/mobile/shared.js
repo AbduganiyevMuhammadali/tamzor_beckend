@@ -69,4 +69,49 @@ const SABABLAR = [
 ];
 const sababNomi = (id) => (SABABLAR.find(s => s.id === String(id)) || {}).name || null;
 
-module.exports = { ok, raw, fail, requireRole, WEEK_KEYS, PAGE_SIZE, PRICE_TYPES, VALYUTALAR, mobilVaqt, mobilKalit, SABABLAR, sababNomi };
+/* Joriy foydalanuvchining "dostavchi" sifatidagi ID'si: haqiqiy dostavchik bo'lsa
+   o'z ID'si, dual_role agent bo'lsa unga bog'langan dostavchi qatori, aks holda null. */
+function dostavchiIdOl(req) {
+  if (req.currentRole === 'dostavchi') return req.currentAgent ? Number(req.currentAgent.id) : null;
+  if (req.currentRole === 'agent' && req.currentAgent && req.currentAgent.linked_dostavchi_id) {
+    return Number(req.currentAgent.linked_dostavchi_id);
+  }
+  return null;
+}
+
+/* Unique kalit (mobil_id) bo'yicha parallel takror yozuv xatosi */
+const takrorXato = (e) => !!e && (e.name === 'SequelizeUniqueConstraintError' || (e.parent && e.parent.code === 'ER_DUP_ENTRY'));
+
+/* MIJOZGA RUXSAT — mobil xodim faqat o'zi ishlaydigan mijozni ko'radi/o'zgartiradi:
+     agent      — mijoz.agent_id = agent (getKlient ro'yxati bilan bir xil qoida), avtolavka
+                  agenti (unga barcha faol mijozlar ro'yxati beriladi), marshrut rejasidagi
+                  mijoz yoki shu agent yozgan buyurtmasi bor mijoz (mijoz boshqa agentga o'tkazilgan
+                  bo'lsa ham o'z cheklari tarixini ko'ra oladi); dual_role agent —
+                  qo'shimcha ravishda bog'langan dostavchiga tayinlangan buyurtma mijozi;
+     dostavchik — o'ziga tayinlangan (dostavchi_id) buyurtmasi bor mijoz. */
+async function mijozRuxsat(req, mijoz) {
+  if (!mijoz || !req.currentAgent) return false;
+  const { ArizaModel } = require('../../models/ariza.model');
+  const yoki = [];
+  if (req.currentRole === 'agent') {
+    if (mijoz.agent_id != null && Number(mijoz.agent_id) === Number(req.currentAgent.id)) return true;
+    // Avtolavka agentiga mobil ro'yxatda BARCHA faol mijozlar beriladi (avtolavka.controller
+    // mijozlar ro'yxati) — u istalgan mijozga sota oladi, shuning uchun cheklanmaydi.
+    if (req.currentAgent.avtolavka) return true;
+    // Marshrut rejasida shu agentga tayinlangan mijoz
+    const { MarshrutRejaModel } = require('../../models/marshrut.model');
+    if (await MarshrutRejaModel.findOne({ where: { agent_id: req.currentAgent.id, mijoz_id: mijoz.id }, attributes: ['id'] })) return true;
+    yoki.push({ agent_id: req.currentAgent.id });
+  }
+  const dId = dostavchiIdOl(req);
+  if (dId) yoki.push({ dostavchi_id: dId });
+  if (!yoki.length) return false;
+  const { Op } = require('sequelize');
+  const bor = await ArizaModel.findOne({ where: { mijoz_id: mijoz.id, [Op.or]: yoki }, attributes: ['id'] });
+  return !!bor;
+}
+
+module.exports = {
+  ok, raw, fail, requireRole, WEEK_KEYS, PAGE_SIZE, PRICE_TYPES, VALYUTALAR, mobilVaqt, mobilKalit, SABABLAR, sababNomi,
+  dostavchiIdOl, takrorXato, mijozRuxsat,
+};

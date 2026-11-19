@@ -20,11 +20,20 @@
  * XAVFSIZLIK: faqat shu skript yaratgan yozuvlar o'chiriladi.
  * Belgilar: prixod.hujjat_raqam LIKE 'PR-DEMO%', kassa.izoh LIKE '%[demo]%',
  * tovar/mijoz — izoh maydonida DEMO_TAG. Mavjud ma'lumotga tegilmaydi.
+ *
+ * Qarzdorlik mavjud mijozlarga DELTA sifatida qo'shiladi (manfiy = qarz) va
+ * demo_yozuv jurnaliga yoziladi; --tozala faqat shu deltani ayiradi — seed'dan
+ * keyingi real to'lovlar saqlanadi (ilgari snapshot bilan ustidan yozilardi
+ * va balans MUSBAT, ya'ni "avans" bo'lib yozilardi).
+ * NODE_ENV=production da ishlamaydi (faqat --majburiy bilan).
  */
 
 require('dotenv').config();
 const sequelize = require('../src/db/db-sequelize');
+const D = require('./lib/demo-utils');
+D.ishlabChiqarishTaqiq('demo-seed');
 sequelize.options.logging = false;
+const SKRIPT = 'demo-seed';
 
 const TAG          = 'DEMO-SEED';
 const PRIXOD_PREF  = 'PR-DEMO';
@@ -69,8 +78,14 @@ const KASSA_CHIQIM_KAT = ['Yetkazuvchiga to\'lov', 'Ish haqi', 'Transport', 'Ija
 const koord = () => [40.32 + Math.random() * 0.17, 71.70 + Math.random() * 0.22];
 
 async function tozala() {
+  await D.jurnalTayyorla(sequelize);   // DDL — tranzaksiyadan oldin
   const t = await sequelize.transaction();
   try {
+    // Qarzdorlik: faqat shu skript qo'shgan deltalar teskari qo'llanadi
+    // (mijoz o'chirilishidan OLDIN — demo mijozlarga delta yozilmaydi, lekin baribir)
+    const qaytdi = await D.deltalarniQaytar(sequelize, SKRIPT, t);
+    await D.jurnalniOchir(sequelize, SKRIPT, t);
+
     // Ombor yozuvlari demo prixodlarga manba_id orqali bog'langan —
     // prixodlarni o'chirishdan OLDIN ularni tozalaymiz
     await sequelize.query(
@@ -101,22 +116,19 @@ async function tozala() {
 
     await sequelize.query(`DELETE FROM tovar WHERE tavsif = '${TAG}'`, { transaction: t });
 
-    // Qarzdorlikni asl holiga qaytaramiz. Demo balansni o'zgartirishdan oldin
-    // eski qiymatni demo_balans_zaxira jadvaliga yozib qo'yadi — shunda
-    // mavjud mijozlarning haqiqiy balansi yo'qolmaydi.
+    // Eski versiyaning snapshot jadvali: ustidan yozish seed'dan keyingi real
+    // to'lovlarni yo'qotadi, shuning uchun avtomatik qo'llanmaydi — faqat ogohlantiramiz.
     const [zaxiraBor] = await sequelize.query(
       `SELECT COUNT(*) c FROM information_schema.tables
        WHERE table_schema = DATABASE() AND table_name = 'demo_balans_zaxira'`,
       { transaction: t });
     if (zaxiraBor[0].c) {
-      await sequelize.query(
-        `UPDATE mijoz m JOIN demo_balans_zaxira z ON z.mijoz_id = m.id
-         SET m.balans = z.eski_balans`, { transaction: t });
-      await sequelize.query(`DROP TABLE demo_balans_zaxira`, { transaction: t });
+      console.warn('  Diqqat: eski demo_balans_zaxira jadvali bor (oldingi versiya MUSBAT balans yozgan).');
+      console.warn('  Balanslar avtomatik qaytarilmadi — tekshirib, qo\'lda tuzating va jadvalni o\'chiring.');
     }
 
     await t.commit();
-    console.log('  Tozalandi: demo prixod, kassa, tovar, mijoz va qarzdorliklar');
+    console.log(`  Tozalandi: demo prixod, kassa, tovar, mijoz va qarzdorliklar (${qaytdi} ta balans deltasi qaytarildi)`);
   } catch (e) {
     await t.rollback();
     throw e;
@@ -341,23 +353,17 @@ async function seed() {
   }
 
   /* ── 5. QARZDORLIK — "Top qarzdorlar" bloki ─────────────── */
-  // Mijozlarning bir qismiga turli muddatdagi qarz beramiz.
-  // Eski balansni zaxiraga yozamiz — --tozala uni tiklaydi.
-  await sequelize.query(`
-    CREATE TABLE IF NOT EXISTS demo_balans_zaxira (
-      mijoz_id INT PRIMARY KEY,
-      eski_balans DECIMAL(18,2) NOT NULL
-    )`);
-
+  // Mijozlarning bir qismiga turli muddatdagi qarz qo'shamiz. Tizimda
+  // balans MANFIY = qarz (musbat = avans), shuning uchun delta manfiy.
+  // Delta jurnalga yoziladi — --tozala faqat uni ayiradi (snapshot yo'q).
+  await D.jurnalTayyorla(sequelize);
   const qarzdorlar = [...mijozlar].sort(() => Math.random() - 0.5).slice(0, Math.min(12, mijozlar.length));
-  for (const m of qarzdorlar) {
-    await sequelize.query(
-      `INSERT IGNORE INTO demo_balans_zaxira (mijoz_id, eski_balans)
-       SELECT id, balans FROM mijoz WHERE id = ?`, { replacements: [m.id] });
-    await sequelize.query('UPDATE mijoz SET balans = ? WHERE id = ?',
-      { replacements: [rnd(800, 14000) * 1000, m.id] });
-    natija.qarzdor++;
-  }
+  await sequelize.transaction(async (t) => {
+    for (const m of qarzdorlar) {
+      await D.deltaQollash(sequelize, SKRIPT, 'mijoz', m.id, 'balans', -rnd(800, 14000) * 1000, t);
+      natija.qarzdor++;
+    }
+  });
 
   return natija;
 }
@@ -383,7 +389,7 @@ async function seed() {
           AND sana >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) kirim30,
         (SELECT ROUND(SUM(summa)/1e6) FROM kassa WHERE tur='kirim'
           AND sana >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) kassa30,
-        (SELECT ROUND(SUM(balans)/1e6) FROM mijoz WHERE balans > 0) qarz
+        (SELECT ROUND(-SUM(balans)/1e6) FROM mijoz WHERE balans < 0 AND deletedAt IS NULL) qarz
     `);
     const c = chk[0];
 

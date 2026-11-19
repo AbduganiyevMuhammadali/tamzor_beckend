@@ -2,6 +2,7 @@ const TovarModel = require('../../models/tovar.model');
 const { AuditModel } = require('../../models/hisobot.model');
 const { MijozModel } = require('../../models/mijoz.model');
 const { Op, fn, col } = require('sequelize');
+const HttpException = require('../../utils/HttpException.utils');
 const { ok, SABABLAR } = require('./shared');
 
 /* ── Audit (hujjat 3.6, 3.7, 8.1, 8.2) ────────────────────────────────────── */
@@ -28,32 +29,41 @@ class MobileAuditController {
 
   // 8.2 SendMedia/ → rasmlarni saqlab, audit yozuviga bog'laydi
   // Multipart (img[]) route'da multer orqali qabul qilinadi.
+  // Rasm faqat JORIY xodimning shu mijoz (yoki aniq audit_id) bo'yicha audit yozuviga
+  // qo'shiladi — klient_id'siz butun tizimdagi oxirgi auditga yozib yuborilmaydi.
   sendMedia = async (req, res, next) => {
     const { klient_id, date, comment, reason_id } = req.query;
+    const auditId = req.query.audit_id || req.query.auditId || null;
     const agent = req.currentAgent || {};
+    if (!agent.id) throw new HttpException(401, 'Avtorizatsiya kerak');
+    if (!klient_id && !auditId) throw new HttpException(400, 'klient_id majburiy');
     const yollar = (req.files || []).map(f => `/uploads/audit/${f.filename}`);
 
     if (yollar.length) {
-      const sana = date ? new Date(String(date).replace(/\./g, '-')) : new Date();
-      // Shu klient+sana uchun oxirgi audit yozuvini topamiz (chekUp dan kelgan)
-      const where = {};
+      let sana = date ? new Date(String(date).replace(/\./g, '-')) : new Date();
+      if (isNaN(sana.getTime())) sana = new Date();
+      // Shu xodim + klient (yoki aniq audit_id) uchun oxirgi audit yozuvi (chekUp dan kelgan)
+      const where = { agent_id: agent.id };
+      if (auditId) where.id = auditId;
       if (klient_id) where.mijoz_id = klient_id;
       const mavjud = await AuditModel.findOne({
         where, order: [['id', 'DESC']],
       });
+      if (auditId && !mavjud) throw new HttpException(404, 'Audit topilmadi');
 
-      // Bir kunlik yozuv bo'lsa rasmlarni unga qo'shamiz, aks holda yangi yozuv
-      const birKunlikmi = mavjud && mavjud.sana
-        && new Date(mavjud.sana).toDateString() === sana.toDateString();
+      // Bir kunlik yozuv bo'lsa (yoki audit_id aniq berilgan bo'lsa) rasmlarni unga qo'shamiz, aks holda yangi yozuv
+      const birKunlikmi = mavjud && (auditId || (mavjud.sana
+        && new Date(mavjud.sana).toDateString() === sana.toDateString()));
       if (birKunlikmi) {
         await mavjud.update({ rasmlar: [...(mavjud.rasmlar || []), ...yollar] });
       } else {
-        const mijoz = klient_id ? await MijozModel.findByPk(klient_id) : null;
+        const mijoz = await MijozModel.findByPk(klient_id);
+        if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
         await AuditModel.create({
-          agent_id: agent.id || null,
+          agent_id: agent.id,
           agent_nomi: agent.fullname || agent.ism || null,
-          mijoz_id: klient_id || null,
-          mijoz_nomi: mijoz ? mijoz.nomi : null,
+          mijoz_id: mijoz.id,
+          mijoz_nomi: mijoz.nomi,
           sabab: reason_id || null,
           shikoyat: comment || null,
           rasmlar: yollar,

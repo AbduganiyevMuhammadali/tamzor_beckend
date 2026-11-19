@@ -88,6 +88,12 @@ class UserController extends BaseController {
             perms
         } = req.body;
 
+        const joriy = req.currentUser;
+        const adminmi = joriy && joriy.role === 'Admin';
+        if (!adminmi && String(req.params.id) !== String(joriy && joriy.id)) {
+            throw new HttpException(403, req.mf('Unauthorized'));
+        }
+
         const model = await UserModel.findOne({ where: { id: req.params.id }} );
 
         if (!model) {
@@ -97,8 +103,13 @@ class UserController extends BaseController {
         model.username = username;
         model.fullname = fullname;
         if (password) model.password = password;
-        model.role = role;
-        model.perms = perms !== undefined ? perms : model.perms;
+        if (adminmi) {
+            // Rol va ruxsatlarni faqat Admin o'zgartiradi
+            model.role = role;
+            model.perms = perms !== undefined ? perms : model.perms;
+        } else if ((role && role !== model.role) || perms !== undefined) {
+            throw new HttpException(403, req.mf('Unauthorized'));
+        }
         await model.save();
 
         res.send(model);

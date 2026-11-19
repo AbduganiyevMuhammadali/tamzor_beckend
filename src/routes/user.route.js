@@ -12,8 +12,10 @@ router.get('/', auth(), awaitHandlerFactory(userController.getAll));
 router.get('/id/:id', auth(), awaitHandlerFactory(userController.getById));
 router.get('/username/:username', auth(), awaitHandlerFactory(userController.getByUsername));
 router.get('/whoami', auth(), awaitHandlerFactory(userController.getCurrentUser));
-router.post('/', joiMiddleware(userSchemas.create), awaitHandlerFactory(userController.create));
-router.patch('/id/:id', auth(Role.Admin), joiMiddleware(userSchemas.update), awaitHandlerFactory(userController.update));
+// Yangi foydalanuvchini faqat Admin yaratadi (avval auth yo'q edi — istalgan kishi Admin yarata olardi)
+router.post('/', auth(Role.Admin), joiMiddleware(userSchemas.create), awaitHandlerFactory(userController.create));
+// Admin — istalgan foydalanuvchini; boshqalar — faqat o'zini (rol/perms'siz), controllerda tekshiriladi
+router.patch('/id/:id', auth(), joiMiddleware(userSchemas.update), awaitHandlerFactory(userController.update));
 router.delete('/id/:id', auth(Role.Admin), awaitHandlerFactory(userController.delete));
 
 router.post('/login', joiMiddleware(userSchemas.login), awaitHandlerFactory(userController.userLogin));

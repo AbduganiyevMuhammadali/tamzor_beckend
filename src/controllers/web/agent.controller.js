@@ -11,8 +11,19 @@ const bcrypt = require('bcryptjs');
 const DATE_FIELDS   = ['tugilgan_sana', 'ish_boshlagan'];
 const NUMBER_FIELDS = ['plan_summa', 'bonus_foiz', 'kredit_limit', 'max_chegirma', 'radius_km', 'territoriya_id'];
 
+/* Web formadan o'zgartiriladigan maydonlar (agentValidator bilan bir xil).
+   token, dual_role, linked_dostavchi_id, deletedAt, id — so'rovdan yozilmaydi:
+   dual_role/dostavchi bog'lanishi web formada yo'q (update sxemasi ularni rad etadi). */
+const TAHRIR_MAYDONLAR = [
+  'fullname', 'telefon', 'passport', 'tugilgan_sana', 'territoriya_id', 'plan_summa', 'bonus_foiz',
+  'kredit_limit', 'max_chegirma', 'ish_boshlagan', 'tashrif_kunlari', 'boshlanish_manzil', 'transport',
+  'mashina_raqam', 'radius_km', 'izoh', 'faol', 'avtolavka', 'login', 'parol',
+];
+
 function sanitize(body) {
-  const out = { ...body };
+  // Faqat ruxsat etilgan maydonlar olinadi (mass assignment yo'q)
+  const out = {};
+  for (const k of TAHRIR_MAYDONLAR) if (body && Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
   // Bo'sh string → null (DATE, TEXT, STRING fieldlar uchun)
   Object.keys(out).forEach(k => {
     if (out[k] === '' || out[k] === undefined) out[k] = null;

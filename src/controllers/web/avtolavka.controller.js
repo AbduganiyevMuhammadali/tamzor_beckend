@@ -29,8 +29,10 @@ const { narxXaritasi } = require('../../utils/narx.utils');
 const { kreditTekshir } = require('../../utils/kreditLimit.utils');
 const { createAriza } = require('../mobile/savdo.controller');
 const { yetkazilganSotuvniBekorQil, adminTekshir } = require('../../utils/sotuvBekor.utils');
+const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
+const { tzOffset } = require('../../utils/tahlil.utils');
 const {
-  BRAK_OMBOR, INCLUDE, EPS, bugun, sanaMi, n,
+  BRAK_OMBOR, INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
   raqamYarat, avtolavkaAgent, narxMap, omborQoldiq, yuklashQoldigi, regYozuv, qatorlarniTayyorla,
   yuklashniTasdiqla, kunHisobla, kunniQaytaOch, kunVoqealari, tavsiyaHisobla,
 } = require('../../utils/avtolavka.utils');
@@ -142,12 +144,14 @@ class AvtolavkaController {
 
   // PATCH /avtolavka/yuklash/:id — faqat qoralama
   yuklashUpdate = async (req, res) => {
-    const hujjat = await AvtolavkaHujjatModel.findByPk(req.params.id);
-    if (!hujjat || hujjat.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
-    if (hujjat.holat !== 'qoralama') throw new HttpException(400, 'Tasdiqlangan hujjatni o\'zgartirib bo\'lmaydi');
     const { sana, izoh, qatorlar } = req.body;
     const t = await sequelize.transaction();
+    let hujjat;
     try {
+      // Qulflab qayta o'qiladi — parallel tasdiqlash qatorlarni o'qib bo'lgach ular almashtirilmasin
+      hujjat = await qulflabOl(AvtolavkaHujjatModel, req.params.id, t);
+      if (!hujjat || hujjat.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
+      if (hujjat.holat !== 'qoralama') throw new HttpException(400, 'Tasdiqlangan hujjatni o\'zgartirib bo\'lmaydi');
       const yangi = {};
       if (sanaMi(sana)) yangi.sana = sana;
       if (izoh !== undefined) yangi.izoh = izoh || null;
@@ -169,11 +173,12 @@ class AvtolavkaController {
 
   // PATCH /avtolavka/yuklash/:id/tasdiqla — tovar agent omboriga o'tadi
   yuklashTasdiqla = async (req, res) => {
-    const hujjat = await AvtolavkaHujjatModel.findByPk(req.params.id);
-    if (!hujjat || hujjat.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
+    const id = req.params.id;
     const t = await sequelize.transaction();
+    let hujjat;
     try {
-      await yuklashniTasdiqla(hujjat, req.currentUser?.id, t);
+      // Hujjat yuklashniTasdiqla ichida qulflab qayta o'qiladi va holati shu yerda tekshiriladi
+      hujjat = await yuklashniTasdiqla(id, req.currentUser?.id, t);
       await t.commit();
     } catch (e) {
       await t.rollback();
@@ -184,21 +189,29 @@ class AvtolavkaController {
 
   // PATCH /avtolavka/yuklash/:id/rad  { sabab } — agentning mobil so'rovini rad etish
   yuklashRad = async (req, res) => {
-    const hujjat = await AvtolavkaHujjatModel.findByPk(req.params.id);
-    if (!hujjat || hujjat.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
-    if (hujjat.holat !== 'qoralama') throw new HttpException(400, `Hujjat "${hujjat.holat}" holatida — rad etib bo'lmaydi`);
     const sabab = String(req.body?.sabab || '').trim().slice(0, 255);
-    await hujjat.update({ holat: 'bekor', rad_sababi: sabab || 'Omborchi rad etdi' });
+    // Qulf + qayta tekshiruv: parallel tasdiqlangan hujjat (tovar ko'chgan) "bekor" bo'lib qolmasin
+    const hujjat = await sequelize.transaction(async (t) => {
+      const h = await qulflabOl(AvtolavkaHujjatModel, req.params.id, t);
+      if (!h || h.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
+      if (h.holat !== 'qoralama') throw new HttpException(400, `Hujjat "${h.holat}" holatida — rad etib bo'lmaydi`);
+      await h.update({ holat: 'bekor', rad_sababi: sabab || 'Omborchi rad etdi' }, { transaction: t });
+      return h;
+    });
     res.send(await AvtolavkaHujjatModel.findByPk(hujjat.id, { include: INCLUDE }));
   };
 
   // DELETE /avtolavka/yuklash/:id — faqat qoralama
   yuklashDelete = async (req, res) => {
-    const hujjat = await AvtolavkaHujjatModel.findByPk(req.params.id);
-    if (!hujjat || hujjat.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
-    if (hujjat.holat !== 'qoralama') throw new HttpException(400, 'Tasdiqlangan hujjatni o\'chirib bo\'lmaydi');
-    await AvtolavkaQatorModel.destroy({ where: { hujjat_id: hujjat.id } });
-    await hujjat.destroy();
+    // Bitta tranzaksiyada, qulf bilan: tasdiqlangan (tovari ko'chgan) hujjat o'chib ketmasin,
+    // qatorlar o'chib hujjat qolib ketmasin
+    await sequelize.transaction(async (t) => {
+      const hujjat = await qulflabOl(AvtolavkaHujjatModel, req.params.id, t);
+      if (!hujjat || hujjat.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
+      if (hujjat.holat !== 'qoralama') throw new HttpException(400, 'Tasdiqlangan hujjatni o\'chirib bo\'lmaydi');
+      await AvtolavkaQatorModel.destroy({ where: { hujjat_id: hujjat.id }, transaction: t });
+      await hujjat.destroy({ transaction: t });
+    });
     res.send({ ok: true });
   };
 
@@ -248,7 +261,14 @@ class AvtolavkaController {
     const t = await sequelize.transaction();
     let hujjat, boshMashina = false;   // javobda ham kerak — try'dan tashqarida e'lon qilinadi
     try {
-      const kutilgan = await omborQoldiq(ombor, t);
+      // Agent qatori qulflanadi — shu agentning qabullari (ikki marta bosish, ikki omborchi)
+      // navbatma-navbat: ikkinchisi birinchisi commit bo'lgach yangilangan (bo'sh) mashinani ko'radi.
+      await qulflabOl(AgentModel, agent.id, t);
+      // Kutilgan qoldiq qulfdan KEYIN hisoblanadi: tovar qatorlari qulflanadi (parallel sotuv
+      // shu tovarlar bo'yicha kutadi), so'ng qoldiq qulflovchi o'qish bilan qayta olinadi.
+      const nomzod = await omborQoldiq(ombor, t);
+      await tovarlarniQulfla(Object.keys(nomzod), t);
+      const kutilgan = await omborQoldiq(ombor, t, { qulfla: true });
       const ids = Object.keys(kutilgan).filter(id => kutilgan[id].qoldiq > EPS).map(Number);
       // Mashina bo'sh (hammasi sotilgan) bo'lsa ham qabul hujjati yoziladi — qatorsiz, 0 kg:
       // kun yopilishi uchun "tovar topshirildi" belgisi aynan shu hujjatdan olinadi (kunHisobla).
@@ -368,8 +388,8 @@ class AvtolavkaController {
         kunHisobla(a, sana),
         kunVoqealari(a, sana),
         sequelize.query(`SELECT sana, battery FROM agent_location WHERE agent_id = :id AND rol = 'agent'
-                         AND DATE(sana) = :sana ORDER BY sana DESC LIMIT 1`,
-          { replacements: { id: a.id, sana }, type: sequelize.QueryTypes.SELECT }),
+                         AND ${lokalKun('sana')} = :sana ORDER BY sana DESC LIMIT 1`,
+          { replacements: { id: a.id, sana, tz: tzOffset() }, type: sequelize.QueryTypes.SELECT }),
       ]);
       const sigim = kun.tovar.kun_boshi.dona + kun.tovar.berildi.dona + kun.tovar.qaytarildi.dona;
       return {
@@ -412,18 +432,19 @@ class AvtolavkaController {
     for (let d = Date.parse(to); d >= Date.parse(from); d -= 864e5) kunlar.push(new Date(d).toISOString().slice(0, 10));
     if (!ids.length) return res.send({ kunlar, agentlar: [] });
 
-    const q = (sql) => sequelize.query(sql, { replacements: { ids, from, to }, type: sequelize.QueryTypes.SELECT });
+    const q = (sql) => sequelize.query(sql, { replacements: { ids, from, to, tz: tzOffset() }, type: sequelize.QueryTypes.SELECT });
     const [hujjat, sotuv, naqd, inkas] = await Promise.all([
       q(`SELECT agent_id, DATE_FORMAT(sana, '%Y-%m-%d') sana, tur, SUM(jami_summa) summa, SUM(farq_dona) farq
          FROM avtolavka_hujjat WHERE agent_id IN (:ids) AND holat = 'tasdiqlangan' AND sana BETWEEN :from AND :to
          GROUP BY agent_id, DATE_FORMAT(sana, '%Y-%m-%d'), tur`),
-      q(`SELECT agent_id, DATE_FORMAT(yetkazilgan_sana, '%Y-%m-%d') sana, SUM(jami_summa) summa
+      // DATETIME ustunlar UTC — kunga mahalliy vaqtda ajratiladi (kunHisobla bilan bir xil)
+      q(`SELECT agent_id, DATE_FORMAT(${lokalKun('yetkazilgan_sana')}, '%Y-%m-%d') sana, SUM(jami_summa) summa
          FROM ariza WHERE agent_id IN (:ids) AND deletedAt IS NULL AND turi = 'sotish' AND holat = 'yetkazildi'
-           AND kanal = 'avtolavka' AND DATE(yetkazilgan_sana) BETWEEN :from AND :to
-         GROUP BY agent_id, DATE_FORMAT(yetkazilgan_sana, '%Y-%m-%d')`),
-      q(`SELECT user_id agent_id, DATE_FORMAT(sana, '%Y-%m-%d') sana, SUM(summa) summa FROM kassa
+           AND kanal = 'avtolavka' AND ${lokalKun('yetkazilgan_sana')} BETWEEN :from AND :to
+         GROUP BY agent_id, DATE_FORMAT(${lokalKun('yetkazilgan_sana')}, '%Y-%m-%d')`),
+      q(`SELECT user_id agent_id, DATE_FORMAT(${lokalKun('sana')}, '%Y-%m-%d') sana, SUM(summa) summa FROM kassa
          WHERE tur = 'kirim' AND tolov_usul = 'naqt' AND manba_tur IN ('mijoz','avtolavka') AND user_id IN (:ids)
-           AND DATE(sana) BETWEEN :from AND :to GROUP BY user_id, DATE_FORMAT(sana, '%Y-%m-%d')`),
+           AND ${lokalKun('sana')} BETWEEN :from AND :to GROUP BY user_id, DATE_FORMAT(${lokalKun('sana')}, '%Y-%m-%d')`),
       q(`SELECT agent_id, DATE_FORMAT(sana, '%Y-%m-%d') sana, topshirilgan_summa FROM inkassatsiya
          WHERE agent_id IN (:ids) AND sana BETWEEN :from AND :to`),
     ]);
@@ -549,12 +570,17 @@ class AvtolavkaController {
   // tovar mashina/sklad omboriga, naqd kassadan, qarz mijoz balansidan, bonus agent registridan.
   sotuvBekor = async (req, res) => {
     adminTekshir(req.currentUser);
-    const ariza = await ArizaModel.findByPk(req.params.id);
-    if (!ariza) throw new HttpException(404, 'Chek topilmadi');
-    if (!['avtolavka', 'sklad'].includes(ariza.kanal)) {
-      throw new HttpException(400, 'Bu Won Sell cheki emas — distributsiya buyurtmasi Buyurtmalar sahifasida bekor qilinadi');
-    }
-    const r = await yetkazilganSotuvniBekorQil(ariza, { sabab: req.body.sabab, user: req.currentUser });
+    // Chek tranzaksiya ichida qulflab o'qiladi va shu tranzaksiya bekor qilishga uzatiladi —
+    // ikki parallel bekor qilish tovar/naqd/qarzni ikki marta qaytarmaydi (holat qulf ostida tekshiriladi)
+    const { ariza, r } = await sequelize.transaction(async (t) => {
+      const a = await qulflabOl(ArizaModel, req.params.id, t);
+      if (!a) throw new HttpException(404, 'Chek topilmadi');
+      if (!['avtolavka', 'sklad'].includes(a.kanal)) {
+        throw new HttpException(400, 'Bu Won Sell cheki emas — distributsiya buyurtmasi Buyurtmalar sahifasida bekor qilinadi');
+      }
+      const natija = await yetkazilganSotuvniBekorQil(a, { sabab: req.body.sabab, user: req.currentUser, transaction: t });
+      return { ariza: (natija && natija.ariza) || a, r: natija };
+    });
     res.send({
       ok: true, id: ariza.id, raqam: ariza.raqam, holat: 'bekor', bekor_sababi: ariza.bekor_sababi,
       tovar: r.tovar, naqd: r.naqd, qarz: r.qarz, bonus: r.bonus, mijoz_balans: r.mijoz_balans, ogohlantirishlar: r.ogohlantirishlar,

@@ -1,6 +1,20 @@
 const winston = require('winston');
+const { node_env } = require('../startup/config');
+
 function errorMiddleware(error, req, res, next) {
     let { status = 500, message, data } = error;
+
+    // Joi validatsiya xatosi — mijoz xatosi (400), server xatosi emas
+    if (error && error.isJoi) {
+        status = 400;
+        data = {
+            errors: (error.details || []).map(d => ({
+                msg: d.message, param: (d.path || []).join('.'), location: 'body',
+            })),
+        };
+    }
+    // express.json() buzuq JSON — 400
+    if (error && error.type === 'entity.parse.failed') status = 400;
 
     console.log(`[Error] ${error}`);
     winston.error(error.message, error);
@@ -17,11 +31,14 @@ function errorMiddleware(error, req, res, next) {
     if (isMobilePath) {
         let msg;
         try { msg = req.mf(error.message); } catch (e) { msg = error.message; }
+        if (status === 500 && node_env === 'production') msg = req.mf('Something went wrong');
         const error_code = (status === 401) ? 405 : status;
         return res.status(200).send({ error: true, message: msg || '', error_code, data: null });
     }
     // If status code is 500 - change the message to Intrnal server error
-    if(message === 'excel_file'){
+    if(error && error.isJoi){
+        message = (error.details || []).map(d => d.message).join(', ') || message;
+    }else if(message === 'excel_file'){
         message = req.mf('Only excel files are allowed');
     }else if(error.name === 'SequelizeUniqueConstraintError'){
         status = 400;
@@ -51,7 +68,12 @@ function errorMiddleware(error, req, res, next) {
     // else
     //     message = status === 500 || !message ? 'Internal server error' : message;
     if(status === 500){
-        message = req.originalUrl + ' ' + /*JSON.stringify(req.body)*/ + ' ' + message; 
+        // Ishlab chiqarishda ichki (SQL va h.k.) xato matni mijozga chiqarilmaydi — faqat logda
+        if (node_env === 'production') {
+            try { message = req.mf('Something went wrong'); } catch (e) { message = 'Something went wrong'; }
+        } else {
+            message = req.originalUrl + ' ' + message;
+        }
     }
 
     error = {

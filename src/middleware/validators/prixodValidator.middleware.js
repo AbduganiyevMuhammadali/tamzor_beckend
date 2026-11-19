@@ -22,6 +22,7 @@ const qatorSchema = Joi.object({
   bloklarda:             Joi.number().min(0).default(0),
   donada:                Joi.number().min(0).default(0),
   hajm:                  Joi.number().min(0).allow(null).optional(),
+  // summa server tomonda narx × donada qilib qayta hisoblanadi (prixod.controller) — klientniki ishlatilmaydi
   summa:                 Joi.number().min(0).default(0),
 })
   .or('narx', 'narx_usd')

@@ -27,8 +27,10 @@ const AgentModel = require('../../models/agent.model');
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
 const { InkassatsiyaModel } = require('../../models/inkassatsiya.model');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
+const { qulflabOl } = require('../../utils/qulf.utils');
+const { tzOffset, kunKey } = require('../../utils/tahlil.utils');
 const {
-  INCLUDE, EPS, bugun, sanaMi, n,
+  INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
   raqamYarat, narxMap, omborQoldiq, yuklashQoldigi, qatorlarniTayyorla, kunHisobla, kunniQaytaOch, tavsiyaHisobla,
 } = require('../../utils/avtolavka.utils');
 
@@ -349,6 +351,15 @@ class MobileAvtolavkaController {
     const izoh = String(req.body.izoh ?? req.body.komment ?? '').trim() || null;
 
     const hujjat = await sequelize.transaction(async (t) => {
+      // Agent qatori qulflanadi: bir vaqtda kelgan ikki so'rov (oflayn qayta urinish) ikkita
+      // qoralama yaratmaydi — ikkinchisi birinchisining qoralamasini topib, qatorlarini almashtiradi.
+      await qulflabOl(AgentModel, agent.id, t);
+      // Kun qulf ostida qayta tekshiriladi — parallel kunniYopish bilan poyga bo'lmasin
+      const kunYozuv = await AvtolavkaKunModel.findOne({ where: { agent_id: agent.id, sana }, transaction: t });
+      if (kunYozuv && kunYozuv.yopish_vaqt
+          && (!kunYozuv.ochish_vaqt || new Date(kunYozuv.yopish_vaqt) >= new Date(kunYozuv.ochish_vaqt))) {
+        return null;
+      }
       let h = await AvtolavkaHujjatModel.findOne({
         where: { agent_id: agent.id, sana, tur: 'yuklash', manba: 'mobil', holat: 'qoralama' },
         order: [['id', 'DESC']], transaction: t, lock: t.LOCK.UPDATE,
@@ -366,6 +377,7 @@ class MobileAvtolavkaController {
       await AvtolavkaQatorModel.bulkCreate(tayyor.map(q => ({ ...q, hujjat_id: h.id })), { transaction: t });
       return h;
     });
+    if (!hujjat) return fail(res, "Siz kunni yopgansiz. Yana yuklash kerak bo'lsa, avval kunni qayta oching");
 
     ok(res, {
       androidId: req.body.androidId ?? 0,
@@ -405,12 +417,20 @@ class MobileAvtolavkaController {
   // POST yuklashBekor/ { docId } — agent o'z so'rovini qaytarib oladi (faqat tasdiqlanmagan)
   yuklashBekor = async (req, res) => {
     const agent = avtoAgent(req, res); if (!agent) return;
-    const h = await AvtolavkaHujjatModel.findOne({
-      where: { id: req.body.docId, agent_id: agent.id, tur: 'yuklash', manba: 'mobil' }, include: INCLUDE,
+    // Qulf + qayta tekshiruv: omborchi shu paytda tasdiqlayotgan bo'lsa (tovar mashinaga o'tgan)
+    // hujjat "bekor" bo'lib qolmasin — ikkinchisi tasdiqlash commit bo'lishini kutadi.
+    const natija = await sequelize.transaction(async (t) => {
+      const h = await AvtolavkaHujjatModel.findOne({
+        where: { id: req.body.docId, agent_id: agent.id, tur: 'yuklash', manba: 'mobil' },
+        transaction: t, lock: t.LOCK.UPDATE,
+      });
+      if (!h) return { xato: "So'rov topilmadi", kod: 404 };
+      if (h.holat !== 'qoralama') return { xato: "Tasdiqlangan yuklashni bekor qilib bo'lmaydi" };
+      await h.update({ holat: 'bekor', rad_sababi: AGENT_BEKOR }, { transaction: t });
+      return { id: h.id };
     });
-    if (!h) return fail(res, "So'rov topilmadi", 404);
-    if (h.holat !== 'qoralama') return fail(res, "Tasdiqlangan yuklashni bekor qilib bo'lmaydi");
-    await h.update({ holat: 'bekor', rad_sababi: AGENT_BEKOR });
+    if (natija.xato) return fail(res, natija.xato, natija.kod);
+    const h = await AvtolavkaHujjatModel.findByPk(natija.id, { include: INCLUDE });
     ok(res, hujjatShakli(h), "So'rov bekor qilindi");
   };
 
@@ -456,7 +476,7 @@ class MobileAvtolavkaController {
   kunniYopish = async (req, res) => {
     const agent = avtoAgent(req, res); if (!agent) return;
     // Oflayn ilova kunni yopgan sanani yuboradi (keyin internet bo'lganda keladi) — 3 kundan eski bo'lmasin
-    const kecha3 = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const kecha3 = kunKey(new Date(Date.now() - 3 * 24 * 3600 * 1000));   // mahalliy sana (bugun() bilan bir xil)
     const sana = sanaMi(req.body.sana) && req.body.sana >= kecha3 && req.body.sana <= bugun() ? req.body.sana : bugun();
     // Qayta ochish: xato bosilgan yopish yoki to'liq yopilgan kunda yangi reys (kunniQaytaOch)
     if (req.body.bekor === true || req.body.bekor === 'true') {
@@ -465,17 +485,19 @@ class MobileAvtolavkaController {
         r.yangiReys ? "Kun qayta ochildi — yangi reys: yuklash so'rang" : 'Kun qayta ochildi');
     }
 
-    const kun = await kunHisobla(agent, sana);
-    if (kun.bosqich === 3) return fail(res, 'Bugungi kun allaqachon yopilgan');
-
-    if (kun.tovar.berildi.dona <= EPS && kun.tovar.sotildi.dona <= EPS && kun.tovar.kun_boshi.dona <= EPS) {
-      return fail(res, "Bugun yuklash ham, savdo ham bo'lmagan — yopadigan narsa yo'q");
-    }
     const naqdRaw = req.body.naqdSumma ?? req.body.naqd;
     const naqdElon = naqdRaw === undefined || naqdRaw === null || naqdRaw === '' ? null : Math.max(0, n(naqdRaw));
     const izoh = String(req.body.izoh ?? req.body.komment ?? '').trim() || null;
 
-    await sequelize.transaction(async (t) => {
+    // Agent qatori qulflanib, kun holati shu tranzaksiya ichida qayta hisoblanadi —
+    // parallel qabul/qayta ochish/yuklash so'rovi bilan poyga bo'lmasin
+    const natija = await sequelize.transaction(async (t) => {
+      await qulflabOl(AgentModel, agent.id, t);
+      const kun = await kunHisobla(agent, sana, { transaction: t });
+      if (kun.bosqich === 3) return { xato: 'Bugungi kun allaqachon yopilgan' };
+      if (kun.tovar.berildi.dona <= EPS && kun.tovar.sotildi.dona <= EPS && kun.tovar.kun_boshi.dona <= EPS) {
+        return { xato: "Bugun yuklash ham, savdo ham bo'lmagan — yopadigan narsa yo'q" };
+      }
       const [yozuv] = await AvtolavkaKunModel.findOrCreate({
         where: { agent_id: agent.id, sana }, defaults: { agent_id: agent.id, sana }, transaction: t,
       });
@@ -484,7 +506,10 @@ class MobileAvtolavkaController {
       await AvtolavkaHujjatModel.update({ holat: 'bekor', rad_sababi: KUN_YOPILDI }, {
         where: { agent_id: agent.id, sana, tur: 'yuklash', manba: 'mobil', holat: 'qoralama' }, transaction: t,
       });
+      return { kun };
     });
+    if (natija.xato) return fail(res, natija.xato);
+    const { kun } = natija;
 
     const kutilgan = Math.max(0, +(kun.pul.naqd_olindi - kun.pul.topshirildi).toFixed(2));
     ok(res, {
@@ -598,7 +623,7 @@ class MobileAvtolavkaController {
         include: [{ model: ArizaQatorModel, as: 'qatorlar' }], order: [['createdAt', 'DESC']],
       }),
       sequelize.query(`SELECT COALESCE(SUM(summa), 0) undirildi, COUNT(*) soni FROM kassa
-        WHERE tur = 'kirim' AND manba_tur = 'mijoz' AND user_id = :id AND DATE(sana) = :sana`, { replacements: { id: agent.id, sana } }),
+        WHERE tur = 'kirim' AND manba_tur = 'mijoz' AND user_id = :id AND ${lokalKun('sana')} = :sana`, { replacements: { id: agent.id, sana, tz: tzOffset() } }),
       InkassatsiyaModel.findOne({ where: { agent_id: agent.id, sana }, raw: true }),
     ]);
     const bor = new Set(mijozRows.map(m => m.id));

@@ -6,9 +6,10 @@ const AgentModel = require('../../models/agent.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { TripSheetModel, YetkazishQaytarishModel } = require('../../models/tripSheet.model');
 const HttpException = require('../../utils/HttpException.utils');
-const { ok } = require('./shared');
+const { ok, dostavchiIdOl } = require('./shared');
 const { shapeDoc } = require('./docShape');
 const { arizaYetkazildiEffektlari } = require('../../utils/arizaYetkazildi.utils');
+const { qulflabOl } = require('../../utils/qulf.utils');
 
 const BRAK_OMBOR = 'Brak ombori';
 
@@ -38,10 +39,18 @@ function deliveryWhere(req, extra = {}) {
 // bo'lsa o'z ID'si, dual_role agent bo'lsa unga bog'langan dostavchi qatori,
 // oddiy agent bo'lsa null (hech narsani filtrlamaydi — "hammasini ko'radi").
 function currentDostavchiId(req) {
-  if (req.currentRole === 'dostavchi') return req.currentAgent.id;
-  if (req.currentRole === 'agent' && req.currentAgent.linked_dostavchi_id) return req.currentAgent.linked_dostavchi_id;
-  return null;
+  return dostavchiIdOl(req);
 }
+
+// Holat o'zgartiruvchi delivery amallari uchun: dostavchik (yoki dual_role agent) bo'lishi shart
+function talabDostavchi(req) {
+  const id = currentDostavchiId(req);
+  if (!id) throw new HttpException(403, 'Bu amal faqat dostavchik uchun');
+  return id;
+}
+
+const n = (v) => parseFloat(v) || 0;
+const r3 = (v) => Math.round(v * 1000) / 1000;
 
 /* ── Delivery (hujjat 9.x) ────────────────────────────────────────────────── */
 class MobileDeliveryController {
@@ -78,18 +87,28 @@ class MobileDeliveryController {
   // agent statistikasi va oylik plandan tushib qolib qoladi.
   orderDelivery = async (req, res, next) => {
     const { docId, date1, date2 } = req.body;
-    const ariza = await ArizaModel.findByPk(docId);
-    if (!ariza) throw new HttpException(404, req.mf('Not found'));
+    const dId = talabDostavchi(req);
+    let vaqt = date2 ? new Date(date2) : new Date();
+    if (isNaN(vaqt.getTime())) vaqt = new Date();
 
-    if (ariza.holat !== 'yetkazildi') {
-      await sequelize.transaction(async (t) => {
-        await ariza.update(
-          { holat: 'yetkazildi', yetkazilgan_sana: date2 ? new Date(date2) : new Date() },
-          { transaction: t },
-        );
-        await arizaYetkazildiEffektlari(ariza, { transaction: t, userId: null });
-      });
-    }
+    // Qulf + qayta tekshiruv tranzaksiya ichida: oflayn qayta yuborish yoki ikki marta
+    // bosish effektlarni (kassa/qarz/bonus) ikkinchi marta qo'llamaydi.
+    await sequelize.transaction(async (t) => {
+      const ariza = await qulflabOl(ArizaModel, docId, t);
+      if (!ariza) throw new HttpException(404, req.mf('Not found'));
+      if (!ariza.dostavchi_id || Number(ariza.dostavchi_id) !== dId) {
+        throw new HttpException(403, 'Bu buyurtma sizga tayinlanmagan');
+      }
+      if (ariza.holat === 'yetkazildi') return;   // takror — allaqachon yetkazilgan
+      if (ariza.turi !== 'sotish' || ariza.holat !== 'yolda') {
+        throw new HttpException(400, `Buyurtma "${ariza.holat}" holatida — yetkazib bo'lmaydi`);
+      }
+      await ariza.update(
+        { holat: 'yetkazildi', yetkazilgan_sana: vaqt, yetkazgan_dostavchi_id: dId },
+        { transaction: t },
+      );
+      await arizaYetkazildiEffektlari(ariza, { transaction: t, userId: null });
+    });
 
     ok(res, { docId: String(docId), date1: date1 || '', date2: date2 || '' }, 'Yetkazildi');
   };
@@ -102,27 +121,66 @@ class MobileDeliveryController {
   // products: [{ tovarId, count, tur, sabab }]  (tur berilmasa 'qaytarma')
   returnDeliveryProducts = async (req, res, next) => {
     const { docId, data: sana, products = [] } = req.body;
-    const ariza = await ArizaModel.findByPk(docId, { include: [{ model: ArizaQatorModel, as: 'qatorlar' }] });
-    if (!ariza) throw new HttpException(404, req.mf('Not found'));
-
+    const dostavchiId = talabDostavchi(req);
     const list = Array.isArray(products) ? products : [];
-    const dostavchiId = currentDostavchiId(req);
+
+    // So'rovni avval tekshirib olamiz (tovar va miqdor) — noto'g'ri qator jim o'tkazib yuborilmaydi
+    const sorov = [];
+    for (const p of list) {
+      const dona = n(p && p.count);
+      if (!(dona > 0)) continue;
+      sorov.push({ tovarId: String(p.tovarId), dona: r3(dona), tur: p.tur === 'brak' ? 'brak' : 'qaytarma', sabab: p.sabab || null });
+    }
 
     await sequelize.transaction(async (t) => {
-      for (const p of list) {
-        const qator = (ariza.qatorlar || []).find(q => String(q.tovar_id) === String(p.tovarId));
-        const dona = parseFloat(p.count) || 0;
-        if (dona <= 0) continue;
-        const narx = qator ? parseFloat(qator.narx) || 0 : 0;
-        const summa = narx * dona;
-        const tur = p.tur === 'brak' ? 'brak' : 'qaytarma';
+      const ariza = await qulflabOl(ArizaModel, docId, t);
+      if (!ariza) throw new HttpException(404, req.mf('Not found'));
+      if (!ariza.dostavchi_id || Number(ariza.dostavchi_id) !== dostavchiId) {
+        throw new HttpException(403, 'Bu buyurtma sizga tayinlanmagan');
+      }
+      if (ariza.turi !== 'sotish' || !['yolda', 'yetkazildi'].includes(ariza.holat)) {
+        throw new HttpException(400, `Buyurtma "${ariza.holat}" holatida — qaytarib bo'lmaydi`);
+      }
+      if (!sorov.length) return;
+
+      const qatorlar = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, transaction: t });
+      const avvalgi = await YetkazishQaytarishModel.findAll({ where: { ariza_id: ariza.id }, transaction: t });
+
+      // Idempotentlik: oflayn navbat AYNAN shu so'rovni qayta yuborsa (har bir qator uchun
+      // shu dostavchikning bir xil tovar/tur/miqdor yozuvi bor) — ikkinchi marta yozilmaydi.
+      // (yetkazish_qaytarish jadvalida mobil_id ustuni yo'q — shuning uchun mazmun bo'yicha)
+      const ishlatilgan = new Set();
+      const takror = sorov.every(q => {
+        const y = avvalgi.find(a => !ishlatilgan.has(a.id) && String(a.tovar_id) === q.tovarId && a.tur === q.tur
+          && Number(a.dostavchi_id) === dostavchiId && Math.abs(n(a.dona) - q.dona) < 0.0005);
+        if (y) ishlatilgan.add(y.id);
+        return !!y;
+      });
+      if (takror) return;
+
+      const qaytgan = {};   // tovar_id → shu buyurtmadan allaqachon qaytarilgan miqdor
+      for (const a of avvalgi) qaytgan[String(a.tovar_id)] = (qaytgan[String(a.tovar_id)] || 0) + n(a.dona);
+
+      for (const p of sorov) {
+        const qator = qatorlar.find(q => String(q.tovar_id) === p.tovarId);
+        if (!qator) throw new HttpException(400, `Tovar #${p.tovarId} bu buyurtmada yo'q`);
+        const qoldi = r3(n(qator.jami_dona) - (qaytgan[p.tovarId] || 0));
+        if (p.dona > qoldi + 0.0005) {
+          throw new HttpException(400, `"${qator.tovar_nomi || `#${p.tovarId}`}" — qaytarish miqdori buyurtmadagidan ko'p. Mumkin: ${Math.max(0, qoldi)}, so'raldi: ${p.dona}`);
+        }
+        qaytgan[p.tovarId] = (qaytgan[p.tovarId] || 0) + p.dona;
+
+        const dona = p.dona;
+        const narx = n(qator.narx);
+        const summa = +(narx * dona).toFixed(2);
+        const tur = p.tur;
 
         await YetkazishQaytarishModel.create({
           ariza_id: ariza.id,
-          tovar_id: p.tovarId,
-          tovar_nomi: qator ? qator.tovar_nomi : '',
+          tovar_id: qator.tovar_id,
+          tovar_nomi: qator.tovar_nomi || '',
           dona, summa, tur,
-          sabab: p.sabab || null,
+          sabab: p.sabab,
           dostavchi_id: dostavchiId,
           sana: new Date(),
         }, { transaction: t });
@@ -130,9 +188,9 @@ class MobileDeliveryController {
         // Ombor effekti: qaytarma -> asosiy ombordagi qoldiqqa qaytadi (kirim),
         // brak -> alohida Brak ombori'ga kirim bo'ladi (sotuvga aralashmaydi)
         await TovarRegisterModel.create({
-          tovar_id: p.tovarId,
-          tovar_nomi: qator ? qator.tovar_nomi : '',
-          turkum: qator ? qator.turkum : null,
+          tovar_id: qator.tovar_id,
+          tovar_nomi: qator.tovar_nomi || '',
+          turkum: qator.turkum || null,
           ombor: tur === 'brak' ? BRAK_OMBOR : (ariza.ombor || 'Основной склад'),
           tur: 'qaytarma_kirim',
           manba_tur: 'qaytarma',
@@ -186,21 +244,26 @@ class MobileDeliveryController {
     });
   };
 
-  // POST startTrip/ — dostavchik marshrutni boshladi
+  // POST startTrip/ — dostavchik marshrutni boshladi (faqat o'z marshrut varag'i)
   startTrip = async (req, res, next) => {
     const { tripId } = req.body;
+    const dId = talabDostavchi(req);
     const trip = await TripSheetModel.findByPk(tripId);
     if (!trip) throw new HttpException(404, req.mf('Not found'));
-    await trip.update({ holat: 'yolda', boshlangan_vaqt: new Date() });
+    if (Number(trip.dostavchi_id) !== dId) throw new HttpException(403, 'Bu marshrut varag\'i sizga tegishli emas');
+    if (trip.holat === 'yakunlandi') throw new HttpException(400, 'Marshrut allaqachon yakunlangan');
+    if (trip.holat !== 'yolda') await trip.update({ holat: 'yolda', boshlangan_vaqt: new Date() });
     ok(res, { tripId: trip.id }, 'Marshrut boshlandi');
   };
 
-  // POST finishTrip/ — dostavchik marshrutni yakunladi
+  // POST finishTrip/ — dostavchik marshrutni yakunladi (faqat o'z marshrut varag'i)
   finishTrip = async (req, res, next) => {
     const { tripId } = req.body;
+    const dId = talabDostavchi(req);
     const trip = await TripSheetModel.findByPk(tripId);
     if (!trip) throw new HttpException(404, req.mf('Not found'));
-    await trip.update({ holat: 'yakunlandi', tugagan_vaqt: new Date() });
+    if (Number(trip.dostavchi_id) !== dId) throw new HttpException(403, 'Bu marshrut varag\'i sizga tegishli emas');
+    if (trip.holat !== 'yakunlandi') await trip.update({ holat: 'yakunlandi', tugagan_vaqt: new Date() });
     ok(res, { tripId: trip.id }, 'Marshrut yakunlandi');
   };
 }

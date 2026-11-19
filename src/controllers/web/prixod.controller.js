@@ -12,6 +12,9 @@ const { XOM_ASHYO_OMBOR } = require('../../utils/ombor.utils');
 const { adminMi } = require('../../utils/sotuvBekor.utils');
 const { ochirishParoliTekshir } = require('../../utils/xavfsizlik.utils');
 const { miq } = require('../../utils/tahlil.utils');
+const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
+
+const ROYXAT_MAX_LIMIT = 500;
 
 // Qatordagi $ narxlarni joriy kursga ko'paytirib so'm narxini avtomatik
 // hisoblaydi. Foydalanuvchi $ kiritsa — so'm shundan hosil bo'ladi; agar $
@@ -25,9 +28,15 @@ function qatorNarxHisobla(q, kurs) {
   const chakanaNarxUsd = Number(q.chakana_narx_usd) || 0;
   const optomNarx      = optomNarxUsd > 0   ? +(optomNarxUsd * kurs).toFixed(2)   : (Number(q.optom_narx)   || 0);
   const chakanaNarx    = chakanaNarxUsd > 0 ? +(chakanaNarxUsd * kurs).toFixed(2) : (Number(q.chakana_narx) || 0);
+  const narx           = narxUsd > 0 ? +(narxUsd * kurs).toFixed(2) : (Number(q.narx) || 0);
+  const donada         = Number(q.donada) || 0;
+  if (narx < 0 || donada < 0) throw new HttpException(400, `"${q.tovar_nomi || q.tovar_id}": narx va miqdor manfiy bo'lishi mumkin emas`);
   return {
     ...q,
-    narx:             narxUsd > 0 ? +(narxUsd * kurs).toFixed(2) : (Number(q.narx) || 0),
+    narx,
+    // Qator summasi serverda hisoblanadi (narx × jami miqdor) — klient yuborgan summa
+    // ishonilmaydi (yetkazuvchi qarzi va kassa shundan yoziladi). narxlar() bilan bir xil formula.
+    summa:            +(narx * donada).toFixed(2),
     narx_usd:         narxUsd,
     optom_narx:       optomNarx,
     optom_narx_usd:   optomNarxUsd,
@@ -38,6 +47,27 @@ function qatorNarxHisobla(q, kurs) {
     sotuv_narx_usd: chakanaNarxUsd,
     kurs: (narxUsd > 0 || optomNarxUsd > 0 || chakanaNarxUsd > 0) ? kurs : (q.kurs || null),
   };
+}
+
+/* Prixod kirimlari (tranzaksiya ichida qulflab) va ularni olib tashlash mumkinmi:
+   shu ombordagi qoldiq hujjat miqdoridan kam bo'lsa — tovar allaqachon sotilgan.
+   Avval kirim qatorlari, so'ng tovarlar qulflanadi (FOR UPDATE) — qoldiq yig'indisi
+   qulfdan KEYIN o'qiladi, parallel chiqim yozuvchilar kutadi. */
+async function prixodQoldiqTekshir(prixodId, t) {
+  const kirimlar = (await TovarRegisterModel.findAll({
+    where: { manba_tur: 'prixod', manba_id: prixodId }, transaction: t, lock: t.LOCK.UPDATE,
+  })).map(k => k.get({ plain: true }));
+  await tovarlarniQulfla(kirimlar.map(k => k.tovar_id), t);
+  const yetmaydi = [];
+  for (const k of kirimlar) {
+    const kerak = Number(k.donada) || 0;
+    if (kerak <= 0) continue;
+    const [r] = await sequelize.query(`SELECT COALESCE(SUM(donada), 0) s FROM tovar_register WHERE tovar_id = :t AND ombor = :o`,
+      { replacements: { t: k.tovar_id, o: k.ombor }, type: sequelize.QueryTypes.SELECT, transaction: t });
+    const qoldiq = Number(r.s) || 0;
+    if (qoldiq - kerak < -0.0005) yetmaydi.push(`${k.tovar_nomi}: omborda ${miq(qoldiq)} kg, hujjatda ${miq(kerak)} kg (${miq(kerak - qoldiq)} kg allaqachon sotilgan)`);
+  }
+  return { kirimlar, yetmaydi };
 }
 
 class PrixodController extends BaseController {
@@ -54,11 +84,13 @@ class PrixodController extends BaseController {
       if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
     }
 
-    const offset = (Number(page) - 1) * Number(limit);
+    const lim    = Math.min(Math.max(parseInt(limit, 10) || 50, 1), ROYXAT_MAX_LIMIT);
+    const sahifa = Math.max(parseInt(page, 10) || 1, 1);
+    const offset = (sahifa - 1) * lim;
     const { count, rows } = await PrixodModel.findAndCountAll({
       where,
       order: [['sana', 'DESC'], ['id', 'DESC']],
-      limit: Number(limit),
+      limit: lim,
       offset,
     });
 
@@ -92,7 +124,7 @@ class PrixodController extends BaseController {
       return row;
     });
 
-    res.send({ data, total: count, page: Number(page), pages: Math.ceil(count / Number(limit)) });
+    res.send({ data, total: count, page: sahifa, pages: Math.ceil(count / lim) });
   };
 
   getById = async (req, res) => {
@@ -141,7 +173,7 @@ class PrixodController extends BaseController {
       });
       res.status(201).send(result);
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
@@ -158,6 +190,9 @@ class PrixodController extends BaseController {
 
     const t = await sequelize.transaction();
     try {
+      // Tahrir paytida parallel tasdiqlash bo'lsa — tasdiqlangan hujjat qatorlari o'zgarmasin
+      const qulf = await qulflabOl(PrixodModel, prixod.id, t);
+      if (!qulf || qulf.holat === 'tasdiqlangan') throw new HttpException(400, 'Tasdiqlangan hujjatni tahrirlash mumkin emas');
       const jami = (qatorlar || []).reduce((s, q) => s + Number(q.summa || 0), 0);
 
       await prixod.update({
@@ -189,33 +224,33 @@ class PrixodController extends BaseController {
       });
       res.send(result);
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
 
   tasdiqla = async (req, res) => {
-    const prixod = await PrixodModel.findOne({
-      where: { id: req.params.id },
-      include: [{ model: PrixodQatorModel, as: 'qatorlar' }],
-    });
-    if (!prixod) throw new HttpException(404, req.mf('data not found'));
-    if (prixod.holat === 'tasdiqlangan') throw new HttpException(400, 'Allaqachon tasdiqlangan');
-    if (!prixod.qatorlar?.length) throw new HttpException(400, 'Qatorlar bo\'sh — tasdiqlash mumkin emas');
-
     const t = await sequelize.transaction();
     try {
+      // 0. Hujjat qulflanib qayta o'qiladi — ikki marta "tasdiqlash" bosilsa ombor kirimi,
+      //    yetkazuvchi qarzi va kassa chiqimi ikki marta yozilmasin
+      const prixod = await qulflabOl(PrixodModel, req.params.id, t);
+      if (!prixod) throw new HttpException(404, req.mf('data not found'));
+      if (prixod.holat === 'tasdiqlangan') throw new HttpException(400, 'Allaqachon tasdiqlangan');
+      const qatorlar = await PrixodQatorModel.findAll({ where: { prixod_id: prixod.id }, order: [['id', 'ASC']], transaction: t });
+      if (!qatorlar.length) throw new HttpException(400, 'Qatorlar bo\'sh — tasdiqlash mumkin emas');
+
       // 1. Holat o'zgartir
       await prixod.update({ holat: 'tasdiqlangan' }, { transaction: t });
 
       // 2. Har bir qator uchun tovar_register ga kirim yoz.
       //    Xom ashyo turidagi tovar savdo skladiga emas, "Xom ashyo ombori"ga tushadi.
       const xomIds = new Set((await TovarModel.findAll({
-        where: { id: prixod.qatorlar.map(q => q.tovar_id).filter(Boolean), turi: 'xom_ashyo' },
+        where: { id: qatorlar.map(q => q.tovar_id).filter(Boolean), turi: 'xom_ashyo' },
         attributes: ['id'], raw: true, transaction: t, paranoid: false,
       })).map(x => x.id));
       await TovarRegisterModel.bulkCreate(
-        prixod.qatorlar.map(q => ({
+        qatorlar.map(q => ({
           tovar_id:   q.tovar_id,
           tovar_nomi: q.tovar_nomi,
           turkum:     q.turkum     || null,
@@ -290,9 +325,9 @@ class PrixodController extends BaseController {
       }
 
       await t.commit();
-      res.send({ ...prixod.toJSON(), holat: 'tasdiqlangan' });
+      res.send({ ...prixod.toJSON(), qatorlar: qatorlar.map(q => q.toJSON()), holat: 'tasdiqlangan' });
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
@@ -404,18 +439,25 @@ class PrixodController extends BaseController {
       const result = await PrixodModel.findOne({ where: { id: prixod.id }, include: [{ model: PrixodQatorModel, as: 'qatorlar' }] });
       res.send({ ...result.toJSON(), _farq: farq, _miqdor: miqdorIzoh });
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
 
   bekorqilish = async (req, res) => {
-    const prixod = await PrixodModel.findOne({ where: { id: req.params.id } });
-    if (!prixod) throw new HttpException(404, req.mf('data not found'));
-    if (prixod.holat !== 'tasdiqlangan') throw new HttpException(400, 'Faqat tasdiqlangan hujjatni bekor qilish mumkin');
-
     const t = await sequelize.transaction();
     try {
+      // Qulflab qayta o'qish: ikki parallel bekor qilish yetkazuvchi balansini ikki marta qaytarmasin
+      const prixod = await qulflabOl(PrixodModel, req.params.id, t);
+      if (!prixod) throw new HttpException(404, req.mf('data not found'));
+      if (prixod.holat !== 'tasdiqlangan') throw new HttpException(400, 'Faqat tasdiqlangan hujjatni bekor qilish mumkin');
+
+      // 0. Hujjat tovari allaqachon sotilgan bo'lsa — kirimni olib tashlash qoldiqni minusga tushiradi
+      const { yetmaydi } = await prixodQoldiqTekshir(prixod.id, t);
+      if (yetmaydi.length) {
+        throw new HttpException(400, `Hujjat tovari allaqachon sotilgan, bekor qilib bo'lmaydi — ${yetmaydi.join('; ')}`);
+      }
+
       // 1. Register dan ushbu prixod yozuvlarini o'chir
       await TovarRegisterModel.destroy({
         where: { manba_tur: 'prixod', manba_id: prixod.id },
@@ -443,12 +485,19 @@ class PrixodController extends BaseController {
         });
       }
 
+      // 3. Tasdiqlashda yozilgan kassa chiqimi (yetkazuvchiga oldindan to'lov) ham bekor —
+      //    aks holda qayta tasdiqlanganda kassadan ikki marta chiqim bo'lardi
+      await KassaModel.destroy({
+        where: { manba_tur: 'prixod', manba_id: prixod.id, kategoriya: 'yetkazuvchi_tolov', tur: 'chiqim' },
+        transaction: t,
+      });
+
       await prixod.update({ holat: 'qoralama' }, { transaction: t });
 
       await t.commit();
       res.send({ ...prixod.toJSON(), holat: 'qoralama' });
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
   };
@@ -462,40 +511,40 @@ class PrixodController extends BaseController {
   // Tovar allaqachon sotilgan bo'lsa (shu ombordagi qoldiq hujjat miqdoridan kam) — rad
   // etiladi va qaysi tovardan qancha yetishmasligi aytiladi: qoldiq manfiyga tushmasin.
   delete = async (req, res) => {
-    const prixod = await PrixodModel.findOne({ where: { id: req.params.id } });
-    if (!prixod) throw new HttpException(404, req.mf('data not found'));
-    const hujjat = prixod.hujjat_raqam || `#${prixod.id}`;
+    const bor = await PrixodModel.findOne({ where: { id: req.params.id } });
+    if (!bor) throw new HttpException(404, req.mf('data not found'));
+    const hujjat = bor.hujjat_raqam || `#${bor.id}`;
 
-    if (prixod.holat !== 'tasdiqlangan') {
+    if (bor.holat !== 'tasdiqlangan') {
       const t = await sequelize.transaction();
       try {
+        // Qulflab qayta tekshiramiz: shu orada tasdiqlangan bo'lsa — qoralama sifatida o'chirilmaydi
+        const prixod = await qulflabOl(PrixodModel, bor.id, t);
+        if (!prixod) throw new HttpException(404, req.mf('data not found'));
+        if (prixod.holat === 'tasdiqlangan') throw new HttpException(409, 'Hujjat hozirgina tasdiqlandi — sahifani yangilab qayta urinib ko\'ring');
         await PrixodQatorModel.destroy({ where: { prixod_id: prixod.id }, transaction: t });
         await prixod.destroy({ force: true, transaction: t });
         await t.commit();
         return res.send({ message: `${hujjat} qoralama hujjati o'chirildi` });
-      } catch (e) { await t.rollback(); throw e; }
+      } catch (e) { if (!t.finished) await t.rollback(); throw e; }
     }
 
     const user = req.currentUser;
     if (!adminMi(user)) throw new HttpException(403, "Tasdiqlangan hujjatni faqat Admin o'chira oladi");
     await ochirishParoliTekshir(req.body?.parol);
 
-    const kirimlar = await TovarRegisterModel.findAll({ where: { manba_tur: 'prixod', manba_id: prixod.id }, raw: true });
-    const yetmaydi = [];
-    for (const k of kirimlar) {
-      const kerak = Number(k.donada) || 0;
-      if (kerak <= 0) continue;
-      const [r] = await sequelize.query(`SELECT COALESCE(SUM(donada), 0) s FROM tovar_register WHERE tovar_id = :t AND ombor = :o`,
-        { replacements: { t: k.tovar_id, o: k.ombor }, type: sequelize.QueryTypes.SELECT });
-      const qoldiq = Number(r.s) || 0;
-      if (qoldiq - kerak < -0.0005) yetmaydi.push(`${k.tovar_nomi}: omborda ${miq(qoldiq)} kg, hujjatda ${miq(kerak)} kg (${miq(kerak - qoldiq)} kg allaqachon sotilgan)`);
-    }
-    if (yetmaydi.length) {
-      throw new HttpException(400, `Hujjat tovari allaqachon sotilgan, o'chirib bo'lmaydi — ${yetmaydi.join('; ')}`);
-    }
-
     const t = await sequelize.transaction();
     try {
+      // Hujjat va tovarlar qulflanadi, "allaqachon sotilgan" tekshiruvi shu tranzaksiya ichida —
+      // tekshiruv va o'chirish orasida sotuv qoldiqni minusga tushirib qo'ymasin
+      const prixod = await qulflabOl(PrixodModel, bor.id, t);
+      if (!prixod) throw new HttpException(404, req.mf('data not found'));
+      if (prixod.holat !== 'tasdiqlangan') throw new HttpException(409, 'Hujjat holati o\'zgardi — sahifani yangilab qayta urinib ko\'ring');
+      const { kirimlar, yetmaydi } = await prixodQoldiqTekshir(prixod.id, t);
+      if (yetmaydi.length) {
+        throw new HttpException(400, `Hujjat tovari allaqachon sotilgan, o'chirib bo'lmaydi — ${yetmaydi.join('; ')}`);
+      }
+
       await TovarRegisterModel.destroy({ where: { manba_tur: 'prixod', manba_id: prixod.id }, transaction: t });
 
       let yetk = null, balansFarq = 0;
@@ -521,7 +570,7 @@ class PrixodController extends BaseController {
         yetkazuvchi: yetk ? { id: yetk.id, ism: yetk.ism, balans: Number(yetk.balans) || 0, farq: balansFarq } : null,
         kassa_ochirildi: kassaSoni,
       });
-    } catch (e) { await t.rollback(); throw e; }
+    } catch (e) { if (!t.finished) await t.rollback(); throw e; }
   };
 }
 

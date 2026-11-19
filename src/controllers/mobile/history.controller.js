@@ -1,7 +1,7 @@
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
 const { MijozModel } = require('../../models/mijoz.model');
 const AgentModel = require('../../models/agent.model');
-const { ok, requireRole } = require('./shared');
+const { ok, requireRole, mijozRuxsat } = require('./shared');
 const { shapeDoc, STATUS_ID } = require('./docShape');
 const sequelize = require('../../db/db-sequelize');
 const HttpException = require('../../utils/HttpException.utils');
@@ -39,8 +39,12 @@ class MobileHistoryController {
   };
 
   // 11.2 getClientDocHistory/
+  // Faqat xodim ishlaydigan mijoz (shared.mijozRuxsat — getKlient bilan bir xil qoida)
   getClientDocHistory = async (req, res, next) => {
-    const where = { mijoz_id: req.query.clientId };
+    const mijoz = await MijozModel.findByPk(req.query.clientId, { attributes: ['id', 'agent_id'] });
+    if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
+    if (!await mijozRuxsat(req, mijoz)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
+    const where = { mijoz_id: mijoz.id };
     const holatlar = STATUS_TO_HOLAT[String(req.query.statusId)];
     if (holatlar) where.holat = holatlar;
     const list = await ArizaModel.findAll({ where, include: INCLUDE, order: [['createdAt', 'DESC']] });
@@ -58,8 +62,9 @@ class MobileHistoryController {
 async function mijozCheklar(req, res) {
   const klientId = parseInt(req.query.klientId || req.query.clientId, 10);
   if (!klientId) throw new HttpException(400, 'klientId majburiy');
-  const mijoz = await MijozModel.findByPk(klientId, { attributes: ['id', 'nomi', 'balans', 'kredit_limit', 'tolov_muddati_kun'] });
+  const mijoz = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id', 'nomi', 'balans', 'kredit_limit', 'tolov_muddati_kun'] });
   if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
+  if (!await mijozRuxsat(req, mijoz)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
   const page = Math.max(0, parseInt(req.query.page, 10) || 0);
   const HAJM = 20;
 

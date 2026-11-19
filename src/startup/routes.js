@@ -30,6 +30,9 @@ const mobileRouter      = require('../routes/mobile.route');
 const HttpException = require('../utils/HttpException.utils');
 const { biznesRejim } = require('../utils/rejim.utils');
 
+const MAXFIY_KALITLAR = /^(password|parol|token|userToken|confirmPassword|secret)$/i;
+const maxfiyniYashir = (k, v) => (MAXFIY_KALITLAR.test(k) ? '***' : v);
+
 module.exports = async function(app){
      // parse requests of content-type: application/json
         // parses incoming requests with JSON payloads
@@ -40,7 +43,12 @@ module.exports = async function(app){
         app.options("*", cors());
         app.use(express.static(path.join(__dirname, '../../dist')));
         // Yuklangan fayllar (audit rasmlari va h.k.)
-        app.use('/uploads', express.static(path.join(__dirname, '../../uploads')));
+        // nosniff + CSP: yuklangan fayl (masalan .html/.svg) brauzerda skript sifatida ishlamasin
+        app.use('/uploads', (req, res, next) => {
+          res.setHeader('X-Content-Type-Options', 'nosniff');
+          res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox");
+          next();
+        }, express.static(path.join(__dirname, '../../uploads')));
         // i18n.setLocale('uz');
         app.use(cookieParser());
         app.use(i18n.init)
@@ -52,9 +60,11 @@ module.exports = async function(app){
         // DIAGNOSTIKA: barcha mobil so'rovlarni to'liq logga yozamiz (APK debug)
         app.use(MOBILE_PREFIXES, (req, res, next) => {
           const start = Date.now();
-          const bodyStr = req.body && Object.keys(req.body).length ? JSON.stringify(req.body) : '';
+          // Parol va tokenlar logga yozilmaydi
+          const bodyStr = req.body && Object.keys(req.body).length ? JSON.stringify(req.body, maxfiyniYashir) : '';
+          const url = req.originalUrl.replace(/([?&](?:token|userToken|password|parol)=)[^&]*/gi, '$1***');
           res.on('finish', () => {
-            console.log(`[MOBILE] ${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - start}ms) ${bodyStr ? 'body=' + bodyStr.slice(0, 200) : ''}`);
+            console.log(`[MOBILE] ${req.method} ${url} → ${res.statusCode} (${Date.now() - start}ms) ${bodyStr ? 'body=' + bodyStr.slice(0, 200) : ''}`);
           });
           next();
         });

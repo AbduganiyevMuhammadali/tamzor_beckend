@@ -11,7 +11,8 @@ const sequelize = new Sequelize(
         dialect: 'mysql',
         dialectOptions:{
             decimalNumbers: true,
-            multipleStatements: true
+            // Bir so'rovda bir nechta SQL buyrug'i taqiqlangan — SQL injection oqibatini cheklaydi
+            multipleStatements: false
         },
         logging: config.node_env !== 'production'
     }

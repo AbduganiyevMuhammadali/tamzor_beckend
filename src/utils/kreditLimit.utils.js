@@ -10,7 +10,9 @@ const { qarzQismlari } = require('./qarz.utils');
  * Muddati o'tgan qarz: qarzning to'lanmagan qismi to'lov sanasidan o'tgan bo'lsa => blok
  * (to'lov sanasi — agent belgilagan ariza.tolov_sana yoki sotuv sanasi + tolov_muddati_kun).
  */
-async function kreditTekshir(mijoz, yangiSumma = 0) {
+// transaction — tranzaksiya ichidan chaqirilsa SHART: aks holda qarz so'rovi pool'dan ikkinchi
+// ulanish oladi va parallel yuklamada (pool to'lganda) qulf kutish bilan tiqilib qoladi.
+async function kreditTekshir(mijoz, yangiSumma = 0, transaction = undefined) {
   if (!mijoz) return { bloklangan: false };
 
   const limit = parseFloat(mijoz.kredit_limit) || 0;
@@ -20,7 +22,7 @@ async function kreditTekshir(mijoz, yangiSumma = 0) {
   // ularning to'lov sanasi: agent kalendardan belgilagan sana yoki sotuv + muddat.
   // To'langan eski savdolar hisobga olinmaydi (utils/qarz.utils.js — hisobotlar bilan bir xil).
   if (joriyQarz > 0) {
-    const qismlar = (await qarzQismlari([mijoz])).get(mijoz.id) || [];
+    const qismlar = (await qarzQismlari([mijoz], { transaction })).get(mijoz.id) || [];
     const otgan = qismlar.filter(q => q.tolov_sana && q.kechikkan_kun > 0);
     if (otgan.length) {
       const kun = Math.max(...otgan.map(q => q.kechikkan_kun));

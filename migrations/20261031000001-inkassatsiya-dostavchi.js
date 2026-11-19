@@ -50,19 +50,34 @@ module.exports = {
     });
   },
 
+  /* down — XAVFSIZ: up()'dan keyin dastur dostavchik inkassatsiyasini faqat shu jadvalga
+     yozadi va up() ko'chirgan qatorlarni keyingilaridan ajratib bo'lmaydi. Ilgari down()
+     BARCHA dostavchik qatorlarini o'chirib, faqat topshirilgan > 0 bo'lganlarini kassa
+     chiqimiga aylantirardi — kamomad/yig'ilgan ma'lumoti va keyingi kunlar yo'qolardi.
+     Endi dostavchik qatorlari bo'lsa down() hech narsani o'zgartirmay to'xtaydi.
+     Eski (kassa chiqimi) ko'rinishiga majburan qaytarish kerak bo'lsa:
+       INKASSATSIYA_DOWN_MAJBURIY=1 npx sequelize-cli db:migrate:undo
+     — shunda konvertatsiya bitta tranzaksiyada bajariladi. */
   async down(queryInterface) {
     const db = queryInterface.sequelize;
     const S = db.QueryTypes.SELECT;
-    const rows = await db.query(`SELECT * FROM inkassatsiya WHERE dostavchi_id IS NOT NULL`, { type: S });
-    for (const r of rows) {
-      if (Number(r.topshirilgan_summa) > 0) {
-        await db.query(`INSERT INTO kassa (tur, kategoriya, summa, tolov_usul, manba_tur, manba_id, mijoz_id, mijoz_nomi, izoh, sana, user_id, createdAt, updatedAt)
-            VALUES ('chiqim', 'dostavchik_inkassatsiya', :summa, 'naqt', 'dostavchik_inkassatsiya', :did, NULL, NULL, :izoh, :sana, :did, NOW(), NOW())`,
-          { replacements: { summa: r.topshirilgan_summa, did: r.dostavchi_id, izoh: r.izoh || `${r.agent_nomi || ''} — ${r.sana} naqd topshirdi`,
-            sana: r.tasdiqlagan_sana || r.updatedAt } });
-      }
-      await db.query(`DELETE FROM inkassatsiya WHERE id = :id`, { replacements: { id: r.id } });
+    const [{ c }] = await db.query(`SELECT COUNT(*) c FROM inkassatsiya WHERE dostavchi_id IS NOT NULL`, { type: S });
+    if (Number(c) > 0 && process.env.INKASSATSIYA_DOWN_MAJBURIY !== '1') {
+      throw new Error(`[20261031000001 down] inkassatsiya'da ${c} ta dostavchik yozuvi bor — `
+        + "ularni o'chirmaslik uchun down to'xtatildi. Majburan: INKASSATSIYA_DOWN_MAJBURIY=1");
     }
+    await db.transaction(async (transaction) => {
+      const rows = await db.query(`SELECT * FROM inkassatsiya WHERE dostavchi_id IS NOT NULL`, { type: S, transaction });
+      for (const r of rows) {
+        if (Number(r.topshirilgan_summa) > 0) {
+          await db.query(`INSERT INTO kassa (tur, kategoriya, summa, tolov_usul, manba_tur, manba_id, mijoz_id, mijoz_nomi, izoh, sana, user_id, createdAt, updatedAt)
+              VALUES ('chiqim', 'dostavchik_inkassatsiya', :summa, 'naqt', 'dostavchik_inkassatsiya', :did, NULL, NULL, :izoh, :sana, :did, NOW(), NOW())`,
+            { replacements: { summa: r.topshirilgan_summa, did: r.dostavchi_id, izoh: r.izoh || `${r.agent_nomi || ''} — ${r.sana} naqd topshirdi`,
+              sana: r.tasdiqlagan_sana || r.updatedAt }, transaction });
+        }
+        await db.query(`DELETE FROM inkassatsiya WHERE id = :id`, { replacements: { id: r.id }, transaction });
+      }
+    });
     await queryInterface.removeIndex('inkassatsiya', 'inkassatsiya_dostavchi_sana');
     await queryInterface.removeColumn('inkassatsiya', 'dostavchi_id');
     await queryInterface.changeColumn('inkassatsiya', 'agent_id', { type: queryInterface.sequelize.Sequelize.INTEGER, allowNull: false });

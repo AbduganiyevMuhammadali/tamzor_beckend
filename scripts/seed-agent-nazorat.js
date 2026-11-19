@@ -20,11 +20,20 @@
  * Tozalash:         node scripts/seed-agent-nazorat.js --tozala
  *
  * Faqat shu skript yaratgan yozuvlar o'chiriladi — mavjud ma'lumotga tegmaydi.
- * Tashrif/reja TAG sanasi bo'yicha, ariza esa raqam prefiksi bo'yicha topiladi.
+ * Har bir qo'shilgan qator id'si demo_yozuv jurnaliga (scripts/lib/demo-utils.js)
+ * yoziladi va tozalash FAQAT shu id'larni o'chiradi. Ilgari sana bo'yicha
+ * (sana >= 2026-08-01) o'chirilardi — bu real tashrif/reja/GPS'ni ham yo'q qilardi.
+ *
+ * NODE_ENV=production da ishlamaydi (faqat --majburiy bilan).
  */
 
 require('dotenv').config();
 const sequelize = require('../src/db/db-sequelize');
+const D = require('./lib/demo-utils');
+D.ishlabChiqarishTaqiq('seed-agent-nazorat');
+const SKRIPT = 'seed-agent-nazorat';
+// FK tartibida: avval bog'langanlar
+const JADVALLAR = ['tashrif', 'marshrut_reja', 'sotmaslik', 'agent_location', 'tovar_register', 'ariza_qator', 'ariza'];
 
 // Skript chiqishi o'qilishi uchun SQL loglarini o'chiramiz
 sequelize.options.logging = false;
@@ -59,29 +68,28 @@ function dt(sana, soat, daqiqa) {
 }
 
 async function tozala() {
+  await D.jurnalTayyorla(sequelize);   // DDL — tranzaksiyadan oldin
   const t = await sequelize.transaction();
   try {
-    // Ombor chiqimlari → ariza qatorlari → arizalar (FK tartibida)
-    await sequelize.query(
-      `DELETE FROM tovar_register
-       WHERE manba_tur = 'sotuv'
-         AND manba_id IN (SELECT id FROM ariza WHERE raqam LIKE '${ARIZA_PREFIX}%')`,
-      { transaction: t });
-    await sequelize.query(
-      `DELETE FROM ariza_qator WHERE ariza_id IN (SELECT id FROM ariza WHERE raqam LIKE '${ARIZA_PREFIX}%')`,
-      { transaction: t });
-    const [ar] = await sequelize.query(
-      `DELETE FROM ariza WHERE raqam LIKE '${ARIZA_PREFIX}%'`, { transaction: t });
+    // 1) Jurnal bo'yicha: faqat shu skript qo'shgan qatorlar (id ro'yxati)
+    const n = await D.ochir(sequelize, SKRIPT, JADVALLAR, t);
+    await D.jurnalniOchir(sequelize, SKRIPT, t);
 
-    // Sana oralig'i bo'yicha — bu davrda avval ma'lumot yo'q edi
-    await sequelize.query(`DELETE FROM tashrif       WHERE sana >= '${BOSHLANISH}'`, { transaction: t });
-    await sequelize.query(`DELETE FROM marshrut_reja WHERE sana >= '${BOSHLANISH}'`, { transaction: t });
-    await sequelize.query(`DELETE FROM sotmaslik     WHERE DATE(sana) >= '${BOSHLANISH}'`, { transaction: t });
+    // 2) Eski versiya yaratgan (jurnalsiz) arizalar — noyob AR-NZ- prefiksi bo'yicha.
+    //    Tashrif/reja/GPS uchun bunday ishonchli belgi yo'q — ular taxmin bilan o'chirilmaydi.
+    const prefiks = `${ARIZA_PREFIX}-%`;
     await sequelize.query(
-      `DELETE FROM agent_location WHERE DATE(sana) >= '${BOSHLANISH}' AND rol = 'agent'`, { transaction: t });
+      `DELETE FROM tovar_register WHERE manba_tur = 'sotuv'
+         AND manba_id IN (SELECT id FROM ariza WHERE raqam LIKE ?)`,
+      { replacements: [prefiks], transaction: t });
+    await sequelize.query(
+      `DELETE FROM ariza_qator WHERE ariza_id IN (SELECT id FROM ariza WHERE raqam LIKE ?)`,
+      { replacements: [prefiks], transaction: t });
+    await sequelize.query(`DELETE FROM ariza WHERE raqam LIKE ?`, { replacements: [prefiks], transaction: t });
 
     await t.commit();
-    console.log(`Tozalandi: ${BOSHLANISH} dan keyingi tashrif/reja/sotmaslik/GPS va ${ARIZA_PREFIX}* arizalar`);
+    console.log('Tozalandi (faqat shu skript yaratgan yozuvlar):',
+      Object.entries(n).map(([j, c]) => `${j}=${c}`).join(', '));
   } catch (e) {
     await t.rollback();
     throw e;
@@ -236,86 +244,81 @@ async function seed() {
     }
   }
 
-  /* ── Bazaga yozish ── */
+  /* ── Bazaga yozish ──
+     Har qator alohida qo'shiladi va id'si jurnalga yoziladi (ko'p qatorli
+     INSERT'da id'lar parallel yozuvlar bilan aralashishi mumkin). */
   const t = await sequelize.transaction();
+  const yangi = {};   // jadval → [id]
+  const ins = async (jadval, sql, replacements) => {
+    const [id] = await sequelize.query(sql, { replacements, transaction: t });
+    (yangi[jadval] = yangi[jadval] || []).push(id);
+    return id;
+  };
   try {
-    // 1. Reja
-    for (let i = 0; i < rejaRows.length; i += 200) {
-      const bolak = rejaRows.slice(i, i + 200);
-      await sequelize.query(
+    // 1. Reja — tashrifga bog'lash uchun id'lar xotirada saqlanadi
+    const rejaMap = {};
+    for (const r of rejaRows) {
+      const id = await ins('marshrut_reja',
         `INSERT INTO marshrut_reja (agent_id, mijoz_id, sana, tartib, createdAt, updatedAt)
-         VALUES ${bolak.map(() => '(?,?,?,?,NOW(),NOW())').join(',')}`,
-        { replacements: bolak.flat(), transaction: t });
+         VALUES (?,?,?,?,NOW(),NOW())`, r);
+      rejaMap[`${r[0]}|${r[1]}|${r[2]}`] = id;
     }
 
     // 2. Arizalar — tashrifga bog'lash uchun id kerak
     const arizaIdMap = {};
     for (const a of arizaRows) {
-      const [res] = await sequelize.query(
+      const res = await ins('ariza',
         /* yetkazilgan_sana ham to'ldiriladi — dashboard "Bugun yetkazildi"
            ni holat emas, aynan shu maydon bo'yicha sanaydi. */
         `INSERT INTO ariza (raqam, holat, turi, manba, mijoz_id, mijoz_nomi, agent_id, agent_nomi,
                             jami_summa, ombor, jonatish_sana, yetkazilgan_sana, createdAt, updatedAt)
          VALUES (?, 'yetkazildi', 'sotish', 'mobil', ?, ?, ?, ?, ?, 'Основной склад', DATE(?), ?, ?, ?)`,
-        { replacements: [a.raqam, a.mijoz_id, a.mijoz_nomi, a.agent_id, a.agent_nomi,
-                         a.summa, a.sana, a.sana, a.sana, a.sana], transaction: t });
+        [a.raqam, a.mijoz_id, a.mijoz_nomi, a.agent_id, a.agent_nomi,
+         a.summa, a.sana, a.sana, a.sana, a.sana]);
       const arizaId = res;
       arizaIdMap[`${a.agent_id}|${a.mijoz_id}|${a.sana.slice(0, 10)}`] = arizaId;
 
-      await sequelize.query(
+      await ins('ariza_qator',
         `INSERT INTO ariza_qator (ariza_id, tovar_id, tovar_nomi, narx, dona, jami_dona, summa, createdAt, updatedAt)
          VALUES (?,?,?,?,?,?,?,NOW(),NOW())`,
-        { replacements: [arizaId, a.tovar_id, a.tovar_nomi, a.narx, a.dona, a.dona, a.summa],
-          transaction: t });
+        [arizaId, a.tovar_id, a.tovar_nomi, a.narx, a.dona, a.dona, a.summa]);
 
       /* Ombordan chiqim — "Turkum ulushi" va "Top tovarlar" bloklari
          aynan tovar_register (tur='chiqim', manba_tur='sotuv') ustidan
          hisoblanadi. Busiz sotuv bo'lsa ham grafiklar bo'sh chiqadi. */
-      await sequelize.query(
+      await ins('tovar_register',
         `INSERT INTO tovar_register
            (tovar_id, tovar_nomi, turkum, ombor, tur, manba_tur, manba_id,
             donada, bloklarda, qutilarda, hajm, kirim_narx, sotuv_narx, summa,
             sana, createdAt, updatedAt)
          VALUES (?,?,?,'Основной склад','chiqim','sotuv',?,?,0,0,0,0,?,?,?,NOW(),NOW())`,
-        { replacements: [a.tovar_id, a.tovar_nomi, a.turkum || null, arizaId,
-                         -Math.abs(a.dona), a.narx, -Math.abs(a.summa), a.sana],
-          transaction: t });
+        [a.tovar_id, a.tovar_nomi, a.turkum || null, arizaId,
+         -Math.abs(a.dona), a.narx, -Math.abs(a.summa), a.sana]);
     }
 
-    // 3. Tashriflar — reja_id va ariza_id bilan bog'lab
-    const [rejalar] = await sequelize.query(
-      `SELECT id, agent_id, mijoz_id, sana FROM marshrut_reja WHERE sana >= '${BOSHLANISH}'`,
-      { transaction: t });
-    const rejaMap = {};
-    rejalar.forEach(r => {
-      const sn = r.sana instanceof Date ? iso(r.sana) : String(r.sana);
-      rejaMap[`${r.agent_id}|${r.mijoz_id}|${sn}`] = r.id;
-    });
-
+    // 3. Tashriflar — reja_id (faqat shu skript yaratgan rejalar) va ariza_id bilan bog'lab
     for (const x of tashrifRows) {
       const k = `${x.agent_id}|${x.mijoz_id}|${x.sana}`;
-      await sequelize.query(
+      await ins('tashrif',
         `INSERT INTO tashrif (reja_id, agent_id, agent_nomi, mijoz_id, mijoz_nomi,
             checkin_vaqt, checkin_lat, checkin_lng, checkin_masofa,
             checkout_vaqt, checkout_lat, checkout_lng, davomiylik_sek,
             natija, ariza_id, sana, createdAt, updatedAt)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
-        { replacements: [
-            x.rejada ? (rejaMap[k] || null) : null,
-            x.agent_id, x.agent_nomi, x.mijoz_id, x.mijoz_nomi,
-            x.checkin_vaqt, x.checkin_lat, x.checkin_lng, x.checkin_masofa,
-            x.checkout_vaqt, x.checkout_lat, x.checkout_lng, x.davomiylik_sek,
-            x.natija, arizaIdMap[k] || null, x.sana,
-          ], transaction: t });
+        [
+          x.rejada ? (rejaMap[k] || null) : null,
+          x.agent_id, x.agent_nomi, x.mijoz_id, x.mijoz_nomi,
+          x.checkin_vaqt, x.checkin_lat, x.checkin_lng, x.checkin_masofa,
+          x.checkout_vaqt, x.checkout_lat, x.checkout_lng, x.davomiylik_sek,
+          x.natija, arizaIdMap[k] || null, x.sana,
+        ]);
     }
 
     // 4. Sotmaslik
-    for (let i = 0; i < sotmaslikRows.length; i += 100) {
-      const bolak = sotmaslikRows.slice(i, i + 100);
-      await sequelize.query(
+    for (const r of sotmaslikRows) {
+      await ins('sotmaslik',
         `INSERT INTO sotmaslik (agent_id, agent_nomi, mijoz_id, mijoz_nomi, sabab_id, sabab_nomi, sana, createdAt, updatedAt)
-         VALUES ${bolak.map(() => '(?,?,?,?,?,?,?,NOW(),NOW())').join(',')}`,
-        { replacements: bolak.flat(), transaction: t });
+         VALUES (?,?,?,?,?,?,?,NOW(),NOW())`, r);
     }
 
     /* 5a. Bugungi "jonli" nuqtalar.
@@ -351,13 +354,14 @@ async function seed() {
     }
 
     // 5. GPS
-    for (let i = 0; i < gpsRows.length; i += 200) {
-      const bolak = gpsRows.slice(i, i + 200);
-      await sequelize.query(
+    for (const r of gpsRows) {
+      await ins('agent_location',
         `INSERT INTO agent_location (agent_id, rol, lat, lng, battery, sana, createdAt, updatedAt)
-         VALUES ${bolak.map(() => '(?,?,?,?,?,?,NOW(),NOW())').join(',')}`,
-        { replacements: bolak.flat(), transaction: t });
+         VALUES (?,?,?,?,?,?,NOW(),NOW())`, r);
     }
+
+    // 6. Jurnal — aynan shu tranzaksiyada (yozuvlar bilan birga commit/rollback)
+    for (const [jadval, ids] of Object.entries(yangi)) await D.belgila(sequelize, SKRIPT, jadval, ids, t);
 
     await t.commit();
   } catch (e) {

@@ -29,6 +29,21 @@ module.exports = {
 
   async down(queryInterface, Sequelize) {
     await queryInterface.removeConstraint('mijoz', 'mijoz_agent_fk').catch(() => {});
+
+    /* Eski FK (agent_id → user.id) NOTO'G'RI edi. up()'dan keyin mijoz.agent_id
+       agent jadvali id'larini saqlaydi — ular user'da bo'lmasa, FK qo'shish
+       yiqiladi ("Cannot add or update a child row"). agent_id'ni NULL qilib
+       "tuzatish" esa mijozlarning agentga biriktirilishini butunlay yo'qotadi.
+       Shuning uchun eski FK faqat ma'lumot unga mos kelsa tiklanadi; aks holda
+       FK'siz qoldiriladi (ustun va qiymatlar saqlanadi). */
+    const [[r]] = await queryInterface.sequelize.query(`
+      SELECT COUNT(*) AS c FROM mijoz
+      WHERE agent_id IS NOT NULL AND agent_id NOT IN (SELECT id FROM user)`);
+    if (Number(r.c) > 0) {
+      console.warn(`[20240603000001 down] ${r.c} ta mijoz.agent_id user jadvalida yo'q — `
+        + "eski mijoz_ibfk_3 (→ user.id) FK tiklanmadi, agent biriktiruvlari saqlandi.");
+      return;
+    }
     await queryInterface.addConstraint('mijoz', {
       fields: ['agent_id'],
       type: 'foreign key',

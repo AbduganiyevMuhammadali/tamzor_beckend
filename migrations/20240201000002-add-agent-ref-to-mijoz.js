@@ -20,5 +20,11 @@ module.exports = {
     }
   },
 
-  async down() {},
+  // up() qo'shgan indeksni olib tashlaymiz. Indeks mavjud bo'lmasa yoki FK unga
+  // tayansa (MySQL o'chirishga ruxsat bermaydi) — xato bermasdan o'tkazib yuboramiz.
+  async down(queryInterface) {
+    await queryInterface.removeIndex('mijoz', 'mijoz_agent_id_idx').catch((e) => {
+      console.warn(`[20240201000002 down] mijoz_agent_id_idx o'chirilmadi: ${e.message}`);
+    });
+  },
 };

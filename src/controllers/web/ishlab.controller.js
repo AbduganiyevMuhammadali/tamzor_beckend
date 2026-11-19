@@ -26,6 +26,7 @@ const TovarModel = require('../../models/tovar.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const KassaModel = require('../../models/kassa.model');
 const HttpException = require('../../utils/HttpException.utils');
+const { tovarlarniQulfla, keyingiTartib, maksRaqam } = require('../../utils/qulf.utils');
 const { ASOSIY_OMBOR, XOM_ASHYO_OMBOR, turOmbori, omborNomi } = require('../../utils/ombor.utils');
 const { tartibsizQoldiq, tartibla } = require('../../utils/omborKochirish.utils');
 const { tannarxXaritasi } = require('../../utils/tahlil.utils');
@@ -42,11 +43,13 @@ const INCLUDE = [
 ];
 const tartib = [[{ model: IshlabQatorModel, as: 'qatorlar' }, 'id', 'ASC'], [{ model: IshlabXarajatModel, as: 'xarajatlar' }, 'id', 'ASC']];
 
+/* Partiya raqami: hujjat_raqam hisoblagichidan (parallel yaratishda ham takrorlanmaydi;
+   birinchi marta mavjud IC-YYYY-NNNN larning eng kattasidan davom etadi) */
 async function raqamYarat(t) {
   const yil = new Date().getFullYear();
-  const oxirgi = await IshlabModel.findOne({ where: { raqam: { [Op.like]: `IC-${yil}-%` } }, order: [['id', 'DESC']], transaction: t, lock: t ? t.LOCK.UPDATE : undefined });
-  const k = oxirgi ? parseInt(String(oxirgi.raqam).split('-').pop(), 10) || 0 : 0;
-  return `IC-${yil}-${String(k + 1).padStart(4, '0')}`;
+  const prefiks = `IC-${yil}`;
+  const k = await keyingiTartib(prefiks, () => maksRaqam('ishlab_chiqarish', prefiks, t), t);
+  return `${prefiks}-${String(k).padStart(4, '0')}`;
 }
 
 async function topHujjat(id, t) {
@@ -118,6 +121,8 @@ async function boshla(h, t) {
   const xom = h.qatorlar.filter(q => q.tur === 'xom_ashyo' && n(q.miqdor) > 0);
   if (!xom.length) throw new HttpException(400, 'Xom ashyo kiritilmagan');
   await omborlarniBelgila(xom, t);
+  // Xom ashyo tovarlari qulflanadi: parallel boshlash/buyurtmalar bir xil qoldiqni ikki marta ishlatmasin
+  await tovarlarniQulfla(xom.map(q => q.tovar_id), t);
   const kerak = {};
   for (const q of xom) {
     const k = `${q.ombor}|${q.tovar_id}`;
@@ -410,6 +415,8 @@ class IshlabController {
       if (h.holat === 'yakunlandi') {
         // Mahsulot hali omborda bo'lsagina — sotilgan bo'lsa qaytarib bo'lmaydi
         const chiqqan = h.qatorlar.filter(q => q.tur !== 'xom_ashyo' && n(q.miqdor) > 0);
+        // Mahsulot qoldig'i tekshiruvidan oldin tovarlar qulflanadi (parallel sotuv bilan poyga yo'q)
+        await tovarlarniQulfla(chiqqan.map(q => q.tovar_id), t);
         const omborlar = [...new Set(chiqqan.map(q => q.ombor || h.ombor))];
         const bor = Object.fromEntries(await Promise.all(omborlar.map(async om => [om, await omborQoldiq(om, t)])));
         const qoldi = q => n(bor[q.ombor || h.ombor]?.[q.tovar_id]?.qoldiq);

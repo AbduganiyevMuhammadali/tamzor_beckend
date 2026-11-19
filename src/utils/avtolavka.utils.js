@@ -19,24 +19,32 @@ const HttpException = require('./HttpException.utils');
 const { ASOSIY_OMBOR, agentOmbori } = require('./ombor.utils');
 const { SOTUV_RADIUS_M } = require('./geo.utils');
 const { mavjudQoldiq } = require('./zaxira.utils');
+const { qulflabOl, tovarlarniQulfla, keyingiTartib, maksRaqam } = require('./qulf.utils');
+const { tzOffset, kunKey } = require('./tahlil.utils');
 
 const BRAK_OMBOR = 'Brak ombori';   // mobile/delivery.controller.js bilan bir xil
 const PREFIKS = { yuklash: 'YK', qabul: 'QB' };
 const INCLUDE = [{ model: AvtolavkaQatorModel, as: 'qatorlar' }];
 const EPS = 0.001;
 
-const bugun = () => new Date().toISOString().slice(0, 10);
+// Mahalliy (biznes, Toshkent) sana. toISOString() UTC beradi — 00:00–05:00 orasidagi
+// amallar oldingi kunga tushib qolardi.
+const bugun = () => kunKey(new Date());
+// Bazada DATETIME UTC saqlanadi — kunga ajratish mahalliy vaqtda (tahlil/dashboard bilan bir xil)
+const lokalKun = (ustun) => `DATE(CONVERT_TZ(${ustun}, '+00:00', :tz))`;
 const sanaMi = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const n = (v) => parseFloat(v) || 0;
 
 /* ── Yordamchilar ──────────────────────────────────────── */
 
+/* Hujjat raqami: hujjat_raqam hisoblagichi tranzaksiya ichida (qulf.utils keyingiTartib).
+   Ilgari COUNT+1 edi — parallel so'rovlar bir xil raqam olardi, o'chirilgan hujjatdan keyin
+   raqam takrorlanardi. Hisoblagich birinchi marta mavjud eng katta raqamdan boshlanadi. */
 async function raqamYarat(tur, transaction) {
   const yil = new Date().getFullYear();
-  const soni = await AvtolavkaHujjatModel.count({
-    where: { tur, createdAt: { [Op.gte]: new Date(`${yil}-01-01`) } }, transaction,
-  });
-  return `${PREFIKS[tur]}-${yil}-${String(soni + 1).padStart(4, '0')}`;
+  const prefiks = `${PREFIKS[tur]}-${yil}`;
+  const tartib = await keyingiTartib(prefiks, () => maksRaqam('avtolavka_hujjat', prefiks, transaction), transaction);
+  return `${prefiks}-${String(tartib).padStart(4, '0')}`;
 }
 
 async function avtolavkaAgent(agent_id) {
@@ -68,13 +76,16 @@ async function narxMap(ids) {
   return map;
 }
 
-/** Ombordagi qoldiq, tovar bo'yicha */
-async function omborQoldiq(ombor, transaction) {
+/** Ombordagi qoldiq, tovar bo'yicha.
+    qulfla=true — qulflovchi o'qish (LOCK IN SHARE MODE): tranzaksiya snapshotidan emas, oxirgi
+    commit qilingan holatdan o'qiydi va shu ombor yozuvlarini commitgacha ushlab turadi. */
+async function omborQoldiq(ombor, transaction, { qulfla = false } = {}) {
   const rows = await TovarRegisterModel.findAll({
     where: { ombor },
     attributes: ['tovar_id', [fn('SUM', col('donada')), 'q'],
                  [fn('MAX', col('tovar_nomi')), 'tovar_nomi'], [fn('MAX', col('turkum')), 'turkum']],
     group: ['tovar_id'], raw: true, transaction,
+    ...(qulfla && transaction ? { lock: transaction.LOCK.SHARE } : {}),
   });
   const map = {};
   rows.forEach(r => { map[r.tovar_id] = { qoldiq: n(r.q), tovar_nomi: r.tovar_nomi, turkum: r.turkum }; });
@@ -136,11 +147,21 @@ async function qatorlarniTayyorla(qatorlar) {
   }));
 }
 
-/** Yuklashni tasdiqlash: asosiy ombordan chiqim, agent omboriga kirim */
-async function yuklashniTasdiqla(hujjat, userId, t) {
+/** Yuklashni tasdiqlash: asosiy ombordan chiqim, agent omboriga kirim.
+    hujjat — model yoki id. Hujjat tranzaksiya ichida QULFLAB qayta o'qiladi va holat shu
+    yangi nusxada tekshiriladi: ikki parallel tasdiqlash (yoki tasdiqlash + rad/o'chirish)
+    tovarni ikki marta ko'chirmaydi — ikkinchisi kutadi va "tasdiqlangan" holatni ko'radi.
+    Qulflangan (yangilangan) hujjat qaytariladi. */
+async function yuklashniTasdiqla(hujjatYokiId, userId, t) {
+  const id = typeof hujjatYokiId === 'object' && hujjatYokiId ? hujjatYokiId.id : hujjatYokiId;
+  const hujjat = await qulflabOl(AvtolavkaHujjatModel, id, t);
+  if (!hujjat || hujjat.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
   if (hujjat.holat !== 'qoralama') throw new HttpException(400, `Hujjat "${hujjat.holat}" holatida — tasdiqlab bo'lmaydi`);
   const qatorlar = await AvtolavkaQatorModel.findAll({ where: { hujjat_id: hujjat.id }, transaction: t });
   if (!qatorlar.length) throw new HttpException(400, 'Hujjat qatorlari bo\'sh');
+  // Qoldiq tekshiruvidan OLDIN tovar qatorlari qulflanadi: shu tovarlar bo'yicha parallel
+  // yuklash/buyurtma/chiqim navbatma-navbat bajariladi, asosiy ombor minusga tushmaydi.
+  await tovarlarniQulfla(qatorlar.map(q => q.tovar_id), t);
 
   // Mashinaga faqat MAVJUD tovar yuklanadi: jismoniy qoldiq − distributsiya zakazlariga
   // (yangi / tasdiqlangan / yig'ilmoqda) band qilingani. Aks holda avtolavka mijozga
@@ -169,14 +190,18 @@ async function yuklashniTasdiqla(hujjat, userId, t) {
   }
   await TovarRegisterModel.bulkCreate(yozuvlar, { transaction: t });
   await hujjat.update({ holat: 'tasdiqlangan', tasdiqlagan_id: userId || null, tasdiqlagan_sana: sana }, { transaction: t });
+  return hujjat;
 }
 
 /* ── Bir agent, bir kun — solishtirma ─────────────────── */
-async function kunHisobla(agent, sana, { tafsilot = false } = {}) {
+/* transaction — kun holatini o'zgartiruvchi amallar (kunni yopish/qayta ochish) agent qatorini
+   qulflagandan keyin shu tranzaksiya ichida hisoblaydi. */
+async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } = {}) {
   const ombor = agentOmbori(agent.fullname);
   const R = { agent_id: agent.id, sana };
   const q = (sql) => sequelize.query(sql, {
-    replacements: { agent_id: agent.id, sana, ombor, radius: SOTUV_RADIUS_M }, type: sequelize.QueryTypes.SELECT });
+    replacements: { agent_id: agent.id, sana, ombor, radius: SOTUV_RADIUS_M, tz: tzOffset() },
+    type: sequelize.QueryTypes.SELECT, ...(transaction ? { transaction } : {}) });
 
   const [
     [yuk], [qab], [sot], [qayt], [boshi], [oxiri], [pul], [ink], [tash], [reja], sorovlar, [kunYopish],
@@ -193,18 +218,18 @@ async function kunHisobla(agent, sana, { tafsilot = false } = {}) {
                                 WHEN a.tolov_turi IN ('naqt','naqd') THEN a.jami_summa ELSE 0 END),0) naqd,
               COALESCE((SELECT SUM(q.jami_dona) FROM ariza_qator q WHERE q.ariza_id IN
                  (SELECT id FROM ariza WHERE agent_id = :agent_id AND deletedAt IS NULL AND turi = 'sotish'
-                    AND holat = 'yetkazildi' AND ombor = :ombor AND DATE(yetkazilgan_sana) = :sana)),0) dona
+                    AND holat = 'yetkazildi' AND ombor = :ombor AND ${lokalKun('yetkazilgan_sana')} = :sana)),0) dona
        FROM ariza a WHERE a.agent_id = :agent_id AND a.deletedAt IS NULL AND a.turi = 'sotish'
-         AND a.holat = 'yetkazildi' AND a.ombor = :ombor AND DATE(a.yetkazilgan_sana) = :sana`),
+         AND a.holat = 'yetkazildi' AND a.ombor = :ombor AND ${lokalKun('a.yetkazilgan_sana')} = :sana`),
     q(`SELECT COALESCE(SUM(donada),0) dona, COALESCE(SUM(ABS(donada) * sotuv_narx),0) summa
-       FROM tovar_register WHERE ombor = :ombor AND tur = 'qaytarma_kirim' AND DATE(sana) = :sana`),
+       FROM tovar_register WHERE ombor = :ombor AND tur = 'qaytarma_kirim' AND ${lokalKun('sana')} = :sana`),
     q(`SELECT COALESCE(SUM(donada),0) dona, COALESCE(SUM(donada * COALESCE(NULLIF(sotuv_narx,0), kirim_narx)),0) summa
-       FROM tovar_register WHERE ombor = :ombor AND DATE(sana) < :sana`),
+       FROM tovar_register WHERE ombor = :ombor AND ${lokalKun('sana')} < :sana`),
     q(`SELECT COALESCE(SUM(donada),0) dona, COALESCE(SUM(donada * COALESCE(NULLIF(sotuv_narx,0), kirim_narx)),0) summa
-       FROM tovar_register WHERE ombor = :ombor AND DATE(sana) <= :sana`),
+       FROM tovar_register WHERE ombor = :ombor AND ${lokalKun('sana')} <= :sana`),
     q(`SELECT COALESCE(SUM(summa),0) summa, COUNT(*) soni FROM kassa
        WHERE tur = 'kirim' AND tolov_usul = 'naqt' AND user_id = :agent_id
-         AND manba_tur IN ('mijoz','avtolavka') AND DATE(sana) = :sana`),
+         AND manba_tur IN ('mijoz','avtolavka') AND ${lokalKun('sana')} = :sana`),
     q(`SELECT topshirilgan_summa, farq, holat, tasdiqlagan_sana FROM inkassatsiya
        WHERE agent_id = :agent_id AND sana = :sana LIMIT 1`),
     q(`SELECT COUNT(*) soni, SUM(natija = 'savdo') savdo FROM tashrif WHERE agent_id = :agent_id AND sana = :sana`),
@@ -288,21 +313,21 @@ async function kunHisobla(agent, sana, { tafsilot = false } = {}) {
   const [arizalar, tolovlar, tovarlar] = await Promise.all([
     q(`SELECT id, raqam, mijoz_id, mijoz_nomi, jami_summa, tolov_turi, yetkazilgan_sana vaqt
        FROM ariza WHERE agent_id = :agent_id AND deletedAt IS NULL AND turi = 'sotish'
-         AND holat = 'yetkazildi' AND ombor = :ombor AND DATE(yetkazilgan_sana) = :sana
+         AND holat = 'yetkazildi' AND ombor = :ombor AND ${lokalKun('yetkazilgan_sana')} = :sana
        ORDER BY yetkazilgan_sana`),
     q(`SELECT id, mijoz_id, mijoz_nomi, summa, manba_tur, izoh, sana vaqt FROM kassa
        WHERE tur = 'kirim' AND tolov_usul = 'naqt' AND user_id = :agent_id
-         AND manba_tur IN ('mijoz','avtolavka') AND DATE(sana) = :sana ORDER BY sana`),
+         AND manba_tur IN ('mijoz','avtolavka') AND ${lokalKun('sana')} = :sana ORDER BY sana`),
     // Tovar bo'yicha: shu kundagi harakat + kun boshi/oxiridagi qoldiq
     // (kun oxiri = o'sha kunning farqi; bugun uchun hozirgi mashinadagi qoldiq)
     q(`SELECT r.tovar_id, MAX(r.tovar_nomi) tovar_nomi, MAX(r.turkum) turkum,
-              SUM(CASE WHEN DATE(r.sana) < :sana THEN r.donada ELSE 0 END) kun_boshi,
-              SUM(CASE WHEN DATE(r.sana) = :sana AND r.manba_tur = 'yuklash' THEN r.donada ELSE 0 END) berildi,
-              SUM(CASE WHEN DATE(r.sana) = :sana AND r.manba_tur = 'sotuv' THEN -r.donada ELSE 0 END) sotildi,
-              SUM(CASE WHEN DATE(r.sana) = :sana AND r.tur = 'qaytarma_kirim' THEN r.donada ELSE 0 END) qaytdi,
-              SUM(CASE WHEN DATE(r.sana) = :sana AND r.manba_tur = 'qabul' THEN -r.donada ELSE 0 END) topshirildi,
+              SUM(CASE WHEN ${lokalKun('r.sana')} < :sana THEN r.donada ELSE 0 END) kun_boshi,
+              SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.manba_tur = 'yuklash' THEN r.donada ELSE 0 END) berildi,
+              SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.manba_tur = 'sotuv' THEN -r.donada ELSE 0 END) sotildi,
+              SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.tur = 'qaytarma_kirim' THEN r.donada ELSE 0 END) qaytdi,
+              SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.manba_tur = 'qabul' THEN -r.donada ELSE 0 END) topshirildi,
               SUM(r.donada) kun_oxiri
-       FROM tovar_register r WHERE r.ombor = :ombor AND DATE(r.sana) <= :sana
+       FROM tovar_register r WHERE r.ombor = :ombor AND ${lokalKun('r.sana')} <= :sana
        GROUP BY r.tovar_id
        HAVING ABS(kun_boshi) + berildi + sotildi + qaytdi + topshirildi + ABS(kun_oxiri) > 0.001
        ORDER BY tovar_nomi`),
@@ -349,38 +374,43 @@ async function kunHisobla(agent, sana, { tafsilot = false } = {}) {
       yangilanadi. Shundan keyin agent yana yuklash so'raydi/sotadi, kun oxirida yana topshiradi;
       solishtirma butun kun bo'yicha jami (kunHisobla). Faqat bugungi kun uchun. */
 async function kunniQaytaOch(agent, sana) {
-  const kun = await kunHisobla(agent, sana);
-  const boshlangan = kun.topshirish.tovar || kun.topshirish.pul;
-  if (!kun.kun_yopish && !boshlangan) return { ozgardi: false, yangiReys: false };   // kun ochiq
-  if (!boshlangan) {
-    await AvtolavkaKunModel.update({ yopish_vaqt: null }, { where: { agent_id: agent.id, sana } });
-    return { ozgardi: true, yangiReys: false };
-  }
-  const [yozuv] = await AvtolavkaKunModel.findOrCreate({ where: { agent_id: agent.id, sana }, defaults: { agent_id: agent.id, sana } });
-  // Soniyagacha qirqiladi: DATETIME millisekundni yaxlitlab keyingi soniyaga o'tkazib yuborishi mumkin,
-  // shunda darhol ketidan qilingan qabul "ochilishdan oldin" bo'lib qolardi
-  await yozuv.update({ ochish_vaqt: new Date(Math.floor(Date.now() / 1000) * 1000), ochish_soni: (+yozuv.ochish_soni || 0) + 1 });
-  return { ozgardi: true, yangiReys: true, soni: (+yozuv.ochish_soni || 0) };
+  // Agent qatori qulflanadi — kunni yopish/qayta ochish/qabul shu agent bo'yicha navbatma-navbat;
+  // ikki marta bosilgan "Yangi reys" ochish_soni'ni ikki marta oshirmaydi (ikkinchisi yangi holatni ko'radi).
+  return sequelize.transaction(async (t) => {
+    await qulflabOl(AgentModel, agent.id, t);
+    const kun = await kunHisobla(agent, sana, { transaction: t });
+    const boshlangan = kun.topshirish.tovar || kun.topshirish.pul;
+    if (!kun.kun_yopish && !boshlangan) return { ozgardi: false, yangiReys: false };   // kun ochiq
+    if (!boshlangan) {
+      await AvtolavkaKunModel.update({ yopish_vaqt: null }, { where: { agent_id: agent.id, sana }, transaction: t });
+      return { ozgardi: true, yangiReys: false };
+    }
+    const [yozuv] = await AvtolavkaKunModel.findOrCreate({ where: { agent_id: agent.id, sana }, defaults: { agent_id: agent.id, sana }, transaction: t });
+    // Soniyagacha qirqiladi: DATETIME millisekundni yaxlitlab keyingi soniyaga o'tkazib yuborishi mumkin,
+    // shunda darhol ketidan qilingan qabul "ochilishdan oldin" bo'lib qolardi
+    await yozuv.update({ ochish_vaqt: new Date(Math.floor(Date.now() / 1000) * 1000), ochish_soni: (+yozuv.ochish_soni || 0) + 1 }, { transaction: t });
+    return { ozgardi: true, yangiReys: true, soni: (+yozuv.ochish_soni || 0) };
+  });
 }
 
 /* ── Kun hikoyasi: yuklash → tashriflar/sotuvlar/to'lovlar → qabul → kassa ── */
 async function kunVoqealari(agent, sana) {
   const ombor = agentOmbori(agent.fullname);
   const q = (sql) => sequelize.query(sql, {
-    replacements: { agent_id: agent.id, sana, ombor }, type: sequelize.QueryTypes.SELECT });
+    replacements: { agent_id: agent.id, sana, ombor, tz: tzOffset() }, type: sequelize.QueryTypes.SELECT });
   const [hujjatlar, sotuvlar, tashriflar, tolovlar, inkas, sorovlar, kunYopish] = await Promise.all([
     q(`SELECT id, raqam, tur, jami_dona, jami_summa, farq_dona, brak_dona, tasdiqlagan_sana vaqt, agent_qabul_vaqt
        FROM avtolavka_hujjat WHERE agent_id = :agent_id AND sana = :sana AND holat = 'tasdiqlangan'`),
     q(`SELECT a.id, a.raqam, a.mijoz_nomi, a.jami_summa, a.tolov_turi, a.tolangan_summa, a.yetkazilgan_sana vaqt, a.masofa_m,
               (SELECT COALESCE(SUM(jami_dona),0) FROM ariza_qator WHERE ariza_id = a.id) dona
        FROM ariza a WHERE a.agent_id = :agent_id AND a.deletedAt IS NULL AND a.turi = 'sotish'
-         AND a.holat = 'yetkazildi' AND a.ombor = :ombor AND DATE(a.yetkazilgan_sana) = :sana`),
+         AND a.holat = 'yetkazildi' AND a.ombor = :ombor AND ${lokalKun('a.yetkazilgan_sana')} = :sana`),
     q(`SELECT t.id, t.mijoz_nomi, t.natija, t.checkin_vaqt vaqt, t.checkout_vaqt,
               (SELECT s.sabab_nomi FROM sotmaslik s WHERE s.agent_id = t.agent_id AND s.mijoz_id = t.mijoz_id
-                 AND DATE(s.sana) = t.sana LIMIT 1) sabab
+                 AND ${lokalKun('s.sana')} = t.sana LIMIT 1) sabab
        FROM tashrif t WHERE t.agent_id = :agent_id AND t.sana = :sana AND t.natija <> 'savdo'`),
     q(`SELECT id, mijoz_nomi, summa, sana vaqt FROM kassa
-       WHERE tur = 'kirim' AND tolov_usul = 'naqt' AND user_id = :agent_id AND manba_tur = 'mijoz' AND DATE(sana) = :sana`),
+       WHERE tur = 'kirim' AND tolov_usul = 'naqt' AND user_id = :agent_id AND manba_tur = 'mijoz' AND ${lokalKun('sana')} = :sana`),
     q(`SELECT topshirilgan_summa, yigilgan_summa, holat, COALESCE(tasdiqlagan_sana, updatedAt) vaqt
        FROM inkassatsiya WHERE agent_id = :agent_id AND sana = :sana LIMIT 1`),
     q(`SELECT raqam, jami_dona, jami_summa, holat, rad_sababi, createdAt vaqt FROM avtolavka_hujjat
@@ -417,14 +447,18 @@ async function kunVoqealari(agent, sana) {
    blokka yaxlitlanadi, asosiy ombordagi qoldiq bilan cheklanadi. */
 async function tavsiyaHisobla(agent) {
   const ombor = agentOmbori(agent.fullname);
+  // Chegaralar mahalliy kun bo'yicha (CURDATE() MySQL sessiya zonasiga bog'liq — UTC bo'lishi mumkin)
+  const bugunKun = bugun();
+  const dan = new Date(`${bugunKun}T00:00:00`); dan.setDate(dan.getDate() - 14);
+  const danKun = kunKey(dan);
   const [sotuvlar, [ishKun], oxirgi] = await Promise.all([
     sequelize.query(`SELECT tovar_id, SUM(-donada) sotildi FROM tovar_register
-       WHERE ombor = :ombor AND manba_tur = 'sotuv' AND sana >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) AND DATE(sana) < CURDATE()
-       GROUP BY tovar_id`, { replacements: { ombor }, type: sequelize.QueryTypes.SELECT }),
+       WHERE ombor = :ombor AND manba_tur = 'sotuv' AND sana >= :danVaqt AND sana < :bugunVaqt
+       GROUP BY tovar_id`, { replacements: { ombor, danVaqt: dan, bugunVaqt: new Date(`${bugunKun}T00:00:00`) }, type: sequelize.QueryTypes.SELECT }),
     sequelize.query(`SELECT COUNT(DISTINCT sana) n FROM avtolavka_hujjat
        WHERE agent_id = :id AND tur = 'yuklash' AND holat = 'tasdiqlangan'
-         AND sana >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) AND sana < CURDATE()`,
-      { replacements: { id: agent.id }, type: sequelize.QueryTypes.SELECT }),
+         AND sana >= :danKun AND sana < :bugunKun`,
+      { replacements: { id: agent.id, danKun, bugunKun }, type: sequelize.QueryTypes.SELECT }),
     AvtolavkaHujjatModel.findOne({
       where: { agent_id: agent.id, tur: 'yuklash', holat: 'tasdiqlangan' },
       include: INCLUDE, order: [['sana', 'DESC'], ['id', 'DESC']],
@@ -466,7 +500,7 @@ async function tavsiyaHisobla(agent) {
 }
 
 module.exports = {
-  BRAK_OMBOR, PREFIKS, INCLUDE, EPS, bugun, sanaMi, n,
+  BRAK_OMBOR, PREFIKS, INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
   raqamYarat, avtolavkaAgent, narxMap, omborQoldiq, yuklashQoldigi, regYozuv, qatorlarniTayyorla,
   yuklashniTasdiqla, kunHisobla, kunniQaytaOch, kunVoqealari, tavsiyaHisobla, SOTUV_RADIUS_M,
 };

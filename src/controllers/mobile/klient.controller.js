@@ -3,7 +3,7 @@ const { MijozModel } = require('../../models/mijoz.model');
 const TerritoriyaModel = require('../../models/territoriya.model');
 const { SotmaslikModel, AgentLocationModel } = require('../../models/hisobot.model');
 const HttpException = require('../../utils/HttpException.utils');
-const { ok, fail, requireRole, WEEK_KEYS, PAGE_SIZE, mobilKalit, mobilVaqt, sababNomi } = require('./shared');
+const { ok, fail, requireRole, WEEK_KEYS, PAGE_SIZE, mobilKalit, mobilVaqt, sababNomi, mijozRuxsat, takrorXato } = require('./shared');
 const sequelize = require('../../db/db-sequelize');
 const MijozReytingModel = require('../../models/mijozReyting.model');
 const { reytingYoz, reytingKorinish } = require('../../utils/reyting.utils');
@@ -127,11 +127,13 @@ class MobileKlientController {
   };
 
   // 4.4 info/ → ClientInfoModel
+  // Faqat xodim ishlaydigan mijoz (shared.mijozRuxsat — getKlient bilan bir xil qoida).
   info = async (req, res, next) => {
     const m = await MijozModel.findByPk(req.query.client_id, {
       include: [{ model: TerritoriyaModel, as: 'territoriya', attributes: ['nomi'] }],
     });
     if (!m) throw new HttpException(404, req.mf('Not found'));
+    if (!await mijozRuxsat(req, m)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
     ok(res, {
       name: m.nomi || '',
       phone: m.telefon || '',
@@ -167,6 +169,7 @@ class MobileKlientController {
   updateClient = async (req, res, next) => {
     const klient = await MijozModel.findByPk(req.query.klientId);
     if (!klient) throw new HttpException(404, req.mf('Not found'));
+    if (!await mijozRuxsat(req, klient)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
     await klient.update(mapKlientBody(req.query));
     ok(res, { klientId: String(klient.id) }, 'Yangilandi');
   };
@@ -175,38 +178,53 @@ class MobileKlientController {
   saveLocation = async (req, res, next) => {
     const { klientId, lat, long } = req.body;
     if (klientId && lat != null && long != null) {
-      await MijozModel.update({ lat, lng: long }, { where: { id: klientId } });
+      const klient = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id'] });
+      if (!klient) throw new HttpException(404, req.mf('Not found'));
+      if (!await mijozRuxsat(req, klient)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
+      await MijozModel.update({ lat, lng: long }, { where: { id: klient.id } });
     }
     ok(res, { klientId: String(klientId || '') });
   };
 
   // 4.8 clientNotSell → sotmaslik (rad etish) sababi + mijoz reytingi (utils/reyting.utils.js).
   // mobilId (yangi ilova) — oflayn navbat qayta yuborsa ikkinchi marta yozilmaydi.
+  // Mijoz topilmasa yozuv yaratilmaydi. Takror kalit mijoz_reyting.mobil_id (UNIQUE) da saqlanadi
+  // (sotmaslik jadvalida mobil_id ustuni yo'q) — parallel takror ham bitta yozuv qoldiradi.
   clientNotSell = async (req, res, next) => {
     const { clientId, reasonId, date } = req.query;
     const agent = req.currentAgent || {};
     const mobilId = mobilKalit(req.query.mobilId);
-    if (mobilId && await MijozReytingModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'] })) {
-      return ok(res, { date: date || '', takror: true }, 'Allaqachon saqlangan');
-    }
+    const takrorJavob = () => ok(res, { date: date || '', takror: true }, 'Allaqachon saqlangan');
+    const takrorMi = async () => !!(mobilId && await MijozReytingModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'] }));
+    if (await takrorMi()) return takrorJavob();
     const mijoz = clientId ? await MijozModel.findByPk(clientId) : null;
-    const sana = req.query.vaqt ? mobilVaqt(req.query.vaqt) : (date ? new Date(String(date).replace(/\./g, '-')) : new Date());
-    const natija = await sequelize.transaction(async (t) => {
-      const s = await SotmaslikModel.create({
-        agent_id:   agent.id || null,
-        agent_nomi: agent.fullname || null,
-        mijoz_id:   clientId || null,
-        mijoz_nomi: mijoz ? mijoz.nomi : null,
-        sabab_id:   reasonId || null,
-        sabab_nomi: sababNomi(reasonId),
-        sana,
-      }, { transaction: t });
-      if (!mijoz) return null;
-      return reytingYoz(mijoz.id, {
-        tur: 'rad_etildi', sabab_id: reasonId ? String(reasonId) : null, sabab: sababNomi(reasonId) || 'Sabab ko\'rsatilmagan',
-        manba_tur: 'sotmaslik', manba_id: s.id, xodim: xodimOl(req), mobil_id: mobilId, sana,
-      }, t);
-    });
+    if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
+    let sana = req.query.vaqt ? mobilVaqt(req.query.vaqt) : (date ? new Date(String(date).replace(/\./g, '-')) : new Date());
+    if (isNaN(sana.getTime())) sana = new Date();
+    let natija;
+    try {
+      natija = await sequelize.transaction(async (t) => {
+        const s = await SotmaslikModel.create({
+          agent_id:   agent.id || null,
+          agent_nomi: agent.fullname || null,
+          mijoz_id:   mijoz.id,
+          mijoz_nomi: mijoz.nomi,
+          sabab_id:   reasonId || null,
+          sabab_nomi: sababNomi(reasonId),
+          sana,
+        }, { transaction: t });
+        const r = await reytingYoz(mijoz.id, {
+          tur: 'rad_etildi', sabab_id: reasonId ? String(reasonId) : null, sabab: sababNomi(reasonId) || 'Sabab ko\'rsatilmagan',
+          manba_tur: 'sotmaslik', manba_id: s.id, xodim: xodimOl(req), mobil_id: mobilId, sana,
+        }, t);
+        // reytingYoz shu mobilId bilan yozuvni topgan bo'lsa — bu takror: sotmaslik yozuvi ham bekor
+        if (r && r.takror) { const e = new Error('takror'); e.name = 'SequelizeUniqueConstraintError'; throw e; }
+        return r;
+      });
+    } catch (e) {
+      if (takrorXato(e) && await takrorMi()) return takrorJavob();
+      throw e;
+    }
     ok(res, { date: date || '', reyting: natija ? natija.reyting : null, kritik: !!natija?.kritik }, 'Saqlandi');
   };
 

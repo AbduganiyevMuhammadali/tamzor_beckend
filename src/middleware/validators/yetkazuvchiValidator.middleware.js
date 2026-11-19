@@ -19,6 +19,7 @@ exports.yetkazuvchiSchemas = {
     summa:      Joi.number().min(0.01).required(),
     tolov_turi: Joi.string().valid('naqt', 'optom', 'chaka').required(),
     izoh:       Joi.string().max(2000).allow('', null).optional(),
-    sana:       Joi.string().allow('', null).optional(),
+    // Noto'g'ri sana 500 emas, 400 qaytarsin (YYYY-MM-DD yoki ISO vaqt)
+    sana:       Joi.string().isoDate().allow('', null).optional(),
   }),
 };

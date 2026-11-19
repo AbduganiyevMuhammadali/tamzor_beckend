@@ -1,6 +1,7 @@
 const Joi = require('joi');
 
-const create = Joi.object({
+// Default qiymatlarsiz asos — tahrir (PATCH) sxemasi shundan olinadi
+const asos = Joi.object({
   nomi:             Joi.string().min(1).max(150).required(),
   yuridik_nomi:     Joi.string().max(200).allow('', null).optional(),
   telefon:          Joi.string().max(20).allow('', null).optional(),
@@ -11,7 +12,7 @@ const create = Joi.object({
   kategoriya_id:    Joi.number().integer().allow(null).optional(),
   agent_id:         Joi.number().integer().allow(null).optional(),
   sinf:             Joi.string().valid('A','B','C','D').allow(null).optional(),
-  narx_turi:        Joi.string().valid('optom','chakana').default('chakana'),
+  narx_turi:        Joi.string().valid('optom','chakana').optional(),
   inn:              Joi.string().max(20).allow('', null).optional(),
   shartnoma_raqam:  Joi.string().max(50).allow('', null).optional(),
   shartnoma_sana:   Joi.string().isoDate().allow('', null).optional(),
@@ -25,13 +26,20 @@ const create = Joi.object({
   kredit_limit:     Joi.number().min(0).allow(null).optional(),
   tolov_muddati_kun: Joi.number().integer().min(1).allow(null).optional(),
   izoh:             Joi.string().allow('', null).optional(),
-  faol:             Joi.boolean().default(true),
+  faol:             Joi.boolean().optional(),
   // Boshlang'ich qoldiq: manfiy = mijoz qarzdor, musbat = mijoz haqdor (biz qarzdormiz)
   boshlangich_balans: Joi.number().allow(null).optional(),
   boshlangich_sana:   Joi.string().isoDate().allow('', null).optional(),
   boshlangich_izoh:   Joi.string().max(255).allow('', null).optional(),
 });
 
-const update = create.fork(Object.keys(create.describe().keys), f => f.optional());
+// Yangi mijoz: default qiymatlar faqat yaratishda qo'llanadi
+const create = asos.keys({
+  narx_turi: Joi.string().valid('optom','chakana').default('chakana'),
+  faol:      Joi.boolean().default(true),
+});
+
+// Tahrirda default YO'Q: bitta maydonli PATCH narx_turi'ni 'chakana' ga, faol'ni true ga qaytarmaydi
+const update = asos.fork(['nomi'], f => f.optional());
 
 module.exports = { mijozSchemas: { create, update } };

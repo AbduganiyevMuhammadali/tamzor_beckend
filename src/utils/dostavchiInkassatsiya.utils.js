@@ -14,6 +14,7 @@
  */
 const sequelize = require('../db/db-sequelize');
 const { InkassatsiyaModel } = require('../models/inkassatsiya.model');
+const HttpException = require('./HttpException.utils');
 
 const n = (v) => Number(v) || 0;
 
@@ -41,14 +42,22 @@ async function dostavchiTopshirildi(dostavchiId, sana, transaction = null) {
  */
 async function dostavchiTopshir(dostavchi, sana, { summa, jami = false, izoh = null, userId = null } = {}) {
   const s = Number(summa);
-  if (!(s >= 0)) throw new Error("Summa noto'g'ri");
+  if (!Number.isFinite(s) || s < 0) throw new HttpException(400, "Summa noto'g'ri");
   return sequelize.transaction(async (transaction) => {
+    // Dostavchi qatori qulflanadi: shu dostavchi bo'yicha parallel topshirishlar navbatma-navbat
+    // bajariladi — "o'qib-qo'shib-yozish" da summa yo'qolmaydi, kun yozuvi ikki marta ochilmaydi
+    const [d] = await sequelize.query('SELECT id FROM dostavchi WHERE id = :id FOR UPDATE', {
+      replacements: { id: dostavchi.id }, type: sequelize.QueryTypes.SELECT, transaction,
+    });
+    if (!d) throw new HttpException(404, 'Dostavchi topilmadi');
     const yig = await dostavchiYigildi(dostavchi.id, sana, transaction);
-    const [row] = await InkassatsiyaModel.findOrCreate({
+    const [topilgan] = await InkassatsiyaModel.findOrCreate({
       where: { dostavchi_id: dostavchi.id, sana },
       defaults: { agent_id: null, agent_nomi: dostavchi.ism },
       transaction,
     });
+    // Kun yozuvi ham qulflab qayta o'qiladi (eng so'nggi topshirilgan_summa)
+    const row = await InkassatsiyaModel.findByPk(topilgan.id, { transaction, lock: transaction.LOCK.UPDATE });
     const topshirilgan = +((jami ? 0 : n(row.topshirilgan_summa)) + s).toFixed(2);
     const farq = +(yig.summa - topshirilgan).toFixed(2);
     await row.update({

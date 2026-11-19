@@ -27,13 +27,35 @@ const KATEGORIYA = {
   qarz_qaytarildi:   { label: 'Olingan qarz qaytarildi', tur: 'chiqim' },
 };
 
+/* Faqat avtomatik (tizim) yozadigan kategoriyalar — qo'lda kiritib bo'lmaydi:
+ * ular o'z bo'limida yaratiladi va bog'liq hisobni (yetkazuvchi/shaxs/dostavchi balansi,
+ * sotuv) ham to'g'rilaydi. Kassa sahifasidan kiritilsa hisob buziladi. */
+const TIZIM_KATEGORIYA = new Set([
+  'sotuv', 'dostavchik_inkassatsiya', 'yetkazuvchi_tolov', 'ishlab_chiqarish',
+  'qarz_berildi', 'qarz_qaytdi', 'qarz_olindi', 'qarz_qaytarildi',
+]);
+
+/* YYYY-MM-DD (ixtiyoriy vaqt bilan) sanani tekshiradi; noto'g'ri bo'lsa 400 */
+function sanaOl(v, nomi) {
+  if (v === undefined || v === null || v === '') return null;
+  const s = String(v);
+  const d = new Date(s);
+  if (!/^\d{4}-\d{2}-\d{2}/.test(s) || Number.isNaN(d.getTime())) {
+    throw new HttpException(400, `${nomi} sanasi noto'g'ri (YYYY-MM-DD)`);
+  }
+  return d;
+}
+
 function periodRange(period, from_q, to_q) {
   const now = new Date();
   let from = new Date(now.getFullYear(), now.getMonth(), 1);
   let to   = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
   if (from_q || to_q) {
-    from = from_q ? new Date(from_q + 'T00:00:00') : new Date(2000, 0, 1);
-    to   = to_q   ? new Date(to_q   + 'T23:59:59') : now;
+    // Noto'g'ri sana 500 emas, 400 qaytaradi
+    if (from_q) sanaOl(from_q, 'from');
+    if (to_q)   sanaOl(to_q, 'to');
+    from = from_q ? new Date(String(from_q).slice(0, 10) + 'T00:00:00') : new Date(2000, 0, 1);
+    to   = to_q   ? new Date(String(to_q).slice(0, 10)   + 'T23:59:59') : now;
   } else if (period === 'today') {
     from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     to   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
@@ -115,19 +137,34 @@ class KassaController extends BaseController {
     const { tur, kategoriya, summa, tolov_usul, mijoz_id, izoh, sana } = req.body;
     if (!tur || !['kirim','chiqim'].includes(tur)) throw new HttpException(400, 'Tur noto\'g\'ri');
     if (!kategoriya) throw new HttpException(400, 'Kategoriya kerak');
-    if (!summa || Number(summa) <= 0) throw new HttpException(400, 'Summa noto\'g\'ri');
+    if (!summa || !Number.isFinite(Number(summa)) || Number(summa) <= 0) throw new HttpException(400, 'Summa noto\'g\'ri');
+    // Tizim kategoriyalari faqat o'z bo'limidan yoziladi
+    if (TIZIM_KATEGORIYA.has(kategoriya)) {
+      throw new HttpException(400, 'Bu kategoriya avtomatik yoziladi — uni o\'z bo\'limidan kiriting');
+    }
+    // Ma'lum kategoriya bo'lsa, tur unga mos bo'lishi shart (mijoz_tolov — faqat kirim)
+    if (KATEGORIYA[kategoriya]) {
+      if (KATEGORIYA[kategoriya].tur !== tur) throw new HttpException(400, 'Kategoriya va tur mos emas');
+    } else {
+      // Boshqa kod — faqat foydalanuvchi xarajat toifasi (chiqim) bo'lishi mumkin
+      const turlar = await xarajatTurlari();
+      if (!turlar.has(kategoriya)) throw new HttpException(400, 'Kategoriya noto\'g\'ri');
+      if (tur !== 'chiqim') throw new HttpException(400, 'Kategoriya va tur mos emas');
+    }
+    if (kategoriya === 'mijoz_tolov' && !mijoz_id) throw new HttpException(400, 'Mijoz tanlanmagan');
+    const sanaQiymat = sanaOl(sana, 'sana');
 
     const t = await sequelize.transaction();
     try {
       let mijoz_nomi = null, eskiBalans = null;
       // Mijoz to'lovi bo'lsa — balansni oshiramiz (qarz kamayadi)
       if (kategoriya === 'mijoz_tolov' && mijoz_id) {
-        const m = await MijozModel.findByPk(mijoz_id, { transaction: t });
-        if (m) {
-          mijoz_nomi = m.nomi;
-          eskiBalans = parseFloat(m.balans) || 0;
-          await m.increment('balans', { by: Number(summa), transaction: t });
-        }
+        // Mijoz qatori qulflanadi: parallel to'lovlar eskiBalans/reytingni noto'g'ri hisoblamasin
+        const m = await MijozModel.findByPk(mijoz_id, { transaction: t, lock: t.LOCK.UPDATE });
+        if (!m) throw new HttpException(404, 'Mijoz topilmadi');
+        mijoz_nomi = m.nomi;
+        eskiBalans = parseFloat(m.balans) || 0;
+        await m.increment('balans', { by: Number(summa), transaction: t });
       }
 
       const rec = await KassaModel.create({
@@ -140,7 +177,7 @@ class KassaController extends BaseController {
         mijoz_id:   mijoz_id || null,
         mijoz_nomi,
         izoh:       izoh || null,
-        sana:       sana ? new Date(sana) : new Date(),
+        sana:       sanaQiymat || new Date(),
         user_id:    req.currentUser?.id || null,
       }, { transaction: t });
 
@@ -164,16 +201,18 @@ class KassaController extends BaseController {
 
   // ── DELETE /kassa/:id — faqat qo'lda kiritilganlarni o'chirish ──
   delete = async (req, res) => {
-    const rec = await KassaModel.findByPk(req.params.id);
-    if (!rec) throw new HttpException(404, 'Topilmadi');
-    if (rec.manba_tur === 'uchinchi_shaxs') {
-      throw new HttpException(400, "Bu qarz oldi-berdi yozuvi — Moliya → Qarz oldi-berdi bo'limidan o'chiring (shaxs hisobi ham to'g'rilanadi)");
-    }
-    if (!['qol', 'mijoz', 'xarajat'].includes(rec.manba_tur)) {
-      throw new HttpException(400, 'Avtomatik yozuvni o\'chirib bo\'lmaydi (sotuv/prixod)');
-    }
     const t = await sequelize.transaction();
     try {
+      // Yozuv tranzaksiya ichida qulflab o'qiladi: parallel DELETE lar mijoz balansini
+      // bir necha marta kamaytirmasin — ikkinchisi birinchisi commit bo'lgach 404 oladi
+      const rec = await KassaModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!rec) throw new HttpException(404, 'Topilmadi');
+      if (rec.manba_tur === 'uchinchi_shaxs') {
+        throw new HttpException(400, "Bu qarz oldi-berdi yozuvi — Moliya → Qarz oldi-berdi bo'limidan o'chiring (shaxs hisobi ham to'g'rilanadi)");
+      }
+      if (!['qol', 'mijoz', 'xarajat'].includes(rec.manba_tur)) {
+        throw new HttpException(400, 'Avtomatik yozuvni o\'chirib bo\'lmaydi (sotuv/prixod)');
+      }
       // Mijoz to'lovi bo'lsa — balansni qaytaramiz
       if (rec.kategoriya === 'mijoz_tolov' && rec.mijoz_id) {
         await MijozModel.decrement('balans', { by: rec.summa, where: { id: rec.mijoz_id }, transaction: t });

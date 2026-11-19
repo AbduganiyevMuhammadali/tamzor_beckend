@@ -6,6 +6,32 @@ const sequelize = require('../../db/db-sequelize');
 const { turgaKochir } = require('../../utils/omborKochirish.utils');
 const { turkumAniqla, tovarTurkuminiTarqat } = require('../../utils/turkum.utils');
 
+/* Tovar tarixi bor jadvallar (FK yo'q — shuning uchun qo'lda tekshiriladi).
+ * Tarixi bor tovar butunlay o'chirilmaydi: hisobot/qoldiq/hujjatlar unga tayanadi. */
+const TARIX_JADVALLAR = [
+  'tovar_register', 'ariza_qator', 'prixod_qator',
+  'ishlab_chiqarish_qator', 'avtolavka_qator', 'yetkazish_qaytarish',
+];
+
+/** Tarixi bor tovar id lari (Set) */
+async function tarixiBorlar(ids, transaction) {
+  if (!ids.length) return new Set();
+  const sql = TARIX_JADVALLAR
+    .map(j => `SELECT DISTINCT tovar_id FROM \`${j}\` WHERE tovar_id IN (:ids)`)
+    .join(' UNION ');
+  const rows = await sequelize.query(sql, { replacements: { ids }, transaction, type: sequelize.QueryTypes.SELECT });
+  return new Set(rows.map(r => Number(r.tovar_id)));
+}
+
+/** Tarixi bor — soft delete (paranoid), tarixsiz — butunlay o'chiriladi */
+async function tovarlarniOchir(ids, transaction) {
+  const tarixli = await tarixiBorlar(ids, transaction);
+  const yumshoq = ids.filter(id => tarixli.has(id));
+  const qattiq  = ids.filter(id => !tarixli.has(id));
+  if (yumshoq.length) await TovarModel.destroy({ where: { id: { [Op.in]: yumshoq } }, transaction });
+  if (qattiq.length)  await TovarModel.destroy({ where: { id: { [Op.in]: qattiq } }, force: true, transaction });
+}
+
 class TovarController extends BaseController {
 
   getAll = async (req, res) => {
@@ -18,20 +44,23 @@ class TovarController extends BaseController {
     if (faol !== undefined) where.faol = faol === 'true';
     if (['tovar', 'xom_ashyo'].includes(turi)) where.turi = turi;
 
-    const offset = (Number(page) - 1) * Number(limit);
+    // NaN / manfiy / haddan katta qiymatlar cheklanadi
+    const lim = Math.min(1000, Math.max(1, parseInt(limit) || 50));
+    const pg  = Math.max(1, parseInt(page) || 1);
+    const offset = (pg - 1) * lim;
 
     const { count, rows } = await TovarModel.findAndCountAll({
       where,
       order: [['nomi', 'ASC']],
-      limit:  Number(limit),
+      limit:  lim,
       offset,
     });
 
     res.send({
       data:  rows,
       total: count,
-      page:  Number(page),
-      pages: Math.ceil(count / Number(limit)),
+      page:  pg,
+      pages: Math.ceil(count / lim),
     });
   };
 
@@ -137,11 +166,7 @@ class TovarController extends BaseController {
   delete = async (req, res) => {
     const tovar = await TovarModel.findOne({ where: { id: req.params.id } });
     if (!tovar) throw new HttpException(404, req.mf('data not found'));
-    try {
-      await tovar.destroy({ force: true });
-    } catch {
-      await tovar.destroy();
-    }
+    await sequelize.transaction(t => tovarlarniOchir([tovar.id], t));
     res.send({ message: "O'chirildi" });
   };
 
@@ -149,7 +174,9 @@ class TovarController extends BaseController {
     const { ids } = req.body;
     if (!Array.isArray(ids) || ids.length === 0)
       throw new HttpException(400, 'ids majburiy');
-    await TovarModel.destroy({ where: { id: { [Op.in]: ids } }, force: true });
+    const toza = [...new Set(ids.map(Number).filter(n => Number.isInteger(n) && n > 0))];
+    if (!toza.length) throw new HttpException(400, 'ids noto\'g\'ri');
+    await sequelize.transaction(t => tovarlarniOchir(toza, t));
     res.send({ message: `${ids.length} ta tovar o'chirildi` });
   };
 }
