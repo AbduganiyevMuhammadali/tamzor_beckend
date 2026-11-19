@@ -49,6 +49,8 @@ module.exports = async function(app){
           res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox");
           next();
         }, express.static(path.join(__dirname, '../../uploads')));
+        // Maxfiylik siyosati (Play Market / App Store talab qiladi)
+        app.get(['/privacy', '/maxfiylik'], (req, res) => res.sendFile(path.join(__dirname, '../../static/privacy.html')));
         // i18n.setLocale('uz');
         app.use(cookieParser());
         app.use(i18n.init)
