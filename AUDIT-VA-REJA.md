@@ -197,6 +197,20 @@ Barcha endpoint'lar (mobil, web pul/ombor, asosiy ma'lumotlar, hisobotlar) valid
 
 ---
 
+## 5c. Validatsiya kamchiliklari (API-VALIDATSIYA katalogidan, 2026-11-20)
+
+- **Ro'yxat filtrlari:** sana parametrlari tekshiriladi (`src/utils/sana.utils.js`: `kunParam`, `kunOraligi`). Noto'g'ri sana yoki `from > to` → 400. Bu prixod, arizalar, trip-sheet (va `/qaytarish`), avtolavka `/hujjatlar`, mijozlar `/xarita` uchun amal qiladi. DATE ustunlarda kun chegarasi Toshkent kuni bo'yicha olinadi.
+- **Prixod:** `qatorlar` ko'pi bilan 500 ta.
+- **Turkum `kod`:** 30 belgiga kesiladi (ustun `STRING(30)`; avval 80 edi va DB xatosi berardi).
+- **Ishlab chiqarish:** noma'lum `tur` qatori jim tashlab yuborilmaydi → 400.
+- **Fayl yuklash (multer):** hajm yoki son chegarasi → 400 "Fayl hajmi juda katta" (avval 500).
+- **Foydalanuvchi:** band login (o'chirilganlar ham hisobga olinadi) → 400 "Bu login band".
+- **Mijoz:** mavjud bo'lmagan `territoriya_id` / `kategoriya_id` / `agent_id` → 400 (avval FK xatosi, 500).
+- **Mobil `avtolavkaSinxron`:** mashina qatorlarida `countType` (o'lchov birligi).
+- **Ataylab o'zgartirilmadi:** `arizalar` va `agents` PATCH'da `.unknown(false)` (ortiqcha maydon → 400). Bu mass-assignment himoyasi.
+
+---
+
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |
 |---|---|

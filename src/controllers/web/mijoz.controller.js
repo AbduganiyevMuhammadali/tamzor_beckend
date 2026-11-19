@@ -1,4 +1,5 @@
 const { Op } = require('sequelize');
+const { kunOraligi } = require('../../utils/sana.utils');
 const { MijozModel, TerritoriyaModel, MijozKategoriyaModel, AgentModel } = require('../../models/index');
 const { TashrifModel } = require('../../models/marshrut.model');
 const HttpException = require('../../utils/HttpException.utils');
@@ -171,6 +172,7 @@ class MijozController {
   /* POST /mijozlar */
   create = async (req, res) => {
     const body = this.#normalize(req.body);
+    await this.#boglanganlar(body);
     // Yangi mijoz: joriy balans = boshlang'ich qoldiq (manfiy — mijoz qarzdor, musbat — mijoz haqdor)
     if (body.boshlangich_balans !== undefined && body.boshlangich_balans !== null) body.balans = +Number(body.boshlangich_balans).toFixed(2);
     const m = await MijozModel.create(body);
@@ -181,6 +183,7 @@ class MijozController {
   /* PATCH /mijozlar/:id */
   update = async (req, res) => {
     const body = this.#normalize(req.body);
+    await this.#boglanganlar(body);
     const m = await sequelize.transaction(async (t) => {
       // Mijoz qatori tranzaksiya ichida qulflanib o'qiladi: farq shu yangi nusxadan hisoblanadi —
       // ikki marta bosilganda (parallel so'rov) balans ikki marta surilmaydi
@@ -196,6 +199,20 @@ class MijozController {
     const full = await MijozModel.findByPk(m.id, { include: INCLUDE });
     res.send(full);
   };
+
+  /** Hudud, kategoriya va agent id'lari bazada bormi (yo'q id FK xatosi — 500 bermasin) */
+  async #boglanganlar(b) {
+    const tekshir = async (kalit, Model, nom) => {
+      const v = b[kalit];
+      if (v === undefined || v === null || v === '') return;
+      const id = Number(v);
+      if (!Number.isInteger(id) || id <= 0) throw new HttpException(400, `${kalit} noto'g'ri`);
+      if (!await Model.findByPk(id, { attributes: ['id'] })) throw new HttpException(400, `${nom} topilmadi (${kalit}=${id})`);
+    };
+    await tekshir('territoriya_id', TerritoriyaModel, 'Hudud');
+    await tekshir('kategoriya_id', MijozKategoriyaModel, 'Kategoriya');
+    await tekshir('agent_id', AgentModel, 'Agent');
+  }
 
   #normalize(body) {
     // Faqat ruxsat etilgan maydonlar (balans, reyting va h.k. so'rovdan o'zgartirilmaydi)
@@ -261,9 +278,10 @@ class MijozController {
     });
 
     // ── Davr ichida qaysi mijozga tashrif bo'lgan ──
+    const oraliq = kunOraligi({ dan, gacha }, 'dan', 'gacha');
     const sanaSharti = {};
-    if (dan)   sanaSharti[Op.gte] = dan;
-    if (gacha) sanaSharti[Op.lte] = gacha;
+    if (oraliq.from) sanaSharti[Op.gte] = oraliq.from;
+    if (oraliq.to)   sanaSharti[Op.lte] = oraliq.to;
 
     const tashrifWhere = {};
     if (dan || gacha) tashrifWhere.sana = sanaSharti;

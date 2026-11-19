@@ -1,4 +1,5 @@
 const { PrixodModel, PrixodQatorModel } = require('../../models/prixod.model');
+const { kunParam, kunOraligi, kunBoshi, kunOxiri } = require('../../utils/sana.utils');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { YetkazuvchiModel, YetkazuvchiHarakatlarModel } = require('../../models/yetkazuvchi.model');
 const KassaModel = require('../../models/kassa.model');
@@ -78,10 +79,11 @@ class PrixodController extends BaseController {
     const where = {};
     if (holat)     where.holat = holat;
     if (search)    where.yetkazuvchi = { [Op.like]: `%${search}%` };
-    if (date_from || date_to) {
+    const { from, to } = kunOraligi({ date_from, date_to });
+    if (from || to) {
       where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(date_from);
-      if (date_to)   where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
+      if (from) where.sana[Op.gte] = kunBoshi(from);
+      if (to)   where.sana[Op.lte] = kunOxiri(to);
     }
 
     const lim    = Math.min(Math.max(parseInt(limit, 10) || 50, 1), ROYXAT_MAX_LIMIT);

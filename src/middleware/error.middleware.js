@@ -15,6 +15,16 @@ function errorMiddleware(error, req, res, next) {
     }
     // express.json() buzuq JSON — 400
     if (error && error.type === 'entity.parse.failed') status = 400;
+    // Fayl yuklash (multer) xatolari — mijoz xatosi: hajm/son chegarasi, kutilmagan maydon
+    if (error && error.name === 'MulterError') {
+        status = 400;
+        message = {
+            LIMIT_FILE_SIZE: "Fayl hajmi juda katta (chegaradan oshdi)",
+            LIMIT_FILE_COUNT: "Fayllar soni juda ko'p",
+            LIMIT_UNEXPECTED_FILE: "Kutilmagan fayl maydoni",
+        }[error.code] || "Faylni yuklab bo'lmadi";
+        error.message = message;
+    }
 
     console.log(`[Error] ${error}`);
     winston.error(error.message, error);

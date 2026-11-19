@@ -99,15 +99,15 @@ async function mashinaTovarlari(agent) {
   const ids = Object.keys(map).filter(id => map[id].qoldiq > EPS).map(Number);
   const [narx, tovarlar] = await Promise.all([
     narxMap(ids),
-    ids.length ? TovarModel.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id', 'blokdagi_soni', 'turkum'], raw: true }) : [],
+    ids.length ? TovarModel.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id', 'blokdagi_soni', 'turkum', 'olchov_birligi'], raw: true }) : [],
   ]);
   // Turkum — tovar kartasidan (Sozlamalar → Turkumlar); register yozuvidagi eski nom faqat zaxira
-  const blok = {}, tk = {}; tovarlar.forEach(t => { blok[t.id] = Math.max(1, +t.blokdagi_soni || 1); tk[t.id] = t.turkum || ''; });
+  const blok = {}, tk = {}, olchov = {}; tovarlar.forEach(t => { blok[t.id] = Math.max(1, +t.blokdagi_soni || 1); tk[t.id] = t.turkum || ''; olchov[t.id] = t.olchov_birligi || ''; });
   const qatorlar = ids.map(id => {
     const q = +map[id].qoldiq.toFixed(3), nx = narx[id]?.chakana_narx || 0;
     return {
       tovarId: String(id), tovar: map[id].tovar_nomi, turkum: tk[id] || map[id].turkum || '',
-      blokdagiSoni: blok[id] || 1, qoldiq: q, narx: nx, summa: +(q * nx).toFixed(2),
+      blokdagiSoni: blok[id] || 1, countType: olchov[id] || 'dona', qoldiq: q, narx: nx, summa: +(q * nx).toFixed(2),
     };
   }).sort((a, b) => a.tovar.localeCompare(b.tovar));
   return {

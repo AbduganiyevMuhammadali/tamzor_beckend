@@ -13,6 +13,7 @@
  * ikkalasi tannarxda — jami ombor qiymati o'zgarmaydi, tovar faqat joy almashtiradi.
  */
 const { Op } = require('sequelize');
+const { kunParam, kunOraligi, kunBoshi, kunOxiri } = require('../../utils/sana.utils');
 const sequelize = require('../../db/db-sequelize');
 const { AvtolavkaHujjatModel, AvtolavkaQatorModel, AvtolavkaKunModel } = require('../../models/avtolavka.model');
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
@@ -97,10 +98,11 @@ class AvtolavkaController {
     if (tur)      where.tur = tur;
     if (agent_id) where.agent_id = agent_id;
     if (holat)    where.holat = holat;
-    if (date_from || date_to) {
+    const oraliq = kunOraligi({ date_from, date_to });
+    if (oraliq.from || oraliq.to) {
       where.sana = {};
-      if (date_from) where.sana[Op.gte] = date_from;
-      if (date_to)   where.sana[Op.lte] = date_to;
+      if (oraliq.from) where.sana[Op.gte] = oraliq.from;
+      if (oraliq.to)   where.sana[Op.lte] = oraliq.to;
     }
     const rows = await AvtolavkaHujjatModel.findAll({
       where, include: INCLUDE, order: [['sana', 'DESC'], ['id', 'DESC']],

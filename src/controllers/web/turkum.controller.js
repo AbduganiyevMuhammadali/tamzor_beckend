@@ -20,6 +20,8 @@ const { turkumNominiYangila, tovarTurkuminiTarqat, nomBoyicha } = require('../..
 const TOVAR_SONI = literal('(SELECT COUNT(*) FROM tovar t WHERE t.turkum_id = `TurkumModel`.`id` AND t.deletedAt IS NULL)');
 const TOVAR_ATTR = ['id', 'nomi', 'shtrix_kod', 'olchov_birligi', 'faol', 'turi', 'turkum', 'turkum_id'];
 const nomTozala = (v) => String(v ?? '').trim().slice(0, 80);
+/* turkum.kod ustuni STRING(30) */
+const kodTozala = (v) => String(v ?? '').trim().slice(0, 30);
 const idlar = (v) => (Array.isArray(v) ? v : []).map(Number).filter(Boolean);
 
 async function topish(id) {
@@ -72,7 +74,7 @@ class TurkumController {
     await nomBandmi(nomi);
     const max = await TurkumModel.max('tartib');
     const t = await TurkumModel.create({
-      nomi, kod: nomTozala(req.body.kod) || null, izoh: nomTozala(req.body.izoh) || null,
+      nomi, kod: kodTozala(req.body.kod) || null, izoh: nomTozala(req.body.izoh) || null,
       tartib: (Number(max) || 0) + 1, faol: req.body.faol === undefined ? true : !!req.body.faol,
     });
     res.status(201).send({ ...t.toJSON(), tovar_soni: 0 });
@@ -89,7 +91,7 @@ class TurkumController {
         await turkumNominiYangila(t, nomi, tr);   // tovar + hujjat qatorlari
         t.nomi = nomi;
       }
-      if (req.body.kod !== undefined)  t.kod  = nomTozala(req.body.kod) || null;
+      if (req.body.kod !== undefined)  t.kod  = kodTozala(req.body.kod) || null;
       if (req.body.izoh !== undefined) t.izoh = nomTozala(req.body.izoh) || null;
       if (req.body.faol !== undefined) t.faol = !!req.body.faol;
       if (req.body.tartib !== undefined) t.tartib = Number(req.body.tartib) || 0;

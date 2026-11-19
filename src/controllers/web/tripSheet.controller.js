@@ -1,4 +1,5 @@
 const { Op } = require('sequelize');
+const { kunParam, kunOraligi, kunBoshi, kunOxiri } = require('../../utils/sana.utils');
 const { TripSheetModel, YetkazishQaytarishModel } = require('../../models/tripSheet.model');
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
 const { MijozModel } = require('../../models/mijoz.model');
@@ -77,11 +78,13 @@ class TripSheetController {
     const { dostavchi_id, sana, date_from, date_to } = req.query;
     const where = {};
     if (dostavchi_id) where.dostavchi_id = dostavchi_id;
-    if (sana) where.sana = sana;
-    else if (date_from || date_to) {
+    const kun = kunParam(sana, 'sana');
+    const oraliq = kunOraligi({ date_from, date_to });
+    if (kun) where.sana = kun;
+    else if (oraliq.from || oraliq.to) {
       where.sana = {};
-      if (date_from) where.sana[Op.gte] = date_from;
-      if (date_to) where.sana[Op.lte] = date_to;
+      if (oraliq.from) where.sana[Op.gte] = oraliq.from;
+      if (oraliq.to) where.sana[Op.lte] = oraliq.to;
     }
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || ROYXAT_LIMIT, 1), ROYXAT_LIMIT);
     const trips = await TripSheetModel.findAll({ where, order: [['sana', 'DESC'], ['id', 'DESC']], limit });
@@ -213,10 +216,11 @@ class TripSheetController {
     const where = {};
     if (tur) where.tur = tur;
     if (dostavchi_id) where.dostavchi_id = dostavchi_id;
-    if (date_from || date_to) {
+    const oraliq = kunOraligi({ date_from, date_to });
+    if (oraliq.from || oraliq.to) {
       where.sana = {};
-      if (date_from) where.sana[Op.gte] = new Date(date_from);
-      if (date_to) where.sana[Op.lte] = new Date(date_to + 'T23:59:59');
+      if (oraliq.from) where.sana[Op.gte] = kunBoshi(oraliq.from);
+      if (oraliq.to) where.sana[Op.lte] = kunOxiri(oraliq.to);
     }
     const rows = await YetkazishQaytarishModel.findAll({ where, order: [['sana', 'DESC']], limit: 300 });
     res.send(rows);

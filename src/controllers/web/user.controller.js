@@ -49,6 +49,17 @@ class UserController extends BaseController {
         res.send(req.currentUser);
     };
 
+    /** Login (username) boshqa foydalanuvchida bormi — o'chirilganlar ham hisobga olinadi (tiklansa to'qnashmasin) */
+    async #loginBandmi(username, joriyId = null) {
+        if (!username) return;
+        const { Op } = require('sequelize');
+        const bor = await UserModel.findOne({
+            where: { username: String(username).trim(), ...(joriyId ? { id: { [Op.ne]: joriyId } } : {}) },
+            paranoid: false, attributes: ['id'],
+        });
+        if (bor) throw new HttpException(400, 'Bu login band — boshqa login tanlang');
+    }
+
     create = async (req, res, next) => {
         this.checkValidation(req);
 
@@ -60,6 +71,7 @@ class UserController extends BaseController {
             role,
             perms
         } = req.body;
+        await this.#loginBandmi(username);
 
         const model = await UserModel.create({
             username,
@@ -100,6 +112,7 @@ class UserController extends BaseController {
             throw new HttpException(404, req.mf('data not found'));
         }
 
+        if (username !== undefined && username !== model.username) await this.#loginBandmi(username, model.id);
         model.username = username;
         model.fullname = fullname;
         if (password) model.password = password;

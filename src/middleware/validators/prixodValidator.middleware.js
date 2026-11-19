@@ -48,7 +48,7 @@ exports.prixodSchemas = {
     ombor:             Joi.string().max(80).allow('', null).optional(),
     izoh:              Joi.string().max(2000).allow('', null).optional(),
     qoshimcha_xarajat: Joi.number().min(0).default(0),
-    qatorlar:          Joi.array().items(qatorSchema).min(0).default([]),
+    qatorlar:          Joi.array().items(qatorSchema).min(0).max(500).default([]),
   }),
   update: Joi.object({
     sana:              sanaSchema.optional(),
@@ -59,11 +59,11 @@ exports.prixodSchemas = {
     ombor:             Joi.string().max(80).allow('', null).optional(),
     izoh:              Joi.string().max(2000).allow('', null).optional(),
     qoshimcha_xarajat: Joi.number().min(0).optional(),
-    qatorlar:          Joi.array().items(qatorSchema).optional(),
+    qatorlar:          Joi.array().items(qatorSchema).max(500).optional(),
   }),
   // Faqat narx tuzatish (tasdiqlangan hujjatda ham) — miqdor yuborilmaydi
   narxlar: Joi.object({
-    qatorlar: Joi.array().items(Joi.object({
+    qatorlar: Joi.array().max(500).items(Joi.object({
       id:         Joi.number().integer().required(),
       narx:       Joi.number().min(0).allow(null).optional(),
       narx_usd:   Joi.number().min(0).allow(null).optional(),

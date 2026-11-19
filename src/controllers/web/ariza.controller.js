@@ -1,4 +1,5 @@
 const { Op, fn, col } = require('sequelize');
+const { kunParam, kunOraligi, kunBoshi, kunOxiri } = require('../../utils/sana.utils');
 const sequelize        = require('../../db/db-sequelize');
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
 const { MijozModel }   = require('../../models/mijoz.model');
@@ -208,10 +209,11 @@ class ArizaController {
         { agent_nomi: { [Op.like]: `%${search}%` } },
       ];
     }
-    if (date_from || date_to) {
+    const oraliq = kunOraligi({ date_from, date_to });
+    if (oraliq.from || oraliq.to) {
       where.createdAt = {};
-      if (date_from) where.createdAt[Op.gte] = new Date(date_from);
-      if (date_to)   where.createdAt[Op.lte] = new Date(date_to + 'T23:59:59');
+      if (oraliq.from) where.createdAt[Op.gte] = kunBoshi(oraliq.from);
+      if (oraliq.to)   where.createdAt[Op.lte] = kunOxiri(oraliq.to);
     }
     // Yetkazish sanasi bo'yicha filtr — Buyurtmalar sahifasi shu bilan ishlaydi.
     // ochiq=true (Buyurtmalar "bugun"): o'sha kun + sanasidan qat'i nazar hali yetkazilmagan

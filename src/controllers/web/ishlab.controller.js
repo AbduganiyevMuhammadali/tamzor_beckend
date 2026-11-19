@@ -60,7 +60,11 @@ async function topHujjat(id, t) {
 
 /* Kelgan qatorlarni tekshirish: tovar bor, tur to'g'ri, miqdor manfiy emas */
 async function qatorlarniOl(royxat, { qaysi = TURLAR, t } = {}) {
-  const kirgan = (Array.isArray(royxat) ? royxat : []).filter(q => qaysi.includes(q.tur));
+  const hammasi = Array.isArray(royxat) ? royxat : [];
+  // Noma'lum tur jim tashlab yuborilmasin — xato (qaysi'dan tashqari, lekin ma'lum turlar — qisman tahrir uchun o'tkaziladi)
+  const notogri = hammasi.findIndex(q => !q || !TURLAR.includes(q.tur));
+  if (notogri >= 0) throw new HttpException(400, `${notogri + 1}-qator: tur noto'g'ri (${TURLAR.join(', ')})`);
+  const kirgan = hammasi.filter(q => qaysi.includes(q.tur));
   const ids = [...new Set(kirgan.map(q => Number(q.tovar_id)).filter(Boolean))];
   const tovarlar = ids.length ? await TovarModel.findAll({ where: { id: ids }, attributes: ['id', 'nomi', 'turkum', 'olchov_birligi', 'turi'], raw: true, transaction: t }) : [];
   const tm = Object.fromEntries(tovarlar.map(x => [x.id, x]));
