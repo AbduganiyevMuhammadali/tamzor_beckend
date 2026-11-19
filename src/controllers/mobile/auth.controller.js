@@ -69,6 +69,14 @@ class MobileAuthController extends BaseController {
       throw new HttpException(400, req.mf('Incorrect login or password!'));
     }
 
+    // Tekshiruv (App Store / Play Market) akkaunti alohida demo serverda yashaydi —
+    // ishchi bazaga tegmaydi. Ilova javobdagi demoServer ga ulanib, o'sha yerda qayta kiradi.
+    const demoLogin = String(process.env.DEMO_LOGIN || '').trim();
+    const demoServer = String(process.env.DEMO_SERVER || '').trim();
+    if (demoLogin && demoServer && String(login).trim().toLowerCase() === demoLogin.toLowerCase()) {
+      return ok(res, { demoServer });
+    }
+
     // Avval agent, topilmasa dostavchik
     let user = await AgentModel.findOne({ where: { login } });
     let rol = 'agent';

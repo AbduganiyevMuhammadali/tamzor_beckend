@@ -38,6 +38,8 @@ function asosiyRol(user, rol) {
 function foydalanuvchiRollari(user, rol) {
   const r = [asosiyRol(user, rol)];
   if (rol === 'agent') {
+    // Won Sell jufti bor distributsiya agenti — ikkala savdo rejimi ham
+    if (user && !user.avtolavka && user.juft_agent_id) r.push('avtolavka');
     if (user && user.dual_role) r.push('dostavchik');
     r.push('tasdiq'); // agentga tasdiqlash oynasi (login: isConfirmation = isAgent)
   }

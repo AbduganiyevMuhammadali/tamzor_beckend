@@ -150,6 +150,12 @@ AgentModel.init({
     type: DataTypes.INTEGER,
     allowNull: true,
   },
+  // Won Sell (avtolavka) "jufti": shu xodim bitta login bilan Won Sell rejimida ham ishlaydi
+  // (mobil "x-rejim: avtolavka" — so'rov juft agent nomidan). Bo'sh — oddiy agent.
+  juft_agent_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
   // Avtolavka (ko'chma savdo): agent tovarni mashinaga yuklab yuradi. Uning
   // mobil sotuvi darhol "yetkazildi" bo'ladi va chiqim o'z omboridan tushadi.
   avtolavka: {

@@ -48,6 +48,16 @@ const mobileAuth = () => {
         throw new HttpException(401, req.mf('Authentication failed!'));
       }
 
+      // Bitta login — ikki savdo rejimi: ilova Won Sell rejimida "x-rejim: avtolavka" yuboradi,
+      // agentning Won Sell jufti bo'lsa so'rov o'sha juft nomidan bajariladi.
+      if (rol === 'agent' && !user.avtolavka && user.juft_agent_id && String(req.headers['x-rejim'] || '') === 'avtolavka') {
+        const juft = await AgentModel.findOne({ where: { id: user.juft_agent_id } });
+        if (juft && juft.faol && juft.avtolavka) {
+          req.asosiyAgent = user;
+          user = juft;
+        }
+      }
+
       // Server sozlamasi (.env MOBIL_ROLLAR): foydalanuvchining asosiy roli yoqilmagan bo'lsa
       // 403 — 401 emas, aks holda ilova uni token xatosi deb logout qilib yuboradi.
       if (!asosiyRolYoqilgan(user, rol)) {
