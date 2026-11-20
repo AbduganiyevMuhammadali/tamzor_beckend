@@ -35,6 +35,7 @@ const { InkassatsiyaModel } = require('../../models/inkassatsiya.model');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const { tzOffset, kunKey } = require('../../utils/tahlil.utils');
+const { agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, topshiruvYarat } = require('../../utils/agentPul.utils');
 const {
   INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
   raqamYarat, narxMap, omborQoldiq, yuklashQoldigi, qatorlarniTayyorla, kunHisobla, kunniQaytaOch, tavsiyaHisobla,
@@ -179,6 +180,7 @@ async function holatHisobla(agent, sana, tayyorMashina = null) {
       sotuvDona: kun.tovar.sotildi.dona,
       sotuvSumma: kun.pul.sotuv_jami,
       naqdSotuv: kun.pul.naqd_sotuv,
+      plastikSotuv: kun.pul.plastik_sotuv,
       qarzgaSotuv: kun.pul.qarzga_sotuv,
       // Agent qo'lidagi naqd: bugun olingan naqd − bugun qaytarishda mijozga berilgan naqd
       // (yangi modelda kassaga topshirish yo'q — inkassatsiyaga bog'liq emas)
@@ -343,7 +345,12 @@ async function agentSavdolari(agent) {
     order: [['yetkazilgan_sana', 'DESC'], ['id', 'DESC']],
     limit: 2000,
   });
+  const ids = rows.map(a => a.id);
+  const plastik = new Map(ids.length ? (await sequelize.query(
+    `SELECT p.ariza_id, p.holat, p.summa, k.nomi kassa FROM plastik_tolov p LEFT JOIN kassalar k ON k.id = p.kassa_id WHERE p.ariza_id IN (:ids)`,
+    { replacements: { ids }, type: sequelize.QueryTypes.SELECT })).map(p => [p.ariza_id, p]) : []);
   return rows.map(a => {
+    const pt = plastik.get(a.id);
     const tov = new Map();
     for (const q of (a.qatorlar || []).slice().sort((x, y) => x.id - y.id)) {
       if (!q.tovar_id) continue;
@@ -355,6 +362,10 @@ async function agentSavdolari(agent) {
       docId: String(a.id), docNumber: a.raqam || String(a.id), sana: a.yetkazilgan_sana || a.createdAt,
       klientId: String(a.mijoz_id || ''), klient: a.mijoz_nomi || '',
       jami: n(a.jami_summa), tolangan: n(a.tolangan_summa),
+      // To'lov holati: plastik — web tasdig'i bo'yicha; naqd to'langan — tasdiqlangan; to'lovsiz (qarz) — null
+      tolovUsuli: pt ? 'plastik' : 'naqd',
+      tolovHolat: pt ? pt.holat : (n(a.tolangan_summa) > 0.005 ? 'tasdiqlangan' : null),
+      ...(pt ? { plastikKassa: pt.kassa || null, plastikSumma: n(pt.summa) } : {}),
       qatorlar: [...tov.values()]
         .map(x => ({ ...x, dona: +x.dona.toFixed(3), summa: +x.summa.toFixed(2), narx: x.dona > EPS ? +(x.summa / x.dona).toFixed(2) : x.narx }))
         .filter(x => x.dona > EPS),
@@ -363,7 +374,7 @@ async function agentSavdolari(agent) {
 }
 
 /* Super agentga biriktirilgan agentning qisqa ko'rsatkichlari (agentlarim) */
-async function agentQisqa(agent, sana, viloyatlar) {
+async function agentQisqa(agent, sana, viloyatlar, pul = null) {
   const [holat, mashina, [qarz]] = await Promise.all([
     holatHisobla(agent, sana),
     mashinaTovarlari(agent),
@@ -378,6 +389,31 @@ async function agentQisqa(agent, sana, viloyatlar) {
     bugun: { sotuvSoni: b.sotuvSoni, sotuvSumma: b.sotuvSumma, naqdSotuv: b.naqdSotuv, qarzgaSotuv: b.qarzgaSotuv, naqdQolda: b.naqdQolda },
     mijozQarzi: +n(qarz && qarz.q).toFixed(2),
     omborDona: mashina.jami.dona, omborSumma: mashina.jami.summa,
+    pul: pul ? { qolda: pul.qolda, kutilmoqdaTopshiruv: pul.kutilmoqda_topshiruv, kutilmoqdaPlastik: pul.kutilmoqda_plastik } : null,
+  };
+}
+
+/* Mobil pul bloki: qo'ldagi naqd (butun davr), kutilayotganlar va oxirgi 30 kun tarixi */
+const PUL_TARIX_KUN = 30;
+async function pulBloki(agent) {
+  const [m, tarix] = await Promise.all([
+    majburiyat(agent.id),
+    agentPulTarix(agent.id, { dan: new Date(Date.now() - PUL_TARIX_KUN * 24 * 3600 * 1000), limit: 500 }),
+  ]);
+  return {
+    qolda: m.qolda,
+    kutilmoqdaTopshiruv: m.kutilmoqda_topshiruv,
+    kutilmoqdaPlastik: m.kutilmoqda_plastik,
+    // Topshirish mumkin bo'lgan summa (qo'ldagi − tasdiq kutilayotgan topshiruvlar)
+    topshirishMumkin: Math.max(0, r2(m.qolda - m.kutilmoqda_topshiruv)),
+    tarix: tarix.map(x => ({
+      id: x.id, sana: x.sana, tur: x.tur, summa: x.summa,
+      ...(x.klient ? { klient: x.klient } : {}),
+      ...(x.kassa ? { kassa: x.kassa } : {}),
+      holat: x.holat,
+      ...(x.sabab ? { sabab: x.sabab } : {}),
+      ...(x.izoh ? { izoh: x.izoh } : {}),
+    })),
   };
 }
 
@@ -662,7 +698,7 @@ class MobileAvtolavkaController {
     const agent = avtoAgent(req, res); if (!agent) return;
     const sana = bugun();
     const mashina = await mashinaTovarlari(agent);
-    const [holat, mijozlar, rejalar, tashriflar, ombor, tavsiya, yuklashlar, brak, savdolar, viloyat] = await Promise.all([
+    const [holat, mijozlar, rejalar, tashriflar, ombor, tavsiya, yuklashlar, brak, savdolar, viloyat, kassalar, pul] = await Promise.all([
       holatHisobla(agent, sana, mashina),
       // 2026-11-21: faqat agentga biriktirilgan mijozlar (o'zi yaratganlari ham — saveKlient agent_id yozadi)
       MijozModel.findAll({ where: { faol: true, agent_id: agent.id }, order: [['nomi', 'ASC']], raw: true }),
@@ -674,6 +710,8 @@ class MobileAvtolavkaController {
       brakTovarlari(agent),
       agentSavdolari(agent),
       agent.territoriya_id ? TerritoriyaModel.findByPk(agent.territoriya_id, { attributes: ['id', 'nomi'], raw: true }) : null,
+      agentPlastikKassalar(agent),
+      pulBloki(agent),
     ]);
 
     const tovarIds = mashina.qatorlar.map(q => Number(q.tovarId));
@@ -694,6 +732,9 @@ class MobileAvtolavkaController {
       mashina: { qatorlar: mashina.qatorlar, jami: mashina.jami },
       brak,
       savdolar,
+      // 2026-11-22: plastik to'lov uchun kassalar (agent viloyatidagi faol plastik kassalar) va agent puli
+      kassalar: kassalar.map(k => ({ id: k.id, nomi: k.nomi })),
+      pul,
       mijozlar: mijozlar.map(m => {
         const balans = n(m.balans);
         const rid = m.kategoriya_id ? narx.katRuyxat[m.kategoriya_id] : null;
@@ -736,7 +777,8 @@ class MobileAvtolavkaController {
       ? (await TerritoriyaModel.findAll({ where: { id: tIds }, attributes: ['id', 'nomi'], raw: true })).map(t => [t.id, t.nomi]) : []);
     const sana = bugun();
     const natija = [];
-    for (const a of agentlar) natija.push(await agentQisqa(a, sana, viloyatlar));   // ketma-ket: pool to'lmasin
+    const pullar = await majburiyatlar(agentlar.map(a => a.id));
+    for (const a of agentlar) natija.push(await agentQisqa(a, sana, viloyatlar, pullar.get(a.id)));   // ketma-ket: pool to'lmasin
     ok(res, natija);
   };
 
@@ -863,7 +905,7 @@ class MobileAvtolavkaController {
               tur: 'chiqim', kategoriya: 'sotuv_qaytarish', summa: kamaydi, tolov_usul: 'naqt',
               manba_tur: 'savdo_qaytarish', manba_id: qaytarish.id, mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi,
               izoh: `${ariza.raqam || ariza.id} — qaytarish, naqd mijozga qaytarildi`.slice(0, 255),
-              sana: vaqt, user_id: agent.id,
+              sana: vaqt, user_id: agent.id, agent_id: agent.id,   // agent qo'lidagi naqd kamayadi (majburiyat)
             }, { transaction: t });
             await qaytarish.update({ kassa_id: kassa.id }, { transaction: t });
           }
@@ -885,6 +927,41 @@ class MobileAvtolavkaController {
     }
     if (natija.takror) return takrorTekshir(natija.takror);
     ok(res, qaytarishJavob(natija.qaytarish), 'Qaytarish saqlandi');
+  };
+
+  // POST pulTopshirish/ { mobilId, summa, izoh, vaqt } — agent qo'lidagi naqdni kassaga topshiradi.
+  // 'kutilmoqda' → web'da naqd kassa tanlanib tasdiqlanadi (majburiyat kamayadi) yoki rad etiladi.
+  // summa ≤ qo'ldagi naqd − tasdiq kutilayotgan topshiruvlar, aks holda 400. mobilId — takror himoyasi.
+  pulTopshirish = async (req, res) => {
+    const agent = avtoAgent(req, res); if (!agent) return;
+    const b = req.body || {};
+    const summa = summaOl(b.summa, { xabar: "Summa noto'g'ri" });
+    if (!(summa > 0)) throw new HttpException(400, "Summa 0 dan katta bo'lishi kerak");
+    const izoh = b.izoh === undefined || b.izoh === null ? null : String(b.izoh).trim().slice(0, 500) || null;
+    const mobilId = mobilKalit(b.mobilId);
+    const vaqt = mobilVaqt(b.vaqt);
+    const { PulTopshiruvModel } = require('../../models/kassalar.model');
+    const javob = (x, takror = false) => ({ topshiruvId: String(x.id), holat: x.holat, summa: n(x.summa), ...(takror ? { takror: true } : {}) });
+    const takrorTekshir = (x) => {
+      if (Number(x.agent_id) !== Number(agent.id)) throw new HttpException(409, 'Bu mobilId boshqa amalga tegishli');
+      return ok(res, javob(x, true), 'Topshiruv allaqachon yuborilgan');
+    };
+    if (mobilId) {
+      const bor = await PulTopshiruvModel.findOne({ where: { mobil_id: mobilId } });
+      if (bor) return takrorTekshir(bor);
+    }
+    let r;
+    try {
+      r = await topshiruvYarat(agent, { summa, izoh, mobilId, vaqt });
+    } catch (e) {
+      if (takrorXato(e) && mobilId) {
+        const bor = await PulTopshiruvModel.findOne({ where: { mobil_id: mobilId } });
+        if (bor) return takrorTekshir(bor);
+      }
+      throw e;
+    }
+    if (r.takror) return takrorTekshir(r.takror);
+    ok(res, javob(r.row), 'Topshiruv yuborildi — kassir tasdiqlashi kutilmoqda');
   };
 
   // GET agentSinxron/ — DISTRIBUTSIYA (pre-sale) agenti uchun oflayn nusxa, bitta so'rovda:

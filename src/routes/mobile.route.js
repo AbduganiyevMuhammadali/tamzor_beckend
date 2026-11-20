@@ -126,6 +126,7 @@ router.get('/avtolavkaHolat',      mobileAuth(), h(c.avtolavkaHolat));
 router.get('/mijozNarxlari',       mobileAuth(), h(c.mijozNarxlari));
 router.get('/avtolavkaSinxron',    mobileAuth(), h(c.avtolavkaSinxron));   // 2026-11-21: agent sinxroni (mijozlar, ombor, brak, savdolar)
 router.post('/savdoQaytarish',     mobileAuth(), h(c.savdoQaytarish));     // sotuvga bog'langan qaytarish
+router.post('/pulTopshirish',      mobileAuth(), h(c.pulTopshirish));      // 2026-11-22: agent naqdni kassaga topshiradi
 router.get('/agentlarim',          mobileAuth(), h(c.agentlarim));         // super agent: biriktirilgan agentlar
 router.get('/agentSinxron',        mobileAuth(), h(c.agentSinxron));   // distributsiya agenti (zakaz) oflayn nusxasi
 router.get('/mashinaQoldiq',       mobileAuth(), h(c.mashinaQoldiq));

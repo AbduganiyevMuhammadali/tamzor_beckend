@@ -215,8 +215,10 @@ async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } 
        FROM avtolavka_hujjat WHERE agent_id = :agent_id AND sana = :sana AND tur = 'qabul' AND holat = 'tasdiqlangan'`),
     q(`SELECT COUNT(*) soni, COALESCE(SUM(a.jami_summa),0) summa,
               COALESCE(SUM(a.masofa_m > :radius),0) uzoq,
-              COALESCE(SUM(CASE WHEN a.tolangan_summa > 0 THEN a.tolangan_summa
+              COALESCE(SUM(CASE WHEN a.tolov_turi = 'plastik' THEN 0
+                                WHEN a.tolangan_summa > 0 THEN a.tolangan_summa
                                 WHEN a.tolov_turi IN ('naqt','naqd') THEN a.jami_summa ELSE 0 END),0) naqd,
+              COALESCE(SUM(CASE WHEN a.tolov_turi = 'plastik' THEN a.tolangan_summa ELSE 0 END),0) plastik,
               COALESCE((SELECT SUM(q.jami_dona) FROM ariza_qator q WHERE q.ariza_id IN
                  (SELECT id FROM ariza WHERE agent_id = :agent_id AND deletedAt IS NULL AND turi = 'sotish'
                     AND holat = 'yetkazildi' AND ombor = :ombor AND ${lokalKun('yetkazilgan_sana')} = :sana)),0) dona
@@ -263,7 +265,8 @@ async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } 
   R.pul = {
     sotuv_jami:    n(sot.summa),
     naqd_sotuv:    n(sot.naqd),
-    qarzga_sotuv:  +(n(sot.summa) - n(sot.naqd)).toFixed(2),
+    plastik_sotuv: n(sot.plastik),   // tasdiqlangan plastik (kutilayotgani qarzga kiradi)
+    qarzga_sotuv:  +(n(sot.summa) - n(sot.naqd) - n(sot.plastik)).toFixed(2),
     naqd_olindi:   naqdOlindi,        // mijozlardan olingan naqd (sotuv + qarz undirish)
     tolov_soni:    +pul.soni,
     kerak:         naqdOlindi,

@@ -125,6 +125,7 @@ module.exports = {
   avtolavkaSinxron: avtolavka.avtolavkaSinxron,
   agentlarim: avtolavka.agentlarim,
   savdoQaytarish: avtolavka.savdoQaytarish,
+  pulTopshirish: avtolavka.pulTopshirish,
   agentSinxron: avtolavka.agentSinxron,
   yuklashTavsiya: avtolavka.yuklashTavsiya,
   yuklashTovarlar: avtolavka.yuklashTovarlar,

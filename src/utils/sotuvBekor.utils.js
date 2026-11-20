@@ -126,6 +126,11 @@ async function yetkazilganSotuvniBekorQil(ariza, { sabab, user, transaction = nu
       if (regs.length) await AgentRegisterModel.destroy({ where: { id: { [Op.in]: regs.map(r => r.id) } }, transaction: t });
     }
 
+    /* 4b. Kutilayotgan plastik to'lovi — avtomatik rad (tasdiqlangan plastik kirimi o'chirilmaydi:
+           pul haqiqatan kartaga tushgan, u mijoz haqiga aylanadi — yuqoridagi qarz hisobida naqd emas) */
+    const { sotuvPlastikRad } = require('./agentPul.utils');
+    await sotuvPlastikRad(ariza.id, user, t);
+
     /* 5. Tashrif natijasi */
     await TashrifModel.update({ natija: 'ochiq', ariza_id: null }, { where: { ariza_id: ariza.id }, transaction: t });
 
