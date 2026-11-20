@@ -180,7 +180,7 @@ Barcha endpoint'lar (mobil, web pul/ombor, asosiy ma'lumotlar, hisobotlar) valid
 - Turkum va agent yozuvlari tranzaksiya ichida.
 - Login: 15 daqiqada 10 ta xato urinishdan keyin 429.
 
-**Ataylab qilinmagan:** `savePayment`, `clientNotSell` va `tolovSurildi` da mijoz egaligi tekshirilmaydi. Ilova agentga barcha mijozlarni ko'rsatadi, `saveSell` ham egalikni tekshirmaydi. Shu sababli tekshiruv qo'yilsa, haqiqiy oflayn to'lovlar rad etilardi.
+**Ataylab qilinmagan:** `savePayment`, `clientNotSell` va `tolovSurildi` da mijoz egaligi tekshirilmaydi. Ilova agentga barcha mijozlarni ko'rsatadi, `saveSell` ham egalikni tekshirmaydi. Shu sababli tekshiruv qo'yilsa, haqiqiy oflayn to'lovlar rad etilardi. *(2026-11-24: `saveSell` endi tekshiradi — §5g; qolganlari o'zgarmadi.)*
 
 **Ma'lum cheklov:** login cheklovi IP+login bo'yicha ishlaydi. Server nginx ortida bo'lsa, `trust proxy` sozlanmagan, shuning uchun amalda faqat login bo'yicha cheklanadi.
 
@@ -223,7 +223,7 @@ Egasining qarori: mobil ilovada faqat **agent** va **super agent**. Batafsil (we
 - **Qaytarish qoidasi:** ariza → qatorlar → tovar → mijoz qulf tartibi; sotuv summasi, qatorlar, `tolangan_summa`, `agent_register` kamayadi; naqd → kassa chiqimi `sotuv_qaytarish` (user_id=agent), qarz → `mijoz.balans += summa`. Qaytarishli sotuvni `sotuvBekor` rad etadi.
 - **Brak:** agent brak ombori `"Agent: <ism> (brak)"` (`ombor.utils agentBrakOmbori/brakOmboriMi`); tahlil va dashboard qoldig'idan chiqarildi.
 - **Sinov (lokal tz_yangi, 2026-11-21):** 55/55 HTTP tekshiruv (rollar, sinxron shakli, sotuv, yaroqli/yaroqsiz qaytarish ikkala to'lov turi bilan, ortiqcha → 400, takror va 3× parallel → 1 yozuv, begona → 403, super agent `agentlarim` va kuzatuv GET/POST/begona) + 14 ta web GET smoke (200).
-- **Ochiq:** web'da qaytarishlar tarixini ko'rish API'si yo'q; `hisobot/inkassatsiya` naqd qaytarishni ayirmaydi; chegirmali sotuvda qaytarish qator summasidan ayiriladi (chegirma proporsional taqsimlanmaydi, jami 0 dan pastga tushmaydi — dostavchik qaytarishi bilan bir xil); `saveSell` mijoz egaligini hali tekshirmaydi (oflayn sabab).
+- **Ochiq:** — (2026-11-24 da yopildi, §5g: qaytarishlar tarixi API'si, `saveSell` mijoz egaligi; chegirmali qaytarish qoidasi egasi tomonidan tasdiqlandi; `hisobot/inkassatsiya` — eski, tegilmaydi).
 
 ---
 
@@ -237,7 +237,7 @@ Batafsil (web uchun) — `FRONTEND-UCHUN.md` 17-bo'lim; validatsiya — `API-VAL
 - **Eski ma'lumot:** eski jurnal yozuvlarida `agent_id`/`kassa_id` NULL — majburiyat migratsiyadan keyingi yozuvlardan sanaladi; eski agent `inkassatsiya` (kunlik) faqat tarix uchun qoladi, yangi yo'l — `pulTopshirish`.
 - **Sotuv bekor (`sotuvBekor`):** kutilayotgan plastik avtomatik rad; tasdiqlangan plastik kirimi o'chirilmaydi (pul kartaga tushgan → mijoz haqi).
 - **Sinov (lokal tz_kassa, 2026-11-22):** 89/89 HTTP tekshiruv (CRUD/validatsiya, viloyat bo'yicha kassalar, plastik qarz to'lovi/sotuv: kutilmoqda → tasdiq/rad/tahrir+audit, 3× parallel tasdiq → 1, takrorlar, aralash to'lov, naqd qaytarish chegarasi, topshiruv: ortiqcha 400, 3× parallel → 1, tasdiq/rad, kassa balansi, kuzatuv) + eski agent testi 55/55, 0 ta 5xx.
-- **Ochiq:** boshlang'ich majburiyat (migratsiyagacha agent qo'lidagi naqd) kiritish yo'li yo'q; naqd qaytarish majburiyatni manfiyga tushirishi mumkin (bloklanmaydi); web `POST /avtolavka/sotuv` hali faqat naqd/qarz; `mijozCheklar` kutilayotgan plastikni ko'rsatmaydi; web amallarida rol tekshiruvi yo'q (6-bo'lim qarori).
+- **Ochiq:** — (2026-11-24 da yopildi, §5g. Boshlang'ich qoldiq kiritish — egasi bekor qildi; manfiy `qolda` — ataylab ruxsat).
 
 ## 5f. Chek rasmi va karta topshiruvi (2026-11-23)
 
@@ -248,14 +248,31 @@ Batafsil — `FRONTEND-UCHUN.md` §18, validatsiya — `API-VALIDATSIYA.md` §3.
 - **Hisob:** karta topshiruvi naqd topshiruv bilan bir xil — tasdiqda majburiyat −summa, kassa balansi (`pul_topshiruv` orqali) +summa, jurnalga yozuv yo'q. Tasdiqda kassa tanlanmaydi (`kassa_id` e'tiborsiz).
 - **Rasm saqlanishi:** rad/bekor/o'chirishda rasm o'chirilmaydi; yetim (ishlatilmagan) yuklangan rasmlarni tozalash yo'q (talab qilinmagan).
 - **Sinov (lokal, 2026-11-23):** yangi `test-chek` 63/63 (yuklash ok/faylsiz/rasm emas/maydon/tokensiz, `..`/boshqa papka/yo'q fayl, savePayment va saveSell chek bilan/siz, multipart fallback, karta: kassasiz/cheksiz/naqd kassa/boshqa viloyat/enum, takror, web ro'yxat/filtr/detail, karta tasdiq → `qolda` −, plastik kassa +, rad — yozuv va rasm qoladi, naqd o'zgarmagan, `/uploads` GET 200); kassalar testi 91/91 (chekRasm qo'shildi), agent testi 55/55.
-- **Ochiq:** `/uploads/kassa` token talab qilmaydi (nom tasodifiy, lekin havola ochiq); web `POST /avtolavka/sotuv` plastik qabul qilmaydi (chek talabi u yerga tegmaydi).
+- **Ochiq:** — (2026-11-24 da yopildi, §5g).
+
+## 5g. Egasi javoblari: fayl auth, web plastik sotuv, ruxsatlar, qaytarishlar tarixi (2026-11-24)
+
+Batafsil — `FRONTEND-UCHUN.md` §19, validatsiya — `API-VALIDATSIYA.md` §3.23. Migratsiya yo'q.
+
+- **Fayllar:** `/uploads/*` (kassa va audit) — faqat tizimga kirganlarga: web Bearer JWT yoki mobil `token` sarlavhasi (`middleware/faylAuth.middleware.js`, `auth()`/`mobileAuth()` qayta ishlatiladi), aks holda 401; `?token=` query qabul qilinmaydi. `cookieParser` + `i18n.init` `/uploads` dan oldinga ko'chirildi (xato xabari uchun `req.mf`). Web faylni blob qilib oladi, **barcha** fayllar havola sifatida ko'rsatiladi (inline rasm yo'q).
+- **Chek turlari:** to'lov cheki (mobil `chekYuklash`, `savePayment` multipart, web `kassalar/chek-yuklash`) — oq ro'yxat: jpeg/png/webp/gif/heic/heif + pdf/doc/docx/xls/xlsx; 10 MB, 1 fayl; kengaytma MIME'dan (`octet-stream` — nom kengaytmasi oq ro'yxatda bo'lsa). `chekRasmOl` regex shu kengaytmalarni talab qiladi. Audit va xarajat cheki — faqat rasm (o'zgarmadi; xarajat `uploadKassa.rasm`).
+- **Ruxsatlar:** `middleware/ruxsat.middleware.js` — `ruxsat(modul, ...amal)`, Admin/Programmer doim, aks holda `user.perms[modul]` (frontend `hasPerm` bilan bir xil), yo'q → 403 `Ruxsat yo'q`. `/api/v1/kassalar`: o'qish — `moliya.view`, kassa CRUD — `moliya.create`, plastik/topshiruv tasdiq-rad-tahrir — `moliya.approve`; `GET /agents/:id/pul` — `moliya.view`; `GET /avtolavka/qaytarishlar*` — `avtolavka.view`. `kassalar/chek-yuklash` — faqat auth. Boshqa routelar o'zgarmadi (6-bo'lim: umumiy rol tekshiruvi hali yo'q).
+- **Web plastik sotuv:** `POST /avtolavka/sotuv` `tolov_usuli:'plastik'` + `kassa_id` (agent viloyati) + `chek_rasm` (yoki multipart `chek`) → `createAriza` orqali mobil `saveSell` bilan aynan bir yo'l (`plastik_tolov` 'kutilmoqda', tasdiq oqimi o'zgarmagan). `sotuv/tayyor` — `plastik_kassalar`. Javobda `tolov_usuli`, `plastik`.
+- **Qaytarishlar tarixi:** `GET /avtolavka/qaytarishlar` (dan/gacha/agent/mijoz/viloyat, sahifa, jami naqd/balansga) va `/:id` (qatorlar, yaroqli/yaroqsiz).
+- **Qaytarish narxi (tekshirildi, o'zgartirilmadi):** summa = sotuv qatorining narxi × miqdor (oxirgi dona — qatorning qolgan summasi, yaxlitlash qolmasin); sotuv chegirmasi taqsimlanmaydi; sotuv jami 0 dan pastga tushmaydi (summa qolgan jamiga qisqaradi).
+- **`saveSell` mijoz egaligi:** `shared.mijozRuxsat` (o'z mijozi, marshrut rejasi, shu agentning avvalgi hujjati) + super agent — biriktirilgan agentlarining mijozlari. Aks holda 403 `Bu mijoz sizga biriktirilmagan`. Takror `mobilId` tekshiruvdan oldin qaytadi. 2026-11-20 da `savePayment` tekshiruvi qaytarilgan edi, chunki o'shanda ilova agentga **barcha** mijozlarni ko'rsatardi (avtolavka istisnosi, 2026-11-21 da olib tashlangan) — oflayn to'lovlar rad etilardi. `savePayment` ga hozir ham qo'yilmadi. `savdoQaytarish` — sotuv agentniki ekanligi tekshiriladi, alohida mijoz tekshiruvi ortiqcha.
+- **`mijozCheklar`:** `tur:'plastik'` yozuvlari (`holat`/`tolovHolat` `kutilmoqda|tasdiqlangan|rad_etildi`, `summa`, `jami`, `kassaNomi`, `kassaId`, `chekRasm`, `radSababi`, `sabab`, `plastikTur`, `savdoId`, `savdoRaqam`, `tasdiqVaqt`, `qatorlar:[]`); plastik sotuv chekida `tolovHolat`, `plastikId`, `sabab`; tasdiqlangan plastik endi `tolov` sifatida takrorlanmaydi, `jami.tolovSumma` uni sanaydi; yangi `jami.kutilmoqdaPlastik`.
+- **Saqlangan qoidalar (egasi tasdiqladi):** topshiruv tasdig'i `qolda` dan oshsa rad; web plastik tahririda viloyat tekshirilmaydi; `qolda` manfiy bo'lishi mumkin; distributsiya zakazi agentga biriktirilmaydi.
+- **Bekor qilindi:** agent boshlang'ich qoldig'i (egasi qarori) — kod va migratsiya yo'q.
+- **Eski inkassatsiya:** `hisobot/inkassatsiya` (kunlik) — legacy, tegilmadi: kunlik topshiruv endi yo'q, agent istalgan vaqtda `pulTopshirish` qiladi. Ochiq masala yopildi.
+- **Sinov (lokal, 2026-11-24):** yangi `test-javoblar` 94/94 (fayl auth: tokensiz/yaroqsiz/query 401, web va mobil 200, `..`, audit; web chek-yuklash rasm/PDF/html/tokensiz; plastik web sotuv: kassasiz/cheksiz/boshqa viloyat/naqd kassa/`..`/qarz/sklad/enum, JSON va multipart, takror, tasdiq; ruxsatlar: ruxsatsiz/view/create/approve foydalanuvchilar bilan har amal; topshiruv ortiqcha → 400, manfiy `qolda`; chegirmali qaytarish narxi va 0 chegarasi; saveSell begona/o'z/marshrut/super agent/o'tkazilgan mijoz, savePayment tekshiruvsiz; qaytarishlar tarixi filtr/sahifa/detail/ruxsat; mijozCheklar plastik), `test-chek` 72/72 (PDF/xlsx/octet-stream qabul, html/exe/svg rad, `/uploads` auth), `test-kassa` 91/91, `test-agent` 55/55; 0 ta 5xx.
 
 ---
 
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |
 |---|---|
-| **Rol va `perms` server tomonda tekshirilmaydi.** Har qanday User kassani o'chira oladi, prixodni tasdiqlaydi va bekor qiladi, narxni o'zgartiradi | Egasi "hozircha tegmaslik" deb qaror qildi (2026-11-18). `perms` kalitlari formati faqat frontendda ma'lum |
+| **Rol va `perms` server tomonda tekshirilmaydi** (2026-11-24 dan istisno: `/kassalar`, `/agents/:id/pul`, `/avtolavka/qaytarishlar` — §5g). Har qanday User kassa jurnalini o'chira oladi, prixodni tasdiqlaydi va bekor qiladi, narxni o'zgartiradi | Egasi "hozircha tegmaslik" deb qaror qildi (2026-11-18). `perms` kalitlari formati faqat frontendda ma'lum |
 | Electron 12 (eskirgan, Chromium CVE'lari bor) | Katta yangilanish, alohida ish talab qiladi |
 | `webpack` `.env.pack` dagi sirlarni (`SECRET_JWT`, DB paroli) Electron paketiga joylaydi | Paketlash arxitekturasiga oid masala |
 | Mobil `LoadConfig` javobi `mobile_password` qiymatini auth'siz qaytaradi | APK bilan moslik |
