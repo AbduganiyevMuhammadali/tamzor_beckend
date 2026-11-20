@@ -28,7 +28,10 @@ const asos = Joi.object({
   radius_km:         Joi.number().min(0).max(1000).allow(null).optional(),
   izoh:              Joi.string().allow('', null).optional(),
   faol:              Joi.boolean().optional(),
-  avtolavka:         Joi.boolean().optional(),
+  avtolavka:         Joi.boolean().optional(),   // 2026-11-21 dan e'tiborsiz: hamma agent o'z omboridan sotadi
+  // Super agent bayrog'i va biriktirish (agent.controller superAgentTekshir — qoidalar)
+  super_agent:       Joi.boolean().optional(),
+  super_agent_id:    Joi.number().integer().positive().allow(null).optional(),
   // Mobil ilova kirishi (login bo'sh — agent ilovaga kirmaydi; parol bo'sh — o'zgarmaydi)
   login:             Joi.string().trim().max(50).allow('', null).optional(),
   parol:             Joi.string().min(4).max(100).allow('', null).optional()

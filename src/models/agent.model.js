@@ -158,10 +158,23 @@ AgentModel.init({
   },
   // Avtolavka (ko'chma savdo): agent tovarni mashinaga yuklab yuradi. Uning
   // mobil sotuvi darhol "yetkazildi" bo'ladi va chiqim o'z omboridan tushadi.
+  // 2026-11-21 dan HAMMA agent shu rejimda (migrations/20261121000001): o'z omboridan sotadi.
   avtolavka: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true,
+    allowNull: false,
+  },
+  // Super agent: o'zi ham agent (ombori, mijozlari, savdosi bor) + biriktirilgan agentlarni
+  // mobil ilovada faqat KO'RADI (x-kuzat-agent sarlavhasi, mobileAuth)
+  super_agent: {
     type: DataTypes.BOOLEAN,
     defaultValue: false,
     allowNull: false,
+  },
+  // Shu agent biriktirilgan super agent (agent.id, super_agent = true). Web panelda belgilanadi.
+  super_agent_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
   },
 }, {
   sequelize,
@@ -173,5 +186,7 @@ AgentModel.init({
 
 /* ── Association — faqat TerritoriyaModel (circular yo'q) ── */
 AgentModel.belongsTo(TerritoriyaModel, { foreignKey: 'territoriya_id', as: 'territoriya' });
+/* Super agent (o'z jadvali) — web ro'yxatda super agent nomi uchun */
+AgentModel.belongsTo(AgentModel, { foreignKey: 'super_agent_id', as: 'superAgent', constraints: false });
 
 module.exports = AgentModel;
