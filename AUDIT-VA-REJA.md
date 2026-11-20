@@ -239,6 +239,17 @@ Batafsil (web uchun) — `FRONTEND-UCHUN.md` 17-bo'lim; validatsiya — `API-VAL
 - **Sinov (lokal tz_kassa, 2026-11-22):** 89/89 HTTP tekshiruv (CRUD/validatsiya, viloyat bo'yicha kassalar, plastik qarz to'lovi/sotuv: kutilmoqda → tasdiq/rad/tahrir+audit, 3× parallel tasdiq → 1, takrorlar, aralash to'lov, naqd qaytarish chegarasi, topshiruv: ortiqcha 400, 3× parallel → 1, tasdiq/rad, kassa balansi, kuzatuv) + eski agent testi 55/55, 0 ta 5xx.
 - **Ochiq:** boshlang'ich majburiyat (migratsiyagacha agent qo'lidagi naqd) kiritish yo'li yo'q; naqd qaytarish majburiyatni manfiyga tushirishi mumkin (bloklanmaydi); web `POST /avtolavka/sotuv` hali faqat naqd/qarz; `mijozCheklar` kutilayotgan plastikni ko'rsatmaydi; web amallarida rol tekshiruvi yo'q (6-bo'lim qarori).
 
+## 5f. Chek rasmi va karta topshiruvi (2026-11-23)
+
+Batafsil — `FRONTEND-UCHUN.md` §18, validatsiya — `API-VALIDATSIYA.md` §3.22.
+
+- **Migratsiya:** `20261123000001-topshiruv-karta` — `pul_topshiruv.usul` ENUM(`naqd`,`karta`) default `naqd`, `pul_topshiruv.chek_rasm` (idempotent, `describeTable` tekshiruvi).
+- **Mobil:** yangi `POST chekYuklash/` (multipart `chek`, `uploadKassa`) → `{chekRasm}`. Plastik to'lovda (`savePayment` qismi, `saveSell` to'langan qismi) `chekRasm` majburiy; yo'l `utils/agentPul.utils.chekRasmOl` da tekshiriladi (faqat `/uploads/kassa/`, `..` yo'q, fayl diskda bor). `savePayment` multipart `chek` fayli fallback sifatida qoladi. `pulTopshirish` `usul:'karta'` — agent viloyatidagi plastik kassa + chek.
+- **Hisob:** karta topshiruvi naqd topshiruv bilan bir xil — tasdiqda majburiyat −summa, kassa balansi (`pul_topshiruv` orqali) +summa, jurnalga yozuv yo'q. Tasdiqda kassa tanlanmaydi (`kassa_id` e'tiborsiz).
+- **Rasm saqlanishi:** rad/bekor/o'chirishda rasm o'chirilmaydi; yetim (ishlatilmagan) yuklangan rasmlarni tozalash yo'q (talab qilinmagan).
+- **Sinov (lokal, 2026-11-23):** yangi `test-chek` 63/63 (yuklash ok/faylsiz/rasm emas/maydon/tokensiz, `..`/boshqa papka/yo'q fayl, savePayment va saveSell chek bilan/siz, multipart fallback, karta: kassasiz/cheksiz/naqd kassa/boshqa viloyat/enum, takror, web ro'yxat/filtr/detail, karta tasdiq → `qolda` −, plastik kassa +, rad — yozuv va rasm qoladi, naqd o'zgarmagan, `/uploads` GET 200); kassalar testi 91/91 (chekRasm qo'shildi), agent testi 55/55.
+- **Ochiq:** `/uploads/kassa` token talab qilmaydi (nom tasodifiy, lekin havola ochiq); web `POST /avtolavka/sotuv` plastik qabul qilmaydi (chek talabi u yerga tegmaydi).
+
 ---
 
 ## 6. Ataylab qoldirilganlar
