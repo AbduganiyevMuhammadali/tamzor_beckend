@@ -34,7 +34,8 @@ async function buildUserData(user, token, rol = 'agent') {
     isAgent,
     // Ko'chma savdo agenti: ilova "Mening mashinam", yuklash so'rovi va
     // kun yakuni ekranlarini ko'rsatadi (mobile/avtolavka.controller.js)
-    isAvtolavka: isAgent && !!user.avtolavka && rollar.includes('avtolavka'),
+    // 2026-11-21: har bir agent o'z omboridan sotadi (avvalgi Won Sell oqimi) — eski ilova uchun bayroq
+    isAvtolavka: isAgent,
     isDeliver: (!isAgent || isDualRoleAgent) && rollar.includes('dostavchik'),
     // Dostavchik ilovasi uchun: mashina raqami va transport
     mashina: isAgent ? (user.mashina_raqam || '') : (user.mashina_raqam || ''),
@@ -57,8 +58,11 @@ async function buildUserData(user, token, rol = 'agent') {
     returnView: !isAgent,
     editPrice: isAgent,
     // Yangi Flutter ilova uchun: asosiy rol va ochiq rollar ro'yxati
+    // 2026-11-21: faqat 2 rol — 'agent' va 'super_agent' (rollar = ['agent'] + 'super_agent')
     asosiyRol: asosiyRol(user, rol),
     rollar,
+    superAgent: isAgent && !!user.super_agent && rollar.includes('super_agent'),
+    viloyat: isAgent && filial && Number(filial.id) === Number(user.territoriya_id) ? { id: filial.id, nomi: filial.nomi } : null,
   };
 }
 
@@ -102,6 +106,11 @@ class MobileAuthController extends BaseController {
     }
     if (!user.faol) {
       throw new HttpException(400, req.mf('Unauthorized'));
+    }
+    // 2026-11-21: mobil ilovada faqat agent va super agent. Dostavchik roli olib tashlandi
+    // (parol to'g'ri bo'lgandan keyin aytiladi — login borligini begonaga oshkor qilmaslik uchun)
+    if (rol === 'dostavchi') {
+      throw new HttpException(403, "Dostavchik roli mobil ilovadan olib tashlangan. Mobil ilovaga faqat agent va super agent kira oladi — administratorga murojaat qiling.");
     }
     // Asosiy roli serverda (.env MOBIL_ROLLAR) o'chirilgan bo'lsa — kirish yo'q
     if (!asosiyRolYoqilgan(user, rol)) {

@@ -50,6 +50,7 @@ const mobileAuth = () => {
 
       // Bitta login — ikki savdo rejimi: ilova Won Sell rejimida "x-rejim: avtolavka" yuboradi,
       // agentning Won Sell jufti bo'lsa so'rov o'sha juft nomidan bajariladi.
+      // (2026-11-21 dan hamma agent avtolavka — bu shoxcha faqat eski ma'lumot uchun)
       if (rol === 'agent' && !user.avtolavka && user.juft_agent_id && String(req.headers['x-rejim'] || '') === 'avtolavka') {
         const juft = await AgentModel.findOne({ where: { id: user.juft_agent_id } });
         if (juft && juft.faol && juft.avtolavka) {
@@ -66,6 +67,22 @@ const mobileAuth = () => {
 
       req.currentAgent = user;
       req.currentRole = rol;
+
+      /* SUPER AGENT KUZATUVI (faqat o'qish): "x-kuzat-agent: <agentId>" sarlavhasi bilan super agent
+         o'ziga biriktirilgan agent ko'radigan hamma narsani (GET) ko'radi — so'rov o'sha agent nomidan
+         bajariladi. Faqat GET; yozuvchi so'rov sarlavha bilan kelsa 403 (agent nomidan sotuv/to'lov yo'q). */
+      const kuzat = req.headers['x-kuzat-agent'];
+      if (kuzat !== undefined && String(kuzat).trim() !== '') {
+        const rad = () => { throw new HttpException(403, 'Bu agent sizga biriktirilmagan'); };
+        if (req.method !== 'GET') throw new HttpException(403, "Kuzatuv rejimida faqat ko'rish mumkin — o'zgartirib bo'lmaydi");
+        const targetId = Number(String(kuzat).trim());
+        if (rol !== 'agent' || !user.super_agent || !Number.isInteger(targetId) || targetId <= 0) rad();
+        const target = await AgentModel.findOne({ where: { id: targetId } });
+        if (!target || !target.faol || Number(target.super_agent_id) !== Number(user.id) || Number(target.id) === Number(user.id)) rad();
+        req.superAgent = user;
+        req.currentAgent = target;
+        req.kuzatuv = true;
+      }
       next();
     } catch (e) {
       // Faqat token xatolari 401 (ilova logout qiladi); baza xatosi 500 bo'lib qoladi
