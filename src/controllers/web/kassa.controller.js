@@ -37,6 +37,9 @@ const TIZIM_KATEGORIYA = new Set([
 ]);
 
 const TOLOV_USUL = ['naqt', 'karta', 'bank'];       // kassa.tolov_usul ENUM bilan bir xil
+const USUL_NOMI = { naqt: 'Naqd', karta: 'Plastik', bank: 'Bank' };
+const { KassalarModel } = require('../../models/kassalar.model');
+const AgentModel = require('../../models/agent.model');
 const HISOBOT_MAX_QATOR = 20000;                      // javobdagi harakatlar soni cheklovi
 
 /* Ixtiyoriy idempotentlik kaliti (web: ikki marta bosish). kassa.mobil_id (UNIQUE) ga yoziladi. */
@@ -86,13 +89,24 @@ class KassaController extends BaseController {
 
   // ── GET /kassa — hisobot (kirim/chiqim ro'yxati + jami) ──
   hisobot = async (req, res) => {
-    const { period = 'month', from: fq, to: tq, tur, kategoriya, search } = req.query;
+    const { period = 'month', from: fq, to: tq, tur, kategoriya, search, kassa_id, agent_id } = req.query;
     const { from, to } = periodRange(period, fq, tq);
     if (to < from) throw new HttpException(400, "Davr noto'g'ri: 'from' sanasi 'to' dan keyin");
 
     const where = { sana: { [Op.between]: [from, to] } };
     if (tur)        where.tur = tur;
     if (kategoriya) where.kategoriya = kategoriya;
+    // 2026-11-22: kassa bo'yicha (kassa_id=0 — kassaga bog'lanmagan) va agent bo'yicha filtr
+    if (kassa_id !== undefined && kassa_id !== '') {
+      const k = Number(kassa_id);
+      if (!Number.isInteger(k) || k < 0) throw new HttpException(400, "kassa_id noto'g'ri");
+      where.kassa_id = k === 0 ? null : k;
+    }
+    if (agent_id !== undefined && agent_id !== '') {
+      const a = Number(agent_id);
+      if (!Number.isInteger(a) || a <= 0) throw new HttpException(400, "agent_id noto'g'ri");
+      where.agent_id = a;
+    }
     if (search) {
       where[Op.or] = [
         { mijoz_nomi: { [Op.like]: `%${String(search).slice(0, 100)}%` } },
@@ -110,6 +124,10 @@ class KassaController extends BaseController {
     const turlar = await xarajatTurlari();
     const yorliq = k => turlar.get(k)?.nomi || KATEGORIYA[k]?.label || k;
 
+    const kIds = [...new Set(rows.map(r => r.kassa_id).filter(Boolean))];
+    const aIds = [...new Set(rows.map(r => r.agent_id).filter(Boolean))];
+    const kassaNom = new Map(kIds.length ? (await KassalarModel.findAll({ where: { id: kIds }, attributes: ['id', 'nomi'], raw: true })).map(k => [k.id, k.nomi]) : []);
+    const agentNom = new Map(aIds.length ? (await AgentModel.findAll({ where: { id: aIds }, attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]) : []);
     const kirim  = rows.filter(r => r.tur === 'kirim').reduce((s, r) => s + r.summa, 0);
     const chiqim = rows.filter(r => r.tur === 'chiqim').reduce((s, r) => s + r.summa, 0);
 
@@ -133,6 +151,10 @@ class KassaController extends BaseController {
       harakatlar: rows.map(r => ({
         ...r.toJSON(),
         kategoriya_label: yorliq(r.kategoriya),
+        // To'lov turi nomi: kassa nomi (2026-11-22), bo'lmasa usul bo'yicha; agent qo'lidagi naqd — "Agent: <ism>"
+        kassa_nomi: r.kassa_id ? (kassaNom.get(r.kassa_id) || null) : null,
+        tolov_turi_nomi: r.kassa_id && kassaNom.get(r.kassa_id) ? kassaNom.get(r.kassa_id)
+          : (r.agent_id && agentNom.get(r.agent_id) ? `Agent: ${agentNom.get(r.agent_id)}` : (USUL_NOMI[r.tolov_usul] || r.tolov_usul)),
       })),
     });
   };
@@ -153,7 +175,8 @@ class KassaController extends BaseController {
 
   // ── POST /kassa — qo'lda kirim/chiqim yoki mijoz to'lovi ──
   create = async (req, res) => {
-    const { tur, kategoriya, summa, tolov_usul, mijoz_id, izoh, sana } = req.body;
+    const { tur, kategoriya, summa, mijoz_id, izoh, sana } = req.body;
+    let { tolov_usul } = req.body;
     if (!tur || !['kirim','chiqim'].includes(tur)) throw new HttpException(400, 'Tur noto\'g\'ri');
     if (!kategoriya) throw new HttpException(400, 'Kategoriya kerak');
     if (!summa || !Number.isFinite(Number(summa)) || Number(summa) <= 0) throw new HttpException(400, 'Summa noto\'g\'ri');
@@ -176,6 +199,18 @@ class KassaController extends BaseController {
     }
     if (izoh != null && String(izoh).length > 255) throw new HttpException(400, 'Izoh 255 belgidan oshmasin');
     const sanaQiymat = sanaOl(sana, 'sana');
+    // 2026-11-22: ixtiyoriy kassa_id — yozuv shu kassaga (kassa balansi). tolov_usul kassa turidan olinadi.
+    let kassaId = null;
+    if (req.body.kassa_id !== undefined && req.body.kassa_id !== null && req.body.kassa_id !== '') {
+      const k = await KassalarModel.findByPk(Number(req.body.kassa_id));
+      if (!k || !k.faol) throw new HttpException(400, 'Kassa topilmadi yoki faol emas');
+      kassaId = k.id;
+      const usul = k.tur === 'plastik' ? 'karta' : 'naqt';
+      if (tolov_usul && tolov_usul !== usul && !(k.tur === 'plastik' && tolov_usul === 'bank')) {
+        throw new HttpException(400, "To'lov usuli kassa turiga mos emas");
+      }
+      tolov_usul = tolov_usul || usul;
+    }
     // mijoz_id faqat mijoz to'lovida saqlanadi: mijoz hisob-kitobi kassa kirimlarini mijoz_id
     // bo'yicha yig'adi — boshqa kategoriyadagi yozuv mijoz qarzini noto'g'ri kamaytirib ko'rsatardi
     const mijozId = kategoriya === 'mijoz_tolov' ? mijoz_id : null;
@@ -220,6 +255,7 @@ class KassaController extends BaseController {
         sana:       sanaQiymat || new Date(),
         user_id:    req.currentUser?.id || null,
         mobil_id:   sorovId,
+        kassa_id:   kassaId,
       }, { transaction: t });
 
       // Mijoz reytingi: qarzdor mijoz to'ladi (+ball, kuniga bir marta; to'lov o'chirilsa qaytadi)

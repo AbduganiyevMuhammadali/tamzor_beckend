@@ -20,6 +20,7 @@ router.delete('/:id', auth(), ahf(c.delete));
 /* Qo'shimcha */
 router.get('/:id/mijozlar',  auth(), ahf(c.getMijozlar));
 router.get('/:id/register',  auth(), ahf(c.register));
+router.get('/:id/pul',       auth(), ahf(c.pul));          // 2026-11-22: agent pul daftari
 router.patch('/:id/faol',    auth(), ahf(c.toggleFaol));
 
 module.exports = router;

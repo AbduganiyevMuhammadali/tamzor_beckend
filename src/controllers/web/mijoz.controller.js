@@ -376,8 +376,8 @@ class MijozController {
 
     // ── BERDI: mijozdan tushgan pul ──
     const tolovlar = await sequelize.query(`
-      SELECT k.id, k.summa, k.sana, k.tolov_usul, k.kategoriya, k.izoh
-      FROM kassa k
+      SELECT k.id, k.summa, k.sana, k.tolov_usul, k.kategoriya, k.izoh, ks.nomi AS kassa_nomi
+      FROM kassa k LEFT JOIN kassalar ks ON ks.id = k.kassa_id
       WHERE k.mijoz_id = :id AND k.tur = 'kirim'
         ${sanaSharti('k.sana')}
       ORDER BY k.sana ASC`,
@@ -415,6 +415,7 @@ class MijozController {
         hujjat: `TL-${k.id}`,
         izoh: k.izoh || KATEGORIYA_NOMI[k.kategoriya] || "To'lov",
         tolov_usul: k.tolov_usul || null,
+        kassa_nomi: k.kassa_nomi || null,   // to'lov turi nomi (2026-11-22)
         oldi: 0,
         berdi: parseFloat(k.summa || 0),
         manba_id: k.id,
@@ -503,7 +504,11 @@ class MijozController {
   territoriyaDelete = async (req, res) => {
     const t = await TerritoriyaModel.findByPk(req.params.id);
     if (!t) throw new HttpException(404, 'Topilmadi');
-    await t.destroy();
+    // Plastik kassalarning shu viloyatga biriktirilishi ham olib tashlanadi (kassalar.controller)
+    await sequelize.transaction(async (tr) => {
+      await require('../../models/kassalar.model').KassaViloyatModel.destroy({ where: { territoriya_id: t.id }, transaction: tr });
+      await t.destroy({ transaction: tr });
+    });
     res.send({ message: 'O\'chirildi' });
   };
 

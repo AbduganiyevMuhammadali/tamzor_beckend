@@ -21,6 +21,7 @@ const dostavchiRouter   = require('../routes/dostavchi.route');
 const narxRuyxatRouter  = require('../routes/narxRuyxat.route');
 const bildirishnomaRouter = require('../routes/bildirishnoma.route');
 const kassaRouter       = require('../routes/kassa.route');
+const kassalarRouter    = require('../routes/kassalar.route');   // 2026-11-22: kassalar, plastik tasdig'i, topshiruvlar
 const tripSheetRouter   = require('../routes/tripSheet.route');
 const sozlamaRouter     = require('../routes/sozlama.route');
 const avtolavkaRouter   = require('../routes/avtolavka.route');
@@ -92,6 +93,7 @@ module.exports = async function(app){
         app.use(`/api/v1/ishlab`,         ishlabRouter);
         app.use(`/api/v1/dostavchilar`,   dostavchiRouter);
         app.use(`/api/v1/kassa`,          kassaRouter);
+        app.use(`/api/v1/kassalar`,       kassalarRouter);
         app.use(`/api/v1/trip-sheet`,     tripSheetRouter);
         app.use(`/api/v1/sozlama`,        sozlamaRouter);
         app.use(`/api/v1/avtolavka`,      avtolavkaRouter);

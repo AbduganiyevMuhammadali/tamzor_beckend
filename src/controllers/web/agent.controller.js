@@ -7,6 +7,8 @@ const TovarRegisterModel = require('../../models/tovar_register.model');
 const { agentOmbori, agentBrakOmbori, AGENT_PREFIKS } = require('../../utils/ombor.utils');
 const bcrypt = require('bcryptjs');
 const sequelize = require('../../db/db-sequelize');
+const { majburiyat, majburiyatlar, agentPulTarix } = require('../../utils/agentPul.utils');
+const { sanaTogrimi } = require('../../utils/tahlil.utils');
 
 /* ── Bo'sh string va noto'g'ri qiymatlarni tozalash ───── */
 const DATE_FIELDS   = ['tugilgan_sana', 'ish_boshlagan'];
@@ -154,15 +156,42 @@ class AgentController {
       order: [['fullname', 'ASC']],
     });
 
-    // Har bir agent uchun statistika qo'shamiz
+    // Har bir agent uchun statistika qo'shamiz; pul — naqd majburiyat (agentPul.utils)
+    const pullar = await majburiyatlar(agents.map(a => a.id));
     const result = await Promise.all(
       agents.map(async a => {
         const stats = await buildStats(a, period);
-        return { ...shakl(a), ...stats };
+        return { ...shakl(a), ...stats, pul: pullar.get(a.id) };
       })
     );
 
     res.send(result);
+  };
+
+  /* ── GET /agents/:id/pul?dan=&gacha=&limit= — agent pul daftari (naqd, plastik, topshiruv, qaytarish) ── */
+  pul = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id, { attributes: ['id', 'fullname', 'territoriya_id'], paranoid: false });
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+    const { dan, gacha } = req.query;
+    if (dan && !sanaTogrimi(String(dan))) throw new HttpException(400, "dan sanasi noto'g'ri (YYYY-MM-DD)");
+    if (gacha && !sanaTogrimi(String(gacha))) throw new HttpException(400, "gacha sanasi noto'g'ri (YYYY-MM-DD)");
+    const limit = Math.min(5000, Math.max(1, parseInt(req.query.limit, 10) || 1000));
+    const tarix = await agentPulTarix(agent.id, {
+      dan: dan ? new Date(`${dan}T00:00:00`) : null,
+      gacha: gacha ? new Date(new Date(`${gacha}T00:00:00`).getTime() + 864e5) : null,
+      limit,
+    });
+    const davr = { naqd: 0, qaytarish: 0, plastik_tasdiqlangan: 0, plastik_kutilmoqda: 0, topshiruv_tasdiqlangan: 0, topshiruv_kutilmoqda: 0 };
+    for (const x of tarix) {
+      if (x.tur === 'naqd') davr.naqd += x.summa;
+      else if (x.tur === 'qaytarish') davr.qaytarish += x.summa;
+      else if (x.tur === 'plastik' && x.holat === 'tasdiqlangan') davr.plastik_tasdiqlangan += x.summa;
+      else if (x.tur === 'plastik' && x.holat === 'kutilmoqda') davr.plastik_kutilmoqda += x.summa;
+      else if (x.tur === 'topshiruv' && x.holat === 'tasdiqlangan') davr.topshiruv_tasdiqlangan += x.summa;
+      else if (x.tur === 'topshiruv' && x.holat === 'kutilmoqda') davr.topshiruv_kutilmoqda += x.summa;
+    }
+    Object.keys(davr).forEach(k => { davr[k] = +davr[k].toFixed(2); });
+    res.send({ agent: { id: agent.id, fullname: agent.fullname }, pul: await majburiyat(agent.id), davr, tarix });
   };
 
   /* ── GET /agents/:id ────────────────────────────────── */
@@ -185,7 +214,7 @@ class AgentController {
           include: [{ model: TerritoriyaModel, as: 'territoriya', attributes: ['id', 'nomi'] }], order: [['fullname', 'ASC']] })
       : [];
 
-    res.send({ ...shakl(agent), ...stats, mijozlar, agentlari });
+    res.send({ ...shakl(agent), ...stats, mijozlar, agentlari, pul: await majburiyat(agent.id) });
   };
 
   /* Mobil login/parol: parol xeshlanadi, bo'sh parol mavjudini o'zgartirmaydi,
