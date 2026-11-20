@@ -1,6 +1,6 @@
 # Backend audit: nima qilindi va nima rejada
 
-> Oxirgi yangilanish: 2026-11-21. Bu fayl keyingi sessiyalar (va dasturchilar) uchun:
+> Oxirgi yangilanish: 2026-11-22. Bu fayl keyingi sessiyalar (va dasturchilar) uchun:
 > loyihada qanday xatolar topilgani, qaysilari tuzatilgani, qanday sinalgani va
 > hali nima qilinishi kerakligi.
 >
@@ -224,6 +224,20 @@ Egasining qarori: mobil ilovada faqat **agent** va **super agent**. Batafsil (we
 - **Brak:** agent brak ombori `"Agent: <ism> (brak)"` (`ombor.utils agentBrakOmbori/brakOmboriMi`); tahlil va dashboard qoldig'idan chiqarildi.
 - **Sinov (lokal tz_yangi, 2026-11-21):** 55/55 HTTP tekshiruv (rollar, sinxron shakli, sotuv, yaroqli/yaroqsiz qaytarish ikkala to'lov turi bilan, ortiqcha → 400, takror va 3× parallel → 1 yozuv, begona → 403, super agent `agentlarim` va kuzatuv GET/POST/begona) + 14 ta web GET smoke (200).
 - **Ochiq:** web'da qaytarishlar tarixini ko'rish API'si yo'q; `hisobot/inkassatsiya` naqd qaytarishni ayirmaydi; chegirmali sotuvda qaytarish qator summasidan ayiriladi (chegirma proporsional taqsimlanmaydi, jami 0 dan pastga tushmaydi — dostavchik qaytarishi bilan bir xil); `saveSell` mijoz egaligini hali tekshirmaydi (oflayn sabab).
+
+---
+
+## 5e. Kassalar, plastik tasdig'i, agent naqd topshiruvi (2026-11-22)
+
+Batafsil (web uchun) — `FRONTEND-UCHUN.md` 17-bo'lim; validatsiya — `API-VALIDATSIYA.md` 3.x "Kassalar".
+
+- **Migratsiyalar:** `20261122000001-kassalar` (`kassalar`, `kassa_viloyat`; `kassa.kassa_id`, `kassa.agent_id` + indekslar), `20261122000002-plastik-topshiruv` (`plastik_tolov`, `pul_topshiruv`, `pul_audit`; `mobil_id` UNIQUE, `plastik_tolov.ariza_id` UNIQUE). Ikkalasi idempotent, `down()` + qayta `up()` sinalgan.
+- **Model:** `kassa` jadvali — jurnal; `kassalar` — pul turadigan joy (naqd kassa / plastik karta, plastik ↔ viloyat ko'p-ko'p). Agent majburiyati = Σ naqd(kirim−chiqim | `agent_id`, `kassa_id` NULL) − Σ tasdiqlangan topshiruv. Kassa balansi = Σ jurnal(`kassa_id`) + Σ tasdiqlangan topshiruv. Topshiruv jurnalga yozilmaydi (ichki ko'chirish — dostavchik inkassatsiyasi qoidasi).
+- **Plastik:** `plastik_tolov` 'kutilmoqda' → web tasdig'i: jurnal kirimi (`tolov_usul='karta'`, `manba_tur='plastik_tolov'`, `kassa_id`), mijoz balansi, sotuv bo'lsa `ariza.tolangan_summa`; rad/tahrir — sabab majburiy, `pul_audit`. Plastik sotuv: `ariza.tolov_turi='plastik'`, tasdiqgacha `tolangan_summa=0`. Qulf: ariza → plastik_tolov → mijoz; topshiruv: agent → topshiruv.
+- **Eski ma'lumot:** eski jurnal yozuvlarida `agent_id`/`kassa_id` NULL — majburiyat migratsiyadan keyingi yozuvlardan sanaladi; eski agent `inkassatsiya` (kunlik) faqat tarix uchun qoladi, yangi yo'l — `pulTopshirish`.
+- **Sotuv bekor (`sotuvBekor`):** kutilayotgan plastik avtomatik rad; tasdiqlangan plastik kirimi o'chirilmaydi (pul kartaga tushgan → mijoz haqi).
+- **Sinov (lokal tz_kassa, 2026-11-22):** 89/89 HTTP tekshiruv (CRUD/validatsiya, viloyat bo'yicha kassalar, plastik qarz to'lovi/sotuv: kutilmoqda → tasdiq/rad/tahrir+audit, 3× parallel tasdiq → 1, takrorlar, aralash to'lov, naqd qaytarish chegarasi, topshiruv: ortiqcha 400, 3× parallel → 1, tasdiq/rad, kassa balansi, kuzatuv) + eski agent testi 55/55, 0 ta 5xx.
+- **Ochiq:** boshlang'ich majburiyat (migratsiyagacha agent qo'lidagi naqd) kiritish yo'li yo'q; naqd qaytarish majburiyatni manfiyga tushirishi mumkin (bloklanmaydi); web `POST /avtolavka/sotuv` hali faqat naqd/qarz; `mijozCheklar` kutilayotgan plastikni ko'rsatmaydi; web amallarida rol tekshiruvi yo'q (6-bo'lim qarori).
 
 ---
 
