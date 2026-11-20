@@ -14,10 +14,13 @@
  *        tasdiq                       → jurnal kirim {kassa_id = plastik kassa, agent_id, 'karta'} + mijoz balansi
  *                                        (+ sotuv bo'lsa ariza.tolangan_summa). Majburiyatga kirmaydi (kassa_id bor).
  *        rad                          → faqat holat; mijoz qarzi joyida qoladi
- *   TOPSHIRUV (pulTopshirish)         → pul_topshiruv 'kutilmoqda'
+ *   TOPSHIRUV (pulTopshirish)         → pul_topshiruv 'kutilmoqda', usul 'naqd' | 'karta'
  *        tasdiq (naqd kassa tanlanadi) → majburiyat −summa, kassa balansi +summa. Jurnalga yozilmaydi: pul jurnalda
  *                                        allaqachon kirim (agent qo'lida) — bu ichki ko'chirish, aks holda kassa
  *                                        sahifasi/KPI uni ikki marta sanardi (dostavchik inkassatsiyasi bilan bir xil qoida).
+ *        KARTA (2026-11-23)            → agent kartadan o'tkazadi: kassa_id = agent tanlagan plastik kassa (viloyati),
+ *                                        chek_rasm majburiy. Tasdiqda kassa tanlanmaydi (o'zinikida qoladi) —
+ *                                        qolgani naqd bilan AYNAN bir xil: majburiyat −summa, plastik kassa balansi +summa.
  *
  * Majburiyat = Σ(naqd kirim − naqd chiqim | agent_id, kassa_id NULL) − Σ(tasdiqlangan topshiruv).
  * Eski yozuvlarda agent_id yo'q — majburiyat migratsiyadan keyin boshlanadi; eski kunlik
@@ -34,6 +37,10 @@ const { KassalarModel, KassaViloyatModel, PlastikTolovModel, PulTopshiruvModel, 
 const { MijozModel } = require('../models/mijoz.model');
 const { ArizaModel } = require('../models/ariza.model');
 const AgentModel = require('../models/agent.model');
+
+const fs = require('fs');
+const path = require('path');
+const { KASSA_DIR } = require('../middleware/uploadKassa.middleware');
 
 const n = (v) => parseFloat(v) || 0;
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -74,6 +81,23 @@ async function auditRoyxat(obyekt, obyektId) {
     id: r.id, amal: r.amal, eski: json(r.eski), yangi: json(r.yangi), sabab: r.sabab,
     user_id: r.user_id, user_nomi: r.user_nomi, vaqt: r.createdAt,
   }));
+}
+
+/* Chek rasmi yo'li (chekYuklash/ qaytargan): '/uploads/kassa/<nom>' — boshqa papka, '..' va diskda
+   yo'q fayl qabul qilinmaydi. Bo'sh: majburiy bo'lsa 400, aks holda null. */
+const CHEK_YOL = /^\/uploads\/kassa\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,200})$/;
+function chekRasmOl(v, { majburiy = false, xabar = 'Chek rasmi majburiy' } = {}) {
+  const s = v === undefined || v === null ? '' : String(v).trim();
+  if (!s) {
+    if (majburiy) throw new HttpException(400, xabar);
+    return null;
+  }
+  const m = s.length <= 255 && !s.includes('..') ? CHEK_YOL.exec(s) : null;
+  if (!m) throw new HttpException(400, "chekRasm noto'g'ri (chekYuklash/ qaytargan yo'l bo'lishi kerak)");
+  let bor = false;
+  try { bor = fs.statSync(path.join(KASSA_DIR, m[1])).isFile(); } catch (e) { bor = false; }
+  if (!bor) throw new HttpException(400, 'Chek rasmi topilmadi — qaytadan yuklang');
+  return s;
 }
 
 /* Kassani tekshirish: mavjud, faol, kerakli tur; agent berilsa plastik kassa agent viloyatini qamrashi shart */
@@ -148,10 +172,12 @@ async function agentPulTarix(agentId, { dan = null, gacha = null, limit = 500 } 
       id: `p${p.id}`, sana: p.sana, tur: 'plastik', summa: n(p.summa), klient: p.mijoz_nomi || null, mijoz_id: p.mijoz_id,
       kassa: p.kassa_nomi || null, kassa_id: p.kassa_id, holat: p.holat, sabab: p.rad_sababi || null,
       kategoriya: p.tur === 'sotuv' ? 'sotuv' : 'mijoz_tolov', izoh: p.izoh || null, ariza_id: p.ariza_id || null,
+      chek_rasm: p.chek_rasm || null,
     })),
     ...tops.map(t => ({
       id: `t${t.id}`, sana: t.sana, tur: 'topshiruv', summa: n(t.summa), klient: null, kassa: t.kassa_nomi || null, kassa_id: t.kassa_id,
       holat: t.holat, sabab: t.rad_sababi || null, kategoriya: 'topshiruv', izoh: t.izoh || null,
+      usul: t.usul || 'naqd', chek_rasm: t.chek_rasm || null,
     })),
   ];
   rows.sort((a, b) => new Date(b.sana) - new Date(a.sana) || String(b.id).localeCompare(String(a.id)));
@@ -283,10 +309,12 @@ async function sotuvPlastikRad(arizaId, user, transaction) {
 }
 
 /* ── Topshiruv amallari ────────────────────────────────────────────── */
-const topshiruvShakli = (x) => ({ holat: x.holat, summa: n(x.summa), kassa_id: x.kassa_id });
+const topshiruvShakli = (x) => ({ holat: x.holat, summa: n(x.summa), kassa_id: x.kassa_id, usul: x.usul || 'naqd' });
 
-/* Mobil: agent naqd topshiradi. Agent qatori qulflanadi — parallel topshiruvlar mavjud summadan oshmaydi. */
-async function topshiruvYarat(agent, { summa, izoh, mobilId, vaqt }) {
+/* Mobil: agent naqd yoki karta orqali topshiradi. Agent qatori qulflanadi — parallel topshiruvlar mavjud summadan oshmaydi.
+   karta: kassa — kassaTekshir(tur 'plastik', agent) dan o'tgan kassa, chekRasm — chekRasmOl dan o'tgan yo'l. */
+async function topshiruvYarat(agent, { summa, izoh, mobilId, vaqt, usul = 'naqd', kassa = null, chekRasm = null }) {
+  if (usul === 'karta' && (!kassa || !chekRasm)) throw new HttpException(400, 'Karta topshiruvi uchun kassa va chek rasmi majburiy');
   return sequelize.transaction(async (t) => {
     await qulflabOl(AgentModel, agent.id, t);
     if (mobilId) {
@@ -302,6 +330,7 @@ async function topshiruvYarat(agent, { summa, izoh, mobilId, vaqt }) {
     }
     const row = await PulTopshiruvModel.create({
       mobil_id: mobilId, agent_id: agent.id, agent_nomi: agent.fullname, summa: r2(summa), izoh, sana: vaqt, holat: 'kutilmoqda',
+      usul, kassa_id: usul === 'karta' ? kassa.id : null, chek_rasm: usul === 'karta' ? chekRasm : null,
     }, { transaction: t });
     await auditYoz({ obyekt: 'pul_topshiruv', obyekt_id: row.id, amal: 'yaratildi', yangi: topshiruvShakli(row), sabab: izoh,
       user: { id: null, nomi: `Agent: ${agent.fullname}` } }, t);
@@ -309,16 +338,25 @@ async function topshiruvYarat(agent, { summa, izoh, mobilId, vaqt }) {
   });
 }
 
+/* Naqd: kassa_id majburiy (naqd kassa). Karta: kassa_id e'tiborsiz — topshiruvning o'z plastik kassasi. */
 async function topshiruvTasdiqla(id, user, { kassa_id, izoh = null } = {}) {
-  if (kassa_id === undefined || kassa_id === null || kassa_id === '') throw new HttpException(400, 'kassa_id majburiy (naqd kassa)');
   return sequelize.transaction(async (t) => {
     const bosh = await PulTopshiruvModel.findByPk(id, { transaction: t });
     if (!bosh) throw new HttpException(404, 'Topshiruv topilmadi');
+    const karta = bosh.usul === 'karta';
+    if (!karta && (kassa_id === undefined || kassa_id === null || kassa_id === '')) throw new HttpException(400, 'kassa_id majburiy (naqd kassa)');
     // QULF TARTIBI: agent → topshiruv (topshiruvYarat bilan bir xil)
     await qulflabOl(AgentModel, bosh.agent_id, t, { paranoid: false });
     const x = await qulflabOl(PulTopshiruvModel, id, t);
     if (x.holat !== 'kutilmoqda') throw new HttpException(400, `Topshiruv allaqachon ${x.holat === 'tasdiqlangan' ? 'tasdiqlangan' : 'rad etilgan'}`);
-    const kassa = await kassaTekshir(kassa_id, { tur: 'naqd', transaction: t });
+    let kassa;
+    if (karta) {
+      // Pul allaqachon shu kartaga o'tkazilgan — kassa keyin faolsizlantirilgan bo'lsa ham tasdiqlanadi
+      kassa = x.kassa_id ? await KassalarModel.findByPk(x.kassa_id, { transaction: t }) : null;
+      if (!kassa || kassa.tur !== 'plastik') throw new HttpException(400, 'Topshiruvning plastik kassasi topilmadi');
+    } else {
+      kassa = await kassaTekshir(kassa_id, { tur: 'naqd', transaction: t });
+    }
     const m = await majburiyat(x.agent_id, t);
     if (n(x.summa) > m.qolda + 0.5) {
       throw new HttpException(400, `Agent qo'lidagi naqd (${m.qolda}) topshiruv summasidan (${n(x.summa)}) kam — rad eting va agent qaytadan yuborsin`);
@@ -344,7 +382,7 @@ async function topshiruvRad(id, user, sababRaw) {
 }
 
 module.exports = {
-  kassaTekshir, agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, kassaBalanslari,
+  kassaTekshir, chekRasmOl, agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, kassaBalanslari,
   plastikTasdiqla, plastikRad, plastikTahrir, sotuvPlastikRad,
   topshiruvYarat, topshiruvTasdiqla, topshiruvRad, auditYoz, auditRoyxat, sababOl, userNomi, Op,
 };

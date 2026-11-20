@@ -20,4 +20,5 @@ const uploadKassa = multer({
   },
 });
 
+uploadKassa.KASSA_DIR = KASSA_DIR;
 module.exports = uploadKassa;

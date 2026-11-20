@@ -50,7 +50,7 @@ PlastikTolovModel.init({
   kassa_yozuv_id:   { type: DataTypes.INTEGER, allowNull: true },
 }, { sequelize, modelName: 'PlastikTolovModel', tableName: 'plastik_tolov', timestamps: true });
 
-/* Agent naqd topshiruvi */
+/* Agent topshiruvi (naqd yoki karta) */
 class PulTopshiruvModel extends Model {}
 PulTopshiruvModel.init({
   id:         { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
@@ -61,6 +61,9 @@ PulTopshiruvModel.init({
   izoh:       { type: DataTypes.STRING(500), allowNull: true },
   sana:       { type: DataTypes.DATE, allowNull: false },
   holat:      HOLAT,
+  // 2026-11-23: 'naqd' — kassirga naqd; 'karta' — agent kartadan plastik kassaga o'tkazdi (kassa_id = o'sha kassa)
+  usul:       { type: DataTypes.ENUM('naqd', 'karta'), allowNull: false, defaultValue: 'naqd' },
+  chek_rasm:  { type: DataTypes.STRING(255), allowNull: true },
   kassa_id:   { type: DataTypes.INTEGER, allowNull: true },
   tasdiqlagan_id:   { type: DataTypes.INTEGER, allowNull: true },
   tasdiqlagan_nomi: { type: DataTypes.STRING(100), allowNull: true },
