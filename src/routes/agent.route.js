@@ -4,6 +4,7 @@ const c       = require('../controllers/web/agent.controller');
 const auth    = require('../middleware/auth.middleware');
 const joiMW   = require('../middleware/joi.middleware');
 const ahf     = require('../middleware/awaitHandlerFactory.middleware');
+const ruxsat  = require('../middleware/ruxsat.middleware');
 const { agentSchemas } = require('../middleware/validators/agentValidator.middleware');
 
 /* Spravochnik va statistika — oldin aniq routelar */
@@ -20,7 +21,7 @@ router.delete('/:id', auth(), ahf(c.delete));
 /* Qo'shimcha */
 router.get('/:id/mijozlar',  auth(), ahf(c.getMijozlar));
 router.get('/:id/register',  auth(), ahf(c.register));
-router.get('/:id/pul',       auth(), ahf(c.pul));          // 2026-11-22: agent pul daftari
+router.get('/:id/pul',       auth(), ruxsat('moliya', 'view'), ahf(c.pul));   // 2026-11-22: agent pul daftari (2026-11-24: moliya view)
 router.patch('/:id/faol',    auth(), ahf(c.toggleFaol));
 
 module.exports = router;

@@ -333,6 +333,13 @@ class KassalarController {
     res.send(await topshiruvBitta(id));
   };
 
+  /* POST /kassalar/chek-yuklash (multipart `chek`, 1 fayl ≤10MB: rasm yoki pdf/doc/docx/xls/xlsx) → { chekRasm }
+     2026-11-24: web xodim nomidan plastik sotuvda (POST /avtolavka/sotuv) chekni oldindan yuklash. */
+  chekYuklash = async (req, res) => {
+    if (!req.file) throw new HttpException(400, "Chek fayli yuborilmadi yoki turi ruxsat etilmagan (rasm: jpg, png, webp, gif, heic; hujjat: pdf, doc, docx, xls, xlsx)");
+    res.status(201).send({ chekRasm: `/uploads/kassa/${req.file.filename}`, nomi: req.file.originalname || null, hajm: req.file.size, tur: req.file.mimetype });
+  };
+
   /* GET /kassalar/agentlar?territoriya_id=&faol= — har agent majburiyati */
   agentlar = async (req, res) => {
     const where = {};
