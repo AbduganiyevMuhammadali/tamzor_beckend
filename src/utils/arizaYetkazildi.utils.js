@@ -18,7 +18,7 @@ const KassaModel = require('../models/kassa.model');
 //   Berilsa — shu summa kassaga, qolgani (jami − tolangan) mijoz qarziga.
 // sana: amalning haqiqiy vaqti (mobil oflayn sotuv keyin yuborilganda) — kassa va agent registri shu kunga yoziladi.
 async function arizaYetkazildiEffektlari(ariza, {
-  transaction, userId = null, kassaManbaTur = 'ariza', tolangan = null, izoh = null, sana = null,
+  transaction, userId = null, kassaManbaTur = 'ariza', tolangan = null, izoh = null, sana = null, agentId = null,
 } = {}) {
   // Faqat SOTUV hujjati pul effektlarini beradi. Qaytarish (turi='qaytarish') mijozga
   // qarz yozmaydi va agentga savdo/bonus bermaydi — u qaytarishQabul (ariza.controller)
@@ -47,6 +47,7 @@ async function arizaYetkazildiEffektlari(ariza, {
       izoh:       izoh || `${ariza.raqam} — ${qarz > 0 ? 'qisman naqd' : 'naqd sotuv'}`,
       sana:       vaqt,
       user_id:    userId,
+      agent_id:   agentId,   // agent sotuvi: naqd agent qo'lida (majburiyat) — agentPul.utils
     }, { transaction });
   }
   if (qarz > 0.005 && ariza.mijoz_id) {

@@ -16,6 +16,8 @@ const { reytingYoz } = require('../../utils/reyting.utils');
 const { TashrifModel } = require('../../models/marshrut.model');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
 const { kunKey } = require('../../utils/tahlil.utils');   // lokal (server/biznes) kun — UTC emas
+const { PlastikTolovModel } = require('../../models/kassalar.model');
+const { kassaTekshir, auditYoz } = require('../../utils/agentPul.utils');
 
 /* Avtolavka: agent omboridagi qoldiq, tovar bo'yicha */
 async function agentOmborQoldiq(ombor, transaction) {
@@ -143,7 +145,19 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
   const tolangan = darhol && body.tolanganSumma !== undefined && body.tolanganSumma !== null && body.tolanganSumma !== ''
     ? Math.max(0, Math.min(itog, parseFloat(body.tolanganSumma) || 0)) : null;
   const naqdMi = body.currency === 'naqt' || body.currency === 'naqd';
-  const qarzQism = tolangan !== null ? itog - tolangan : (naqdMi ? 0 : itog);
+
+  /* TO'LOV USULI (2026-11-22): 'naqd' (standart) yoki 'plastik' — bitta sotuvda bitta usul.
+     Plastik: to'langan qism (tolanganSumma, berilmasa — to'liq summa) plastik_tolov 'kutilmoqda' bo'lib
+     yoziladi; tasdiqlanguncha sotuv to'liq qarz (tolangan_summa 0, balans −jami). kassaId majburiy. */
+  const usulRaw = body.tolovUsuli === undefined || body.tolovUsuli === null || body.tolovUsuli === '' ? 'naqd' : String(body.tolovUsuli);
+  if (!['naqd', 'plastik'].includes(usulRaw)) throw new HttpException(400, "tolovUsuli faqat 'naqd' yoki 'plastik' bo'lishi mumkin");
+  if (usulRaw === 'plastik' && !(darhol && agent)) throw new HttpException(400, "Plastik to'lov faqat agent sotuvida qabul qilinadi");
+  const plastikSumma = usulRaw === 'plastik' ? +(tolangan !== null ? tolangan : itog).toFixed(2) : 0;
+  const plastikMi = plastikSumma > 0.005;
+  const plastikKassa = plastikMi ? await kassaTekshir(body.kassaId, { tur: 'plastik', agent, xabar: body.kassaId ? null : "Plastik to'lov uchun kassaId majburiy" }) : null;
+  // Kredit tekshiruvi uchun plastik qismi to'langan deb olinadi (karta hozir to'lanmoqda);
+  // mijoz balansi esa tasdiqgacha to'liq summaga kamayadi.
+  const qarzQism = plastikMi ? itog - plastikSumma : (tolangan !== null ? itog - tolangan : (naqdMi ? 0 : itog));
 
   /* QARZ TO'LOV SANASI: qarzga (yoki qisman) sotuvda agent kalendardan belgilaydi.
      Faqat qarz qismi bo'lsa saqlanadi; sotuv kunidan oldingi sana qabul qilinmaydi. */
@@ -255,14 +269,15 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
       agent_nomi: agent ? agent.fullname : null,
       jami_summa: itog,
       chegirma_summa: chegirma,
-      tolov_turi: body.currency || null,
+      tolov_turi: plastikMi ? 'plastik' : (body.currency || null),
       tolov_sana: tolovSana,
       izoh: [body.komment, webUser ? `Web orqali kiritdi: ${webUser}` : null].filter(Boolean).join(' · ').slice(0, 2000) || null,
       jonatish_sana: darhol ? sanaNormalla(vaqt) : sanaNormalla(body.deliveryDate),
       mobil_id: mobilId,
       oflayn,
       // Avtolavka: joyida olingan naqd (to'liq, qisman yoki 0) — kun hisobi va hisobotlar shundan
-      tolangan_summa: darhol ? (tolangan !== null ? tolangan : (naqdMi ? itog : 0)) : 0,
+      // Plastik — tasdiqgacha 0 (agentPul.utils plastikTasdiqla oshiradi)
+      tolangan_summa: darhol && !plastikMi ? (tolangan !== null ? tolangan : (naqdMi ? itog : 0)) : 0,
       lat: nuqta ? nuqta.lat : null,
       lng: nuqta ? nuqta.lng : null,
       masofa_m: masofa,
@@ -310,8 +325,20 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
       // user_id = agent bilan: inkassatsiya hisoboti uni agent yig'gan pul deb sanaydi
       // Sklad: pul kassada (manba 'sklad', user_id = admin) — inkassatsiyaga kirmaydi
       await arizaYetkazildiEffektlari(ariza, {
-        transaction: t, userId: sklad ? webUserId : agent.id, kassaManbaTur: sklad ? 'sklad' : 'avtolavka', tolangan, sana: vaqt,
+        transaction: t, userId: sklad ? webUserId : agent.id, kassaManbaTur: sklad ? 'sklad' : 'avtolavka',
+        tolangan: plastikMi ? 0 : tolangan, sana: vaqt,
+        agentId: sklad ? null : agent.id,   // naqd agent qo'lida — majburiyat (agentPul.utils)
       });
+      if (plastikMi) {
+        const pt = await PlastikTolovModel.create({
+          tur: 'sotuv', agent_id: agent.id, agent_nomi: agent.fullname, territoriya_id: agent.territoriya_id || null,
+          mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, ariza_id: ariza.id, ariza_raqam: ariza.raqam,
+          kassa_id: plastikKassa.id, summa: plastikSumma, holat: 'kutilmoqda', sana: vaqt,
+        }, { transaction: t });
+        await auditYoz({ obyekt: 'plastik_tolov', obyekt_id: pt.id, amal: 'yaratildi',
+          yangi: { holat: 'kutilmoqda', summa: plastikSumma, kassa_id: plastikKassa.id },
+          user: webUser ? { id: webUserId, nomi: webUser } : { id: null, nomi: `Agent: ${agent.fullname}` } }, t);
+      }
     }
 
     // Chaqiruvchining qo'shimcha qadamlari (masalan saveVozvrat ombor kirimi) — shu tranzaksiyada
@@ -340,6 +367,8 @@ class MobileSavdoController {
       // Mijoz nuqtasigacha masofa (metr) — null: GPS yoki mijoz koordinatasi yo'q
       masofa: ariza.masofa_m,
       uzoqda: ariza.masofa_m != null && ariza.masofa_m > SOTUV_RADIUS_M,
+      // Plastik sotuv: to'lov web tasdig'ini kutadi
+      tolovHolat: ariza.tolov_turi === 'plastik' ? 'kutilmoqda' : null,
       takror,
     });
     // Oflayn navbat bir xil sotuvni qayta yuborsa — borini qaytaramiz (ikki marta yozilmaydi)
@@ -452,41 +481,67 @@ class MobileSavdoController {
     ok(res, { androidId: req.body.androidId ?? 0 }, 'Yangilandi');
   };
 
-  // 6.3 savePayment/ → data: { date }  (offline kontrakt)
-  // paymentSum = [{ paymentTypeId, summa }]
-  // Faqat agent — web "Inkassatsiya" hisoboti (hisobot.controller.js) faqat
-  // `agent` jadvali bilan JOIN qiladi; dostavchik to'lov qabul qilsa,
-  // kassa.user_id dostavchiga ishora qilib, hisobotdan sirli yo'qolib qolardi.
+  // 6.3 savePayment/ → data: { date, holat }  (offline kontrakt)
+  // paymentSum = [{ paymentTypeId, summa, kassaId? }]
+  //   '1' (va boshqa har qanday tur) — NAQD: darhol mijoz qarzi kamayadi, pul agent qo'lida (majburiyat)
+  //   '2' — PLASTIK: kassaId majburiy (agent viloyatidagi faol plastik kassa). plastik_tolov 'kutilmoqda'
+  //         bo'lib yoziladi — mijoz qarzi faqat web'da tasdiqlangandan keyin kamayadi (agentPul.utils).
+  // Faqat agent — dostavchik to'lov qabul qilsa kassa.user_id dostavchiga ishora qilardi.
   savePayment = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
     const { klientId, paymentSum = [], komment, data: sana } = req.body;
+    const agent = req.currentAgent;
     // Har qism chekli, manfiy emas va ≤ 1e12 (Infinity/NaN/"1e400" — 400)
     const royxat = Array.isArray(paymentSum) ? paymentSum : [];
     if (royxat.length > 50) throw new HttpException(400, "To'lov qismlari juda ko'p");
-    const qismlar = royxat
-      .map(p => summaOl(p && typeof p === 'object' ? p.summa : p, { bosh: 0, xabar: "To'lov summasi noto'g'ri" }));
-    const jami = Math.round(qismlar.reduce((s, x) => s + x, 0) * 100) / 100;
+    let naqd = 0, plastik = 0, plastikKassa = null;
+    for (const p of royxat) {
+      const obj = p && typeof p === 'object' ? p : { summa: p };
+      const x = summaOl(obj.summa, { bosh: 0, xabar: "To'lov summasi noto'g'ri" });
+      if (String(obj.paymentTypeId ?? '') === '2') {
+        if (!(x > 0)) continue;
+        const k = obj.kassaId;
+        if (k === undefined || k === null || k === '') throw new HttpException(400, "Plastik to'lov uchun kassaId majburiy");
+        if (plastikKassa !== null && String(plastikKassa) !== String(k)) throw new HttpException(400, "Bitta to'lovda faqat bitta plastik kassa bo'lishi mumkin");
+        plastikKassa = k;
+        plastik += x;
+      } else {
+        naqd += x;
+      }
+    }
+    naqd = Math.round(naqd * 100) / 100;
+    plastik = Math.round(plastik * 100) / 100;
+    const jami = Math.round((naqd + plastik) * 100) / 100;
     if (!(jami > 0) || jami > 1e12) throw new HttpException(400, "To'lov summasi noto'g'ri");
 
     if (!klientId) throw new HttpException(400, 'klientId majburiy');
-    // Faqat agent ishlaydigan mijoz (info/updateClient bilan bir xil qoida; avtolavka — hamma mijoz)
     const mijozOldin = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id'] });
     if (!mijozOldin) throw new HttpException(404, 'Mijoz topilmadi');
+    // Plastik kassa: faol, plastik va agent viloyatini qamraydi (aks holda 400)
+    const kassa = plastik > 0 ? await kassaTekshir(plastikKassa, { tur: 'plastik', agent }) : null;
+    const holat = plastik > 0 ? 'kutilmoqda' : 'tasdiqlangan';
 
     // Oflayn navbat: bir xil to'lov qayta kelsa — ikkinchi marta yozilmaydi.
-    // Tez tekshiruv shu yerda, yakuniy himoya — kassa.mobil_id UNIQUE (parallel takror
-    // tranzaksiyani rollback qiladi va pastda "allaqachon qabul qilingan" deb javob beriladi).
+    // Tez tekshiruv shu yerda, yakuniy himoya — kassa.mobil_id / plastik_tolov.mobil_id UNIQUE.
     const mobilId = mobilKalit(req.body.mobilId);
-    const takrorJavob = () => ok(res, { date: sana || '', takror: true }, "To'lov allaqachon qabul qilingan");
-    const takrorMi = async () => !!(mobilId && await KassaModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'] }));
-    if (await takrorMi()) return takrorJavob();
+    const takrorMi = async (t) => {
+      if (!mobilId) return null;
+      const o = t ? { transaction: t } : {};
+      const p = await PlastikTolovModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id', 'holat'], ...o });
+      if (p) return { holat: p.holat };
+      const k = await KassaModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'], ...o });
+      return k ? { holat: 'tasdiqlangan' } : null;
+    };
+    const takrorJavob = (tk) => ok(res, { date: sana || '', holat: tk.holat, takror: true }, "To'lov allaqachon qabul qilingan");
+    const oldin = await takrorMi();
+    if (oldin) return takrorJavob(oldin);
 
     const chekRasm = req.file ? `/uploads/kassa/${req.file.filename}` : null;
     const vaqt = mobilVaqt(req.body.vaqt);
 
     try {
       await sequelize.transaction(async (t) => {
-        if (mobilId && await KassaModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'], transaction: t })) {
+        if (await takrorMi(t)) {
           const e = new Error('takror'); e.name = 'SequelizeUniqueConstraintError'; throw e;
         }
         // Mijoz qatori qulflab o'qiladi — balans parallel to'lov/sotuvda yo'qolmaydi
@@ -494,40 +549,53 @@ class MobileSavdoController {
         if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
         const eskiBalans = parseFloat(mijoz.balans) || 0;
 
-        const kassa = await KassaModel.create({
-          tur: 'kirim',
-          kategoriya: 'mijoz_tolov',
-          summa: jami,
-          tolov_usul: 'naqt',
-          manba_tur: 'mijoz',
-          manba_id: mijoz.id,
-          mijoz_id: mijoz.id,
-          mijoz_nomi: mijoz.nomi,
-          izoh: komment || null,
-          sana: vaqt,
-          user_id: req.currentAgent ? req.currentAgent.id : null,  // inkassatsiya uchun: kim yig'gani
-          chek_rasm: chekRasm,
-          mobil_id: mobilId,
-        }, { transaction: t });
-
-        // To'lov qarzni kamaytiradi → balans OSHADI (web kassa bilan bir xil mantiq:
-        // manfiy balans = qarz, to'lov balansni musbat tomonga suradi). Nisbiy yozuv (increment).
-        await MijozModel.increment('balans', { by: jami, where: { id: mijoz.id }, transaction: t });
-
-        if (eskiBalans < -0.5) {   // reyting: faqat qarzdor mijoz to'lovi
-          await reytingYoz(mijoz.id, {
-            tur: 'tolov_qabul', sabab: "Qarz to'lovi qabul qilindi", summa: jami, manba_tur: 'kassa', manba_id: kassa.id,
-            qarzYopildi: eskiBalans + jami >= -0.5,
-            xodim: req.currentAgent ? { rol: 'agent', id: req.currentAgent.id, nomi: req.currentAgent.fullname } : null,
+        if (naqd > 0) {
+          const yozuv = await KassaModel.create({
+            tur: 'kirim',
+            kategoriya: 'mijoz_tolov',
+            summa: naqd,
+            tolov_usul: 'naqt',
+            manba_tur: 'mijoz',
+            manba_id: mijoz.id,
+            mijoz_id: mijoz.id,
+            mijoz_nomi: mijoz.nomi,
+            izoh: komment || null,
             sana: vaqt,
-          }, t);
+            user_id: agent ? agent.id : null,  // eski hisobotlar uchun: kim yig'gani
+            agent_id: agent ? agent.id : null, // pul agent qo'lida — majburiyat
+            chek_rasm: chekRasm,
+            mobil_id: mobilId,
+          }, { transaction: t });
+
+          // To'lov qarzni kamaytiradi → balans OSHADI (manfiy balans = qarz). Nisbiy yozuv (increment).
+          await MijozModel.increment('balans', { by: naqd, where: { id: mijoz.id }, transaction: t });
+
+          if (eskiBalans < -0.5) {   // reyting: faqat qarzdor mijoz to'lovi
+            await reytingYoz(mijoz.id, {
+              tur: 'tolov_qabul', sabab: "Qarz to'lovi qabul qilindi", summa: naqd, manba_tur: 'kassa', manba_id: yozuv.id,
+              qarzYopildi: eskiBalans + naqd >= -0.5,
+              xodim: agent ? { rol: 'agent', id: agent.id, nomi: agent.fullname } : null,
+              sana: vaqt,
+            }, t);
+          }
+        }
+        if (plastik > 0) {
+          // Kutilmoqda: mijoz balansi ham, kassa jurnali ham tasdiqgacha o'zgarmaydi
+          const p = await PlastikTolovModel.create({
+            mobil_id: mobilId, tur: 'qarz_tolov', agent_id: agent.id, agent_nomi: agent.fullname,
+            territoriya_id: agent.territoriya_id || null, mijoz_id: mijoz.id, mijoz_nomi: mijoz.nomi,
+            kassa_id: kassa.id, summa: plastik, holat: 'kutilmoqda', izoh: komment ? String(komment).slice(0, 255) : null,
+            chek_rasm: chekRasm, sana: vaqt,
+          }, { transaction: t });
+          await auditYoz({ obyekt: 'plastik_tolov', obyekt_id: p.id, amal: 'yaratildi',
+            yangi: { holat: 'kutilmoqda', summa: plastik, kassa_id: kassa.id }, user: { id: null, nomi: `Agent: ${agent.fullname}` } }, t);
         }
       });
     } catch (e) {
-      if (takrorXato(e) && await takrorMi()) return takrorJavob();
+      if (takrorXato(e)) { const tk = await takrorMi(); if (tk) return takrorJavob(tk); }
       throw e;
     }
-    ok(res, { date: sana || '' }, "To'lov qabul qilindi");
+    ok(res, { date: sana || '', holat }, plastik > 0 ? "To'lov qabul qilindi — plastik tasdiqlanishi kutilmoqda" : "To'lov qabul qilindi");
   };
 }
 
