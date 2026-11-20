@@ -29,6 +29,7 @@ const { MijozModel } = require('../../models/mijoz.model');
 const { narxXaritasi } = require('../../utils/narx.utils');
 const { kreditTekshir } = require('../../utils/kreditLimit.utils');
 const { createAriza } = require('../mobile/savdo.controller');
+const { agentPlastikKassalar } = require('../../utils/agentPul.utils');
 const { yetkazilganSotuvniBekorQil, adminTekshir } = require('../../utils/sotuvBekor.utils');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const { tzOffset } = require('../../utils/tahlil.utils');
@@ -606,10 +607,11 @@ class AvtolavkaController {
     const ombor = sklad ? ASOSIY_OMBOR : agentOmbori(agent.fullname);
     const mijozId = parseInt(req.query.mijoz_id, 10) || null;
 
-    const [map, kun, mijoz] = await Promise.all([
+    const [map, kun, mijoz, plastikKassalar] = await Promise.all([
       sklad ? skladQoldigi() : omborQoldiq(ombor),   // sklad: band qilinganidan tashqari MAVJUD qoldiq
       sklad ? null : kunHisobla(agent, sana),
       mijozId ? MijozModel.findByPk(mijozId) : null,
+      sklad ? [] : agentPlastikKassalar(agent),        // 2026-11-24: plastik to'lov uchun kassa tanlovi
     ]);
     if (mijozId && !mijoz) throw new HttpException(404, 'Mijoz topilmadi');
     const ids = Object.keys(map).filter(id => map[id].qoldiq > EPS).map(Number);
@@ -643,6 +645,8 @@ class AvtolavkaController {
       ombor, sana, bugun: kunKey(new Date()),
       kun: kun ? { holat: kun.holat, kun_yopish: kun.kun_yopish, sotildi: kun.tovar.sotildi, naqd: kun.pul.naqd_olindi, topshirish: kun.topshirish } : null,
       narx_ruyxat: narx.ruyxat,
+      // Agent viloyatidagi faol plastik kassalar [{ id, nomi }] — tolov_usuli 'plastik' uchun (sklad: [])
+      plastik_kassalar: plastikKassalar.map(k => ({ id: k.id, nomi: k.nomi })),
       mijoz: mijozJson,
       tovarlar: ids.map(id => {
         const t = tovarBy.get(id) || {}, x = narxBy.get(id) || { narx: 0, manba: 'yoq' };
@@ -660,12 +664,25 @@ class AvtolavkaController {
   // yoziladi; shu kalit bilan qayta yuborilsa yangi sotuv yaratilmaydi, mavjudi 200 bilan qaytadi.
   sotuvCreate = async (req, res) => {
     const b = req.body || {};
+    // multipart (chek fayli bilan) — qatorlar JSON matn bo'lib keladi
+    if (typeof b.qatorlar === 'string') {
+      try { b.qatorlar = JSON.parse(b.qatorlar); } catch (e) { throw new HttpException(400, "qatorlar noto'g'ri (JSON massiv)"); }
+    }
+    /* TO'LOV USULI (2026-11-24): 'naqd' (standart) | 'plastik' — mobil saveSell bilan bir xil qoida:
+       to'langan qism (tolov 'naqd' → hammasi, 'qisman' → naqd maydoni) plastik_tolov 'kutilmoqda' bo'ladi,
+       kassa_id — agent viloyatidagi faol plastik kassa, chek majburiy: multipart `chek` fayli yoki
+       chek_rasm (POST /kassalar/chek-yuklash qaytargan yo'l). Tasdiqgacha sotuv to'liq qarz. */
+    const usulRaw = b.tolov_usuli ?? b.tolovUsuli;
+    const usul = usulRaw === undefined || usulRaw === null || usulRaw === '' ? 'naqd' : String(usulRaw);
+    if (!['naqd', 'plastik'].includes(usul)) throw new HttpException(400, "tolov_usuli faqat 'naqd' yoki 'plastik'");
     let sorovId = null;
     if (b.sorov_id !== undefined && b.sorov_id !== null && String(b.sorov_id).trim() !== '') {
       sorovId = String(b.sorov_id).trim();
       if (!/^[A-Za-z0-9_.:-]{8,64}$/.test(sorovId)) throw new HttpException(400, "sorov_id noto'g'ri (8–64 belgi: harf, raqam, - _ . :)");
     }
     const sklad = skladMi(b.agent_id);   // xodimsiz — asosiy skladdan (createAriza agent=null)
+    if (usul === 'plastik' && sklad) throw new HttpException(400, "Plastik to'lov faqat agent nomidan sotuvda qabul qilinadi");
+    if (usul === 'plastik' && b.tolov === 'qarz') throw new HttpException(400, "Plastik to'lovda to'langan summa bo'lishi kerak (tolov: 'naqd' yoki 'qisman')");
     // Takroriy so'rov: mavjud sotuvni qaytaramiz (boshqa sotuvga tegishli kalit — 409)
     const takrorJavob = async () => {
       const bor = await ArizaModel.findOne({ where: { mobil_id: sorovId }, include: [{ model: ArizaQatorModel, as: 'qatorlar' }] });
@@ -675,11 +692,14 @@ class AvtolavkaController {
       }
       const m = await MijozModel.findByPk(bor.mijoz_id, { paranoid: false });
       const a = bor.agent_id ? await AgentModel.findByPk(bor.agent_id, { attributes: ['id', 'fullname'], paranoid: false }) : null;
-      const summa = n(bor.jami_summa), naqd = n(bor.tolangan_summa);
+      const summa = n(bor.jami_summa);
       const qatorlar = bor.qatorlar || [];
+      const pl = await plastikJavob(bor);
+      const naqd = pl ? 0 : n(bor.tolangan_summa), tolandi = pl ? pl.summa : naqd;
       res.status(200).send({
         id: bor.id, raqam: bor.raqam, sana: kunKey(new Date(bor.yetkazilgan_sana || bor.createdAt)),
-        summa, naqd, qarz: +(summa - naqd).toFixed(2), tolov_sana: bor.tolov_sana || null,
+        summa, naqd, qarz: +(summa - tolandi).toFixed(2), tolov_sana: bor.tolov_sana || null,
+        tolov_usuli: pl ? 'plastik' : 'naqd', plastik: pl,
         sklad: !bor.agent_id, agent: a ? { id: a.id, fullname: a.fullname } : null,
         mijoz: m ? { id: m.id, nomi: m.nomi, balans: n(m.balans) } : null,
         tovar_soni: qatorlar.length, dona: +qatorlar.reduce((s, q) => s + n(q.jami_dona), 0).toFixed(3),
@@ -751,6 +771,12 @@ class AvtolavkaController {
       komment: String(b.izoh || '').trim().slice(0, 500) || null,
       vaqt: vaqt.toISOString(),
     };
+    if (usul === 'plastik') {
+      body.tolovUsuli = 'plastik';
+      body.kassaId = b.kassa_id ?? b.kassaId;
+      body.chekRasm = req.file ? `/uploads/kassa/${req.file.filename}` : (b.chek_rasm ?? b.chekRasm);
+      body.chekIzoh = b.chek_izoh ?? b.chekIzoh;
+    }
     const kim = req.currentUser ? (req.currentUser.fullname || req.currentUser.username) : null;
     if (sorovId) body.mobilId = sorovId;
     let ariza;
@@ -763,14 +789,91 @@ class AvtolavkaController {
       throw e;
     }
     await mijoz.reload();
+    const pl = await plastikJavob(ariza);
 
     res.status(201).send({
-      id: ariza.id, raqam: ariza.raqam, sana, summa: itog, naqd, qarz, tolov_sana: tolovSana,
+      id: ariza.id, raqam: ariza.raqam, sana, summa: itog, naqd: pl ? 0 : naqd, qarz, tolov_sana: tolovSana,
+      tolov_usuli: pl ? 'plastik' : 'naqd', plastik: pl,
       sklad, agent: agent ? { id: agent.id, fullname: agent.fullname } : null,
       mijoz: { id: mijoz.id, nomi: mijoz.nomi, balans: n(mijoz.balans) },
       tovar_soni: qatorlar.length, dona: +qatorlar.reduce((s, q) => s + q.dona, 0).toFixed(3),
     });
   };
+}
+
+/* ── QAYTARISHLAR TARIXI (2026-11-24) — mobil savdoQaytarish yozuvlari ──
+   GET /avtolavka/qaytarishlar?dan=&gacha=&agent_id=&mijoz_id=&viloyat_id=&page=&limit=
+   viloyat — agentning territoriyasi (kassalar bilan bir xil qoida). */
+const qaytarishJson = (q) => ({
+  id: q.id, sana: q.sana,
+  agent: { id: q.agent_id, nomi: q.agent_nomi },
+  mijoz: q.mijoz_id ? { id: q.mijoz_id, nomi: q.mijoz_nomi } : null,
+  viloyat: q.viloyat_id ? { id: q.viloyat_id, nomi: q.viloyat_nomi } : null,
+  sotuv: { id: q.ariza_id, raqam: q.ariza_raqam || String(q.ariza_id) },
+  summa: n(q.summa), yaroqli_summa: n(q.yaroqli_summa), yaroqsiz_summa: n(q.yaroqsiz_summa),
+  // tolov: 'qarz' — mijoz balansiga (qarzdan ayirildi), 'naqd' — agent mijozga naqd qaytardi
+  tolov: q.tolov, tolov_nomi: q.tolov === 'naqd' ? 'Naqd qaytarildi' : 'Balansga (qarzdan ayirildi)',
+  eski_jami: n(q.eski_jami), yangi_jami: n(q.yangi_jami), izoh: q.izoh || null, kassa_yozuv_id: q.kassa_id || null,
+  qator_soni: Number(q.qator_soni) || 0,
+});
+const QAYT_SELECT = `SELECT q.*, a.territoriya_id viloyat_id, t.nomi viloyat_nomi,
+    (SELECT COUNT(*) FROM savdo_qaytarish_qator x WHERE x.qaytarish_id = q.id) qator_soni
+  FROM savdo_qaytarish q LEFT JOIN agent a ON a.id = q.agent_id LEFT JOIN territoriya t ON t.id = a.territoriya_id`;
+const idQ = (v, nom) => {
+  const x = Number(v);
+  if (!Number.isInteger(x) || x <= 0) throw new HttpException(400, `${nom} noto'g'ri`);
+  return x;
+};
+
+AvtolavkaController.prototype.qaytarishlar = async function (req, res) {
+  const q = req.query;
+  const { from, to } = kunOraligi(q, 'dan', 'gacha');
+  const w = ['1=1'], R = {};
+  if (from) { w.push('q.sana >= :dan'); R.dan = kunBoshi(from); }
+  if (to) { w.push('q.sana <= :gacha'); R.gacha = kunOxiri(to); }
+  if (q.agent_id) { w.push('q.agent_id = :agent'); R.agent = idQ(q.agent_id, 'agent_id'); }
+  if (q.mijoz_id) { w.push('q.mijoz_id = :mijoz'); R.mijoz = idQ(q.mijoz_id, 'mijoz_id'); }
+  if (q.viloyat_id) { w.push('a.territoriya_id = :vil'); R.vil = idQ(q.viloyat_id, 'viloyat_id'); }
+  const limit = Math.min(500, Math.max(1, parseInt(q.limit, 10) || 50));
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
+  const W = w.join(' AND ');
+  const [[jami], rows] = await Promise.all([
+    sequelize.query(`SELECT COUNT(*) soni, COALESCE(SUM(q.summa),0) summa,
+        COALESCE(SUM(CASE WHEN q.tolov='naqd' THEN q.summa ELSE 0 END),0) naqd,
+        COALESCE(SUM(CASE WHEN q.tolov='qarz' THEN q.summa ELSE 0 END),0) balansga
+      FROM savdo_qaytarish q LEFT JOIN agent a ON a.id = q.agent_id WHERE ${W}`, { replacements: R, type: sequelize.QueryTypes.SELECT }),
+    sequelize.query(`${QAYT_SELECT} WHERE ${W} ORDER BY q.sana DESC, q.id DESC LIMIT :limit OFFSET :offset`,
+      { replacements: { ...R, limit, offset: (page - 1) * limit }, type: sequelize.QueryTypes.SELECT }),
+  ]);
+  res.send({
+    data: rows.map(qaytarishJson),
+    jami: { soni: Number(jami.soni) || 0, summa: n(jami.summa), naqd: n(jami.naqd), balansga: n(jami.balansga) },
+    page, limit,
+  });
+};
+
+// GET /avtolavka/qaytarishlar/:id — qatorlar bilan
+AvtolavkaController.prototype.qaytarishBitta = async function (req, res) {
+  const id = idQ(req.params.id, 'id');
+  const [q] = await sequelize.query(`${QAYT_SELECT} WHERE q.id = :id`, { replacements: { id }, type: sequelize.QueryTypes.SELECT });
+  if (!q) throw new HttpException(404, 'Qaytarish topilmadi');
+  const qatorlar = await sequelize.query(`SELECT * FROM savdo_qaytarish_qator WHERE qaytarish_id = :id ORDER BY id`,
+    { replacements: { id }, type: sequelize.QueryTypes.SELECT });
+  res.send({
+    ...qaytarishJson(q),
+    qatorlar: qatorlar.map(x => ({
+      id: x.id, tovar_id: x.tovar_id, tovar_nomi: x.tovar_nomi, miqdor: n(x.dona), narx: n(x.narx), summa: n(x.summa),
+      holat: x.yaroqli ? 'yaroqli' : 'yaroqsiz', ombor: x.ombor, sabab: x.sabab || null,
+    })),
+  });
+};
+
+/* Sotuvning plastik to'lovi (bo'lsa) — javob uchun */
+async function plastikJavob(ariza) {
+  if (!ariza || ariza.tolov_turi !== 'plastik') return null;
+  const [p] = await sequelize.query(`SELECT p.id, p.holat, p.summa, p.kassa_id, k.nomi kassa_nomi, p.chek_rasm FROM plastik_tolov p
+      LEFT JOIN kassalar k ON k.id = p.kassa_id WHERE p.ariza_id = :id`, { replacements: { id: ariza.id }, type: sequelize.QueryTypes.SELECT });
+  return p ? { id: p.id, holat: p.holat, summa: n(p.summa), kassa_id: p.kassa_id, kassa_nomi: p.kassa_nomi, chek_rasm: p.chek_rasm } : null;
 }
 
 // Web sotuvi necha kun orqaga kiritilishi mumkin (mobilVaqt 7 kundan eskisini "hozir"ga aylantiradi)

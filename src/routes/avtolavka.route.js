@@ -3,6 +3,8 @@ const router = express.Router();
 const c = require('../controllers/web/avtolavka.controller');
 const auth = require('../middleware/auth.middleware');
 const h = require('../middleware/awaitHandlerFactory.middleware');
+const ruxsat = require('../middleware/ruxsat.middleware');
+const uploadKassa = require('../middleware/uploadKassa.middleware');
 
 router.get('/doska',          auth(), h(c.doska));
 router.get('/kalendar',       auth(), h(c.kalendar));
@@ -13,6 +15,10 @@ router.get('/qoldiq',         auth(), h(c.qoldiq));
 router.get('/solishtirma',    auth(), h(c.solishtirma));
 router.get('/kunlar',         auth(), h(c.kunlar));
 router.get('/sotuvlar',       auth(), h(c.sotuvlar));
+
+// 2026-11-24: sotuvga bog'langan qaytarishlar tarixi (mobil savdoQaytarish) — avtolavka 'view'
+router.get('/qaytarishlar',     auth(), ruxsat('avtolavka', 'view'), h(c.qaytarishlar));
+router.get('/qaytarishlar/:id', auth(), ruxsat('avtolavka', 'view'), h(c.qaytarishBitta));
 
 router.get('/hujjatlar',      auth(), h(c.ruyxat));
 router.get('/hujjatlar/:id',  auth(), h(c.getById));
@@ -29,7 +35,8 @@ router.post('/kun/qayta-och',          auth(), h(c.kunQaytaOch));
 
 // Sotuv qilish — xodim ilovadan sota olmasa, web'dan uning nomidan (mobil saveSell bilan bir xil yo'l)
 router.get('/sotuv/tayyor',            auth(), h(c.sotuvTayyor));
-router.post('/sotuv',                  auth(), h(c.sotuvCreate));
+// 2026-11-24: tolov_usuli 'plastik' — chek multipart `chek` fayli yoki JSON chek_rasm (POST /kassalar/chek-yuklash)
+router.post('/sotuv',                  auth(), uploadKassa.single('chek'), h(c.sotuvCreate));
 // Takror/xato chekni bekor qilish — faqat Admin (ombor, kassa, mijoz qarzi, bonus teskari yoziladi)
 router.post('/sotuv/:id/bekor',        auth('Admin', 'Programmer'), h(c.sotuvBekor));
 
