@@ -1,6 +1,6 @@
 # Backend audit: nima qilindi va nima rejada
 
-> Oxirgi yangilanish: 2026-11-19. Bu fayl keyingi sessiyalar (va dasturchilar) uchun:
+> Oxirgi yangilanish: 2026-11-21. Bu fayl keyingi sessiyalar (va dasturchilar) uchun:
 > loyihada qanday xatolar topilgani, qaysilari tuzatilgani, qanday sinalgani va
 > hali nima qilinishi kerakligi.
 >
@@ -208,6 +208,22 @@ Barcha endpoint'lar (mobil, web pul/ombor, asosiy ma'lumotlar, hisobotlar) valid
 - **Mijoz:** mavjud bo'lmagan `territoriya_id` / `kategoriya_id` / `agent_id` → 400 (avval FK xatosi, 500).
 - **Mobil `avtolavkaSinxron`:** mashina qatorlarida `countType` (o'lchov birligi).
 - **Ataylab o'zgartirilmadi:** `arizalar` va `agents` PATCH'da `.unknown(false)` (ortiqcha maydon → 400). Bu mass-assignment himoyasi.
+
+
+---
+
+## 5d. Agent va super agent modeli (2026-11-21)
+
+Egasining qarori: mobil ilovada faqat **agent** va **super agent**. Batafsil (web uchun) — `FRONTEND-UCHUN.md` 16-bo'lim.
+
+- **Migratsiyalar:** `20261121000001-agent-super-agent` (`agent.super_agent`, `agent.super_agent_id`; barcha agentlar `avtolavka=1`, standart true), `20261121000002-savdo-qaytarish` (`savdo_qaytarish`, `savdo_qaytarish_qator`, `mobil_id` UNIQUE).
+- **Rollar** (`mobilRollar.utils.js`, `auth.controller.js`): agent → `asosiyRol:'agent'`, `rollar:['agent'(, 'super_agent')]`, `superAgent`, `viloyat`. `MOBIL_ROLLAR` da `agent` (yoki eski `avtolavka`) bo'lsa `super_agent` ham ochiq. Dostavchik login → 403.
+- **Kuzatuv** (`mobileAuth`): `x-kuzat-agent: <id>` — faqat super agent, faqat o'ziga biriktirilgan faol agent, faqat GET; aks holda 403. `req.currentAgent` = kuzatilgan agent, `req.kuzatuv`, `req.superAgent`.
+- **Mobil:** `avtolavkaSinxron` — faqat o'z mijozlari, `keyingiQadam` doim `savdo`, `naqdQolda` = bugungi naqd − bugungi naqd qaytarish (inkassatsiyaga bog'liq emas), yangi `brak`, `savdolar` (30 kun), `kuzatuv`, `agent.viloyat`. Yangi `GET agentlarim`, `POST savdoQaytarish`. `mijozCheklar` qaytarish yozuvlarini ham beradi. `mijozRuxsat` dan "avtolavka agentiga hamma mijoz" istisnosi olib tashlandi.
+- **Qaytarish qoidasi:** ariza → qatorlar → tovar → mijoz qulf tartibi; sotuv summasi, qatorlar, `tolangan_summa`, `agent_register` kamayadi; naqd → kassa chiqimi `sotuv_qaytarish` (user_id=agent), qarz → `mijoz.balans += summa`. Qaytarishli sotuvni `sotuvBekor` rad etadi.
+- **Brak:** agent brak ombori `"Agent: <ism> (brak)"` (`ombor.utils agentBrakOmbori/brakOmboriMi`); tahlil va dashboard qoldig'idan chiqarildi.
+- **Sinov (lokal tz_yangi, 2026-11-21):** 55/55 HTTP tekshiruv (rollar, sinxron shakli, sotuv, yaroqli/yaroqsiz qaytarish ikkala to'lov turi bilan, ortiqcha → 400, takror va 3× parallel → 1 yozuv, begona → 403, super agent `agentlarim` va kuzatuv GET/POST/begona) + 14 ta web GET smoke (200).
+- **Ochiq:** web'da qaytarishlar tarixini ko'rish API'si yo'q; `hisobot/inkassatsiya` naqd qaytarishni ayirmaydi; chegirmali sotuvda qaytarish qator summasidan ayiriladi (chegirma proporsional taqsimlanmaydi, jami 0 dan pastga tushmaydi — dostavchik qaytarishi bilan bir xil); `saveSell` mijoz egaligini hali tekshirmaydi (oflayn sabab).
 
 ---
 
