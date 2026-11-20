@@ -62,6 +62,7 @@ module.exports = {
   clientNotSell: klient.clientNotSell,
   tolovSurildi: klient.tolovSurildi,     // mijoz reytingi: to'lov vaqti surildi
   savePayment: savdo.savePayment,
+  chekYuklash: savdo.chekYuklash,
 
   // 7. Delivery
   getDokDelivery: delivery.getDokDelivery,

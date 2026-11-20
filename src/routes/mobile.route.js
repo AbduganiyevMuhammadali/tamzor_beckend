@@ -62,6 +62,7 @@ router.post('/editSell',      mobileAuth(), h(c.editSell));
 router.get('/clientNotSell',  mobileAuth(), h(c.clientNotSell));
 router.post('/tolovSurildi',  mobileAuth(), h(c.tolovSurildi));   // mijoz reytingi: qarz to'lovi boshqa kunga surildi
 router.post('/savePayment',   mobileAuth(), uploadKassa.single('chek'), h(c.savePayment));
+router.post('/chekYuklash',   mobileAuth(), uploadKassa.single('chek'), h(c.chekYuklash));   // 2026-11-23: plastik/karta cheki
 
 /* ── 7. Delivery ───────────────────────────────────────────────────────── */
 router.get('/getDokDelivery',          mobileAuth(), dostavchik, h(c.getDokDelivery));

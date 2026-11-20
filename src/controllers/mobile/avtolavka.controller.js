@@ -35,7 +35,7 @@ const { InkassatsiyaModel } = require('../../models/inkassatsiya.model');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const { tzOffset, kunKey } = require('../../utils/tahlil.utils');
-const { agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, topshiruvYarat } = require('../../utils/agentPul.utils');
+const { agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, topshiruvYarat, kassaTekshir, chekRasmOl } = require('../../utils/agentPul.utils');
 const {
   INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
   raqamYarat, narxMap, omborQoldiq, yuklashQoldigi, qatorlarniTayyorla, kunHisobla, kunniQaytaOch, tavsiyaHisobla,
@@ -413,6 +413,9 @@ async function pulBloki(agent) {
       holat: x.holat,
       ...(x.sabab ? { sabab: x.sabab } : {}),
       ...(x.izoh ? { izoh: x.izoh } : {}),
+      // 2026-11-23: topshiruv — usul ('naqd'|'karta') va kassa nomi (naqd: tasdiqgacha null); chek rasmi bo'lsa yo'li
+      ...(x.tur === 'topshiruv' ? { usul: x.usul || 'naqd', kassaNomi: x.kassa || null } : {}),
+      ...(x.chek_rasm ? { chekRasm: x.chek_rasm } : {}),
     })),
   };
 }
@@ -929,8 +932,11 @@ class MobileAvtolavkaController {
     ok(res, qaytarishJavob(natija.qaytarish), 'Qaytarish saqlandi');
   };
 
-  // POST pulTopshirish/ { mobilId, summa, izoh, vaqt } — agent qo'lidagi naqdni kassaga topshiradi.
-  // 'kutilmoqda' → web'da naqd kassa tanlanib tasdiqlanadi (majburiyat kamayadi) yoki rad etiladi.
+  // POST pulTopshirish/ { mobilId, summa, izoh, vaqt, usul?, kassaId?, chekRasm? } — agent qo'lidagi naqdni topshiradi.
+  // usul 'naqd' (standart): kassirga naqd — web'da naqd kassa tanlanib tasdiqlanadi.
+  // usul 'karta' (2026-11-23): agent kartadan kompaniya plastik kassasiga o'tkazdi — kassaId (agent viloyatidagi
+  //   faol plastik kassa, avtolavkaSinxron.kassalar) va chekRasm (chekYuklash/ yo'li) majburiy; web kassa tanlamaydi.
+  // Ikkalasi ham 'kutilmoqda' → tasdiqda majburiyat kamayadi, rad — yozuv qoladi.
   // summa ≤ qo'ldagi naqd − tasdiq kutilayotgan topshiruvlar, aks holda 400. mobilId — takror himoyasi.
   pulTopshirish = async (req, res) => {
     const agent = avtoAgent(req, res); if (!agent) return;
@@ -938,10 +944,15 @@ class MobileAvtolavkaController {
     const summa = summaOl(b.summa, { xabar: "Summa noto'g'ri" });
     if (!(summa > 0)) throw new HttpException(400, "Summa 0 dan katta bo'lishi kerak");
     const izoh = b.izoh === undefined || b.izoh === null ? null : String(b.izoh).trim().slice(0, 500) || null;
+    const usul = b.usul === undefined || b.usul === null || b.usul === '' ? 'naqd' : String(b.usul);
+    if (!['naqd', 'karta'].includes(usul)) throw new HttpException(400, "usul faqat 'naqd' yoki 'karta' bo'lishi mumkin");
     const mobilId = mobilKalit(b.mobilId);
     const vaqt = mobilVaqt(b.vaqt);
     const { PulTopshiruvModel } = require('../../models/kassalar.model');
-    const javob = (x, takror = false) => ({ topshiruvId: String(x.id), holat: x.holat, summa: n(x.summa), ...(takror ? { takror: true } : {}) });
+    const javob = (x, takror = false) => ({
+      topshiruvId: String(x.id), holat: x.holat, summa: n(x.summa), usul: x.usul || 'naqd',
+      kassaId: x.kassa_id ? String(x.kassa_id) : null, chekRasm: x.chek_rasm || null, ...(takror ? { takror: true } : {}),
+    });
     const takrorTekshir = (x) => {
       if (Number(x.agent_id) !== Number(agent.id)) throw new HttpException(409, 'Bu mobilId boshqa amalga tegishli');
       return ok(res, javob(x, true), 'Topshiruv allaqachon yuborilgan');
@@ -950,9 +961,15 @@ class MobileAvtolavkaController {
       const bor = await PulTopshiruvModel.findOne({ where: { mobil_id: mobilId } });
       if (bor) return takrorTekshir(bor);
     }
+    let kassa = null, chekRasm = null;
+    if (usul === 'karta') {
+      if (b.kassaId === undefined || b.kassaId === null || b.kassaId === '') throw new HttpException(400, 'Karta topshiruvi uchun kassaId majburiy (plastik kassa)');
+      kassa = await kassaTekshir(b.kassaId, { tur: 'plastik', agent });
+      chekRasm = chekRasmOl(b.chekRasm, { majburiy: true, xabar: "Karta topshiruvi uchun chek rasmi majburiy (chekRasm)" });
+    }
     let r;
     try {
-      r = await topshiruvYarat(agent, { summa, izoh, mobilId, vaqt });
+      r = await topshiruvYarat(agent, { summa, izoh, mobilId, vaqt, usul, kassa, chekRasm });
     } catch (e) {
       if (takrorXato(e) && mobilId) {
         const bor = await PulTopshiruvModel.findOne({ where: { mobil_id: mobilId } });

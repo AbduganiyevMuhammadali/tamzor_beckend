@@ -17,7 +17,7 @@ const { TashrifModel } = require('../../models/marshrut.model');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
 const { kunKey } = require('../../utils/tahlil.utils');   // lokal (server/biznes) kun — UTC emas
 const { PlastikTolovModel } = require('../../models/kassalar.model');
-const { kassaTekshir, auditYoz } = require('../../utils/agentPul.utils');
+const { kassaTekshir, auditYoz, chekRasmOl } = require('../../utils/agentPul.utils');
 
 /* Avtolavka: agent omboridagi qoldiq, tovar bo'yicha */
 async function agentOmborQoldiq(ombor, transaction) {
@@ -155,6 +155,10 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
   const plastikSumma = usulRaw === 'plastik' ? +(tolangan !== null ? tolangan : itog).toFixed(2) : 0;
   const plastikMi = plastikSumma > 0.005;
   const plastikKassa = plastikMi ? await kassaTekshir(body.kassaId, { tur: 'plastik', agent, xabar: body.kassaId ? null : "Plastik to'lov uchun kassaId majburiy" }) : null;
+  // 2026-11-23: plastik to'lov cheki (chekYuklash/ qaytargan yo'l) majburiy, chekIzoh ixtiyoriy
+  const plastikChek = plastikMi ? chekRasmOl(body.chekRasm, { majburiy: true, xabar: "Plastik to'lov uchun chek rasmi majburiy (chekRasm)" }) : null;
+  const plastikIzoh = plastikMi && body.chekIzoh !== undefined && body.chekIzoh !== null
+    ? (String(body.chekIzoh).trim().slice(0, 255) || null) : null;
   // Kredit tekshiruvi uchun plastik qismi to'langan deb olinadi (karta hozir to'lanmoqda);
   // mijoz balansi esa tasdiqgacha to'liq summaga kamayadi.
   const qarzQism = plastikMi ? itog - plastikSumma : (tolangan !== null ? itog - tolangan : (naqdMi ? 0 : itog));
@@ -334,6 +338,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
           tur: 'sotuv', agent_id: agent.id, agent_nomi: agent.fullname, territoriya_id: agent.territoriya_id || null,
           mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, ariza_id: ariza.id, ariza_raqam: ariza.raqam,
           kassa_id: plastikKassa.id, summa: plastikSumma, holat: 'kutilmoqda', sana: vaqt,
+          chek_rasm: plastikChek, izoh: plastikIzoh,
         }, { transaction: t });
         await auditYoz({ obyekt: 'plastik_tolov', obyekt_id: pt.id, amal: 'yaratildi',
           yangi: { holat: 'kutilmoqda', summa: plastikSumma, kassa_id: plastikKassa.id },
@@ -481,8 +486,18 @@ class MobileSavdoController {
     ok(res, { androidId: req.body.androidId ?? 0 }, 'Yangilandi');
   };
 
+  // POST chekYuklash/ (multipart, maydon `chek`, 1 rasm ≤10MB) → data: { chekRasm: '/uploads/kassa/<nom>' }
+  // 2026-11-23: plastik to'lov (savePayment / saveSell) va karta topshiruvi (pulTopshirish) chekini
+  // oldindan yuklash — qaytgan yo'l keyingi so'rovda chekRasm sifatida yuboriladi.
+  chekYuklash = async (req, res) => {
+    if (!req.file) throw new HttpException(400, 'Chek rasmi yuborilmadi yoki rasm emas (jpg, png, webp, heic)');
+    ok(res, { chekRasm: `/uploads/kassa/${req.file.filename}` }, 'Chek yuklandi');
+  };
+
   // 6.3 savePayment/ → data: { date, holat }  (offline kontrakt)
-  // paymentSum = [{ paymentTypeId, summa, kassaId? }]
+  // paymentSum = [{ paymentTypeId, summa, kassaId?, chekRasm?, izoh? }]
+  //   '2' qismida chekRasm majburiy (chekYuklash/ yo'li; multipart `chek` fayli ham hisoblanadi), izoh ixtiyoriy
+  //   (berilmasa — to'lov komment). Bitta to'lovda bitta plastik kassa va bitta chek.
   //   '1' (va boshqa har qanday tur) — NAQD: darhol mijoz qarzi kamayadi, pul agent qo'lida (majburiyat)
   //   '2' — PLASTIK: kassaId majburiy (agent viloyatidagi faol plastik kassa). plastik_tolov 'kutilmoqda'
   //         bo'lib yoziladi — mijoz qarzi faqat web'da tasdiqlangandan keyin kamayadi (agentPul.utils).
@@ -494,7 +509,9 @@ class MobileSavdoController {
     // Har qism chekli, manfiy emas va ≤ 1e12 (Infinity/NaN/"1e400" — 400)
     const royxat = Array.isArray(paymentSum) ? paymentSum : [];
     if (royxat.length > 50) throw new HttpException(400, "To'lov qismlari juda ko'p");
-    let naqd = 0, plastik = 0, plastikKassa = null;
+    // Multipart `chek` fayli (eski usul) — plastik qismlar uchun chekRasm o'rnida
+    const yuklanganChek = req.file ? `/uploads/kassa/${req.file.filename}` : null;
+    let naqd = 0, plastik = 0, plastikKassa = null, plastikChek = null, plastikIzoh = null;
     for (const p of royxat) {
       const obj = p && typeof p === 'object' ? p : { summa: p };
       const x = summaOl(obj.summa, { bosh: 0, xabar: "To'lov summasi noto'g'ri" });
@@ -504,6 +521,12 @@ class MobileSavdoController {
         if (k === undefined || k === null || k === '') throw new HttpException(400, "Plastik to'lov uchun kassaId majburiy");
         if (plastikKassa !== null && String(plastikKassa) !== String(k)) throw new HttpException(400, "Bitta to'lovda faqat bitta plastik kassa bo'lishi mumkin");
         plastikKassa = k;
+        const ch = obj.chekRasm !== undefined && obj.chekRasm !== null && String(obj.chekRasm).trim() !== ''
+          ? chekRasmOl(obj.chekRasm) : yuklanganChek;
+        if (!ch) throw new HttpException(400, "Plastik to'lov uchun chek rasmi majburiy (chekRasm)");
+        if (plastikChek !== null && plastikChek !== ch) throw new HttpException(400, "Bitta to'lovda faqat bitta chek rasmi bo'lishi mumkin");
+        plastikChek = ch;
+        if (obj.izoh !== undefined && obj.izoh !== null && String(obj.izoh).trim()) plastikIzoh = String(obj.izoh).trim().slice(0, 255);
         plastik += x;
       } else {
         naqd += x;
@@ -536,7 +559,7 @@ class MobileSavdoController {
     const oldin = await takrorMi();
     if (oldin) return takrorJavob(oldin);
 
-    const chekRasm = req.file ? `/uploads/kassa/${req.file.filename}` : null;
+    const chekRasm = yuklanganChek;
     const vaqt = mobilVaqt(req.body.vaqt);
 
     try {
@@ -584,8 +607,9 @@ class MobileSavdoController {
           const p = await PlastikTolovModel.create({
             mobil_id: mobilId, tur: 'qarz_tolov', agent_id: agent.id, agent_nomi: agent.fullname,
             territoriya_id: agent.territoriya_id || null, mijoz_id: mijoz.id, mijoz_nomi: mijoz.nomi,
-            kassa_id: kassa.id, summa: plastik, holat: 'kutilmoqda', izoh: komment ? String(komment).slice(0, 255) : null,
-            chek_rasm: chekRasm, sana: vaqt,
+            kassa_id: kassa.id, summa: plastik, holat: 'kutilmoqda',
+            izoh: plastikIzoh || (komment ? String(komment).slice(0, 255) : null),
+            chek_rasm: plastikChek, sana: vaqt,
           }, { transaction: t });
           await auditYoz({ obyekt: 'plastik_tolov', obyekt_id: p.id, amal: 'yaratildi',
             yangi: { holat: 'kutilmoqda', summa: plastik, kassa_id: kassa.id }, user: { id: null, nomi: `Agent: ${agent.fullname}` } }, t);
