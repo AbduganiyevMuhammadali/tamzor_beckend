@@ -93,6 +93,8 @@ const plastikJson = (p) => ({
 });
 const topshiruvJson = (x) => ({
   id: x.id, holat: x.holat, summa: n(x.summa), sana: x.sana, agent_id: x.agent_id, agent_nomi: x.agent_nomi, izoh: x.izoh,
+  // usul: 'naqd' (kassa tasdiqda tanlanadi) | 'karta' (kassa_id — agent tanlagan plastik kassa, tasdiqda o'zgarmaydi)
+  usul: x.usul || 'naqd', chek_rasm: x.chek_rasm || null,
   kassa_id: x.kassa_id, kassa_nomi: x.kassa_nomi || null,
   tasdiqlagan_id: x.tasdiqlagan_id, tasdiqlagan_nomi: x.tasdiqlagan_nomi, tasdiq_vaqt: x.tasdiq_vaqt, rad_sababi: x.rad_sababi,
   createdAt: x.createdAt,
@@ -291,11 +293,12 @@ class KassalarController {
   };
 
   /* ── Agent naqd topshiruvlari ── */
-  // GET /kassalar/topshiruvlar?holat=&agent_id=&kassa_id=&dan=&gacha=&page=&limit=
+  // GET /kassalar/topshiruvlar?holat=&usul=&agent_id=&kassa_id=&territoriya_id=&dan=&gacha=&page=&limit=
   topshiruvRoyxat = async (req, res) => {
     const q = req.query;
     const w = ['1=1'], R = {};
     if (q.holat) { if (!HOLATLAR.includes(q.holat)) throw new HttpException(400, `holat: ${HOLATLAR.join(', ')}`); w.push('x.holat = :holat'); R.holat = q.holat; }
+    if (q.usul) { if (!['naqd', 'karta'].includes(q.usul)) throw new HttpException(400, "usul: 'naqd' yoki 'karta'"); w.push('x.usul = :usul'); R.usul = q.usul; }
     if (q.agent_id) { w.push('x.agent_id = :agent'); R.agent = idOl(q.agent_id, 'agent_id'); }
     if (q.kassa_id) { w.push('x.kassa_id = :kassa'); R.kassa = idOl(q.kassa_id, 'kassa_id'); }
     if (q.territoriya_id) { w.push('x.agent_id IN (SELECT id FROM agent WHERE territoriya_id = :ter)'); R.ter = idOl(q.territoriya_id, 'territoriya_id'); }
@@ -317,6 +320,7 @@ class KassalarController {
     });
   };
   topshiruvBitta = async (req, res) => res.send(await topshiruvBitta(idOl(req.params.id)));
+  // POST /topshiruvlar/:id/tasdiqla { kassa_id?, izoh? } — naqd: kassa_id majburiy; karta: kassa_id e'tiborsiz
   topshiruvTasdiqla = async (req, res) => {
     const id = idOl(req.params.id);
     const b = req.body || {};
