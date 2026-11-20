@@ -34,6 +34,20 @@ function agentOmbori(agentNomi) {
   return (AGENT_PREFIKS + nom).slice(0, 80);
 }
 
+/* Agentning brak ombori: qaytarilgan yaroqsiz tovar shu yerga tushadi — sotuvga yaroqsiz,
+   agentning sotiladigan qoldig'iga (agentOmbori) ham, umumiy sotuv zaxirasiga ham kirmaydi. */
+const BRAK_SUFFIKS = ' (brak)';
+function agentBrakOmbori(agentNomi) {
+  const nom = String(agentNomi || '').trim() || "noma'lum";
+  return (AGENT_PREFIKS + nom).slice(0, 80 - BRAK_SUFFIKS.length) + BRAK_SUFFIKS;
+}
+
+/** Brak ombori (umumiy "Brak ombori" yoki agentning "(brak)" ombori) — sotiladigan qoldiq emas */
+function brakOmboriMi(ombor) {
+  const s = String(ombor || '');
+  return s === 'Brak ombori' || s.endsWith(BRAK_SUFFIKS);
+}
+
 /** Berilgan ombor agentnikimi */
 function agentOmboriMi(ombor) {
   return String(ombor || '').startsWith(AGENT_PREFIKS);
@@ -45,4 +59,7 @@ function agentNomi(ombor) {
   return s.startsWith(AGENT_PREFIKS) ? s.slice(AGENT_PREFIKS.length) : null;
 }
 
-module.exports = { ASOSIY_OMBOR, XOM_ASHYO_OMBOR, AGENT_PREFIKS, turOmbori, omborNomi, agentOmbori, agentOmboriMi, agentNomi };
+module.exports = {
+  ASOSIY_OMBOR, XOM_ASHYO_OMBOR, AGENT_PREFIKS, BRAK_SUFFIKS, turOmbori, omborNomi, agentOmbori, agentBrakOmbori,
+  brakOmboriMi, agentOmboriMi, agentNomi,
+};

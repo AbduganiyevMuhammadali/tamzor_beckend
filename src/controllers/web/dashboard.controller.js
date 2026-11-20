@@ -212,7 +212,7 @@ class DashboardController {
       Promise.all([
         sequelize.query(`
           SELECT tovar_id, SUM(donada) AS q FROM tovar_register
-          WHERE ombor IS NULL OR ombor <> :brak GROUP BY tovar_id, ombor HAVING q > 0.0001
+          WHERE ombor IS NULL OR (ombor <> :brak AND ombor NOT LIKE '% (brak)') GROUP BY tovar_id, ombor HAVING q > 0.0001
         `, { replacements: { brak: BRAK_OMBOR }, type: sequelize.QueryTypes.SELECT }),
         tannarxXaritasi(new Date()),
       ]).then(([rows, narx]) => [{

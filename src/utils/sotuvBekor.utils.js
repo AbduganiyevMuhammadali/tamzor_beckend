@@ -77,6 +77,11 @@ async function yetkazilganSotuvniBekorQil(ariza, { sabab, user, transaction = nu
     if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
     if (ariza.turi !== 'sotish') throw new HttpException(400, 'Faqat sotuv hujjati bekor qilinadi');
     if (ariza.holat !== 'yetkazildi') throw new HttpException(400, `Hujjat "${ariza.holat}" holatida — bu amal faqat yetkazilgan sotuv uchun`);
+    // Sotuvga bog'langan qaytarish (mobil savdoQaytarish) bo'lsa — bekor qilish tovar va pulni ikki marta
+    // qaytarib yuboradi (qaytarma kirimi va naqd chiqimi alohida yozilgan). Rad etiladi.
+    const { SavdoQaytarishModel } = require('../models/savdoQaytarish.model');
+    const qaytSoni = await SavdoQaytarishModel.count({ where: { ariza_id: ariza.id }, transaction: t });
+    if (qaytSoni) throw new HttpException(400, `Bu sotuvga ${qaytSoni} ta qaytarish qilingan — uni bekor qilib bo'lmaydi`);
 
     const jami = n(ariza.jami_summa);
     const kim = user.fullname || user.username || `user#${user.id}`;

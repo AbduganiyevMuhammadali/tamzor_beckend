@@ -123,6 +123,8 @@ module.exports = {
   mashinaQoldiq: avtolavka.mashinaQoldiq,
   mijozNarxlari: avtolavka.mijozNarxlari,
   avtolavkaSinxron: avtolavka.avtolavkaSinxron,
+  agentlarim: avtolavka.agentlarim,
+  savdoQaytarish: avtolavka.savdoQaytarish,
   agentSinxron: avtolavka.agentSinxron,
   yuklashTavsiya: avtolavka.yuklashTavsiya,
   yuklashTovarlar: avtolavka.yuklashTovarlar,

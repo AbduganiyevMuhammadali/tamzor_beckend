@@ -50,7 +50,7 @@ async function omborQoldiq(narx) {
     GROUP BY r.tovar_id, r.ombor HAVING dona > 0.0001`);
   return rows.map(r => ({
     tovar_id: r.tovar_id, nomi: r.nomi || '—', turkum: r.turkum || 'Boshqa', ombor: r.ombor || 'Nomaʼlum',
-    tur: r.ombor === U.BRAK_OMBOR ? 'brak' : r.ombor === XOM_ASHYO_OMBOR ? 'xom_ashyo' : String(r.ombor || '').startsWith(U.AGENT_OMBOR) ? 'mashina' : 'asosiy',
+    tur: (r.ombor === U.BRAK_OMBOR || String(r.ombor || '').endsWith(' (brak)')) ? 'brak' : r.ombor === XOM_ASHYO_OMBOR ? 'xom_ashyo' : String(r.ombor || '').startsWith(U.AGENT_OMBOR) ? 'mashina' : 'asosiy',
     dona: n(r.dona), qiymat: n(r.dona) * (narx[r.tovar_id] || 0),
   }));
 }
@@ -71,6 +71,7 @@ const KASSA_TOIFA = {
   ish_haqi: 'Ish haqi', 'ish haqi': 'Ish haqi', kommunal: 'Kommunal', ijara: 'Ijara',
   transport_xarajat: 'Transport', transport: 'Transport', xarajat: 'Boshqa xarajat', boshqa_chiqim: 'Boshqa xarajat',
   ishlab_chiqarish: 'Ishlab chiqarish xarajati',
+  sotuv_qaytarish: 'Qaytarish (naqd qaytarildi)',
   qarz_berildi: 'Qarz berildi', qarz_qaytdi: 'Berilgan qarz qaytdi', qarz_olindi: 'Qarz olindi', qarz_qaytarildi: 'Olingan qarz qaytarildi',
 };
 const toifaNom = k => KASSA_TOIFA[String(k || '').toLowerCase()] || (k ? String(k).replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) : 'Boshqa');
@@ -288,7 +289,7 @@ class TahlilController {
     const [J, tovarList, qoldiqRows, oxirgi] = await Promise.all([
       sotuvTahlil(D.from, D.to),
       Q(`SELECT id, nomi, turkum, blokdagi_soni FROM tovar WHERE deletedAt IS NULL`),
-      Q(`SELECT tovar_id, SUM(donada) AS q FROM tovar_register WHERE ombor <> :brak GROUP BY tovar_id`, { brak: U.BRAK_OMBOR }),
+      Q(`SELECT tovar_id, SUM(donada) AS q FROM tovar_register WHERE ombor <> :brak AND ombor NOT LIKE '% (brak)' GROUP BY tovar_id`, { brak: U.BRAK_OMBOR }),
       Q(`SELECT q.tovar_id, MAX(COALESCE(a.yetkazilgan_sana, a.createdAt)) AS s
          FROM ariza_qator q JOIN ariza a ON a.id = q.ariza_id
          WHERE a.turi = 'sotish' AND a.holat = 'yetkazildi' AND a.deletedAt IS NULL GROUP BY q.tovar_id`),
@@ -1024,7 +1025,7 @@ class TahlilController {
     /* ── Foyda-zarar ── */
     // Tovar uchun to'lov va ishlab chiqarish xarajati — mahsulot tannarxida (sotilganda), operatsion xarajat emas
     // Uchinchi shaxslarga berilgan qarz va qaytarilgan qarz — pul aktivga/majburiyatga o'tadi, xarajat emas
-    const XARAJAT_EMAS = ["Yetkazuvchilarga to'lov", 'Ishlab chiqarish xarajati', 'Qarz berildi', 'Olingan qarz qaytarildi'];
+    const XARAJAT_EMAS = ["Yetkazuvchilarga to'lov", 'Ishlab chiqarish xarajati', 'Qarz berildi', 'Olingan qarz qaytarildi', 'Qaytarish (naqd qaytarildi)'];   // qaytarish: sotuv summasi o'zi kamaygan
     const DAROMAD = ['Boshqa daromad'];                           // savdodan tashqari daromad
     const pnl = (S, K) => {
       const xarajatlar = K.toifalar.filter(t => t.tur === 'chiqim' && !XARAJAT_EMAS.includes(t.nom)).map(t => ({ nom: t.nom, summa: t.summa, son: t.son }));

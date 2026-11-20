@@ -59,7 +59,7 @@ class XarajatController {
     const bor = await XarajatTuriModel.findOne({ where: sequelize.where(sequelize.fn('LOWER', sequelize.col('nomi')), nomi.toLowerCase()) });
     if (bor) throw new HttpException(400, `"${bor.nomi}" toifasi allaqachon bor`);
     let kod = slug(nomi), i = 2;
-    while (await XarajatTuriModel.count({ where: { kod } }) || ['boshqa_chiqim', 'qarz_berildi', 'qarz_qaytarildi', 'yetkazuvchi_tolov', 'ishlab_chiqarish', 'sotuv', 'mijoz_tolov'].includes(kod)) kod = `${slug(nomi).slice(0, 36)}_${i++}`;
+    while (await XarajatTuriModel.count({ where: { kod } }) || ['boshqa_chiqim', 'qarz_berildi', 'qarz_qaytarildi', 'yetkazuvchi_tolov', 'ishlab_chiqarish', 'sotuv', 'sotuv_qaytarish', 'mijoz_tolov'].includes(kod)) kod = `${slug(nomi).slice(0, 36)}_${i++}`;
     const max = await XarajatTuriModel.max('tartib');
     const t = await XarajatTuriModel.create({ kod, nomi, ikon: req.body.ikon || 'boshqa', tartib: n(max) + 1, faol: true });
     res.status(201).send(t);

@@ -21,13 +21,19 @@ const { narxXaritasi } = require('../../utils/narx.utils');
 const { MijozModel, MijozKategoriyaModel } = require('../../models/mijoz.model');
 const { MarshrutRejaModel, TashrifModel } = require('../../models/marshrut.model');
 const { NarxRuyxatModel, NarxRuyxatQatorModel } = require('../../models/narxRuyxat.model');
-const { ok, fail, SABABLAR, summaOl } = require('./shared');
-const { ASOSIY_OMBOR, agentOmbori } = require('../../utils/ombor.utils');
+const { ok, fail, SABABLAR, summaOl, mobilKalit, mobilVaqt, takrorXato } = require('./shared');
+const { ASOSIY_OMBOR, agentOmbori, agentBrakOmbori } = require('../../utils/ombor.utils');
+const HttpException = require('../../utils/HttpException.utils');
+const KassaModel = require('../../models/kassa.model');
+const TovarRegisterModel = require('../../models/tovar_register.model');
+const AgentRegisterModel = require('../../models/agent_register.model');
+const TerritoriyaModel = require('../../models/territoriya.model');
+const { SavdoQaytarishModel, SavdoQaytarishQatorModel } = require('../../models/savdoQaytarish.model');
 const AgentModel = require('../../models/agent.model');
 const { ArizaModel, ArizaQatorModel } = require('../../models/ariza.model');
 const { InkassatsiyaModel } = require('../../models/inkassatsiya.model');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
-const { qulflabOl } = require('../../utils/qulf.utils');
+const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const { tzOffset, kunKey } = require('../../utils/tahlil.utils');
 const {
   INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
@@ -121,7 +127,15 @@ async function mashinaTovarlari(agent) {
 }
 
 /* Bosqichga qarab agentga keyingi qadam */
-function keyingiQadam(kun, mashinaDona, qabulKutilmoqda) {
+/* 2026-11-21: yangi modelda agent yuklashni so'ramaydi/qabul qilmaydi, kunni yopmaydi va naqd
+   topshirmaydi — tovarni admin web'dan omboriga yuklaydi. Keyingi qadam doim 'savdo'. */
+function keyingiQadam(kun, mashinaDona) {
+  if (mashinaDona <= EPS) return { kod: 'savdo', matn: "Omboringizda tovar yo'q — administrator yuklashini kuting" };
+  return { kod: 'savdo', matn: 'Mijozlarga boring va soting' };
+}
+
+// eslint-disable-next-line no-unused-vars
+function eskiKeyingiQadam(kun, mashinaDona, qabulKutilmoqda) {
   if (kun.bosqich === 3) return { kod: 'yopiq', matn: "Kun yopildi. Rahmat! Yana chiqish kerak bo'lsa — yangi reys oching" };
   if (kun.holat === 'topshirilmoqda') return { kod: 'topshirish', matn: "Omborga qayting: qolgan tovar va naqdni topshiring" };
   if (qabulKutilmoqda > 0) return { kod: 'yuklash_qabul', matn: 'Yuklangan tovarni sanab, qabul qilganingizni tasdiqlang' };
@@ -133,13 +147,14 @@ function keyingiQadam(kun, mashinaDona, qabulKutilmoqda) {
 
 /* "Mening kunim" — avtolavkaHolat va avtolavkaSinxron uchun umumiy */
 async function holatHisobla(agent, sana, tayyorMashina = null) {
-  let [kun, mashina, qabulsiz] = await Promise.all([
+  let [kun, mashina, qabulsiz, qaytNaqd] = await Promise.all([
     kunHisobla(agent, sana),
     tayyorMashina || mashinaTovarlari(agent),
     AvtolavkaHujjatModel.findAll({
       where: { agent_id: agent.id, sana, tur: 'yuklash', holat: 'tasdiqlangan', agent_qabul_vaqt: null },
       order: [['id', 'ASC']],
     }),
+    qaytarishNaqdi(agent.id, sana),
   ]);
   // Kun qayta ochilgan (yangi reys): oldingi, allaqachon topshirilgan reysning tasdiqlanmagan yuklashi so'ralmaydi
   if (kun.qayta_ochish) {
@@ -165,7 +180,10 @@ async function holatHisobla(agent, sana, tayyorMashina = null) {
       sotuvSumma: kun.pul.sotuv_jami,
       naqdSotuv: kun.pul.naqd_sotuv,
       qarzgaSotuv: kun.pul.qarzga_sotuv,
-      naqdQolda: Math.max(0, kun.pul.naqd_olindi - kun.pul.topshirildi),
+      // Agent qo'lidagi naqd: bugun olingan naqd − bugun qaytarishda mijozga berilgan naqd
+      // (yangi modelda kassaga topshirish yo'q — inkassatsiyaga bog'liq emas)
+      naqdQolda: Math.max(0, +(kun.pul.naqd_olindi - qaytNaqd).toFixed(2)),
+      qaytarishNaqd: qaytNaqd,
       tashrif: kun.kun.tashrif,
       reja: kun.kun.reja,
       uzoqSotuv: kun.kun.uzoq_sotuv,
@@ -294,6 +312,108 @@ function buyurtmaShakli(a) {
     products: qatorlar.map(q => ({ tovarId: String(q.tovar_id || ''), tovar: q.tovar_nomi || '', dona: n(q.jami_dona), narx: n(q.narx), summa: n(q.summa) })),
   };
 }
+
+/* Agent bugun (mahalliy kun) qaytarishda mijozga qaytargan naqd — kassa chiqimi (savdoQaytarish) */
+async function qaytarishNaqdi(agentId, sana) {
+  const [r] = await sequelize.query(`SELECT COALESCE(SUM(summa), 0) s FROM kassa
+     WHERE tur = 'chiqim' AND manba_tur = 'savdo_qaytarish' AND user_id = :id AND ${lokalKun('sana')} = :sana`,
+  { replacements: { id: agentId, sana, tz: tzOffset() }, type: sequelize.QueryTypes.SELECT });
+  return +n(r && r.s).toFixed(2);
+}
+
+/* Agentning brak ombori (qaytarilgan yaroqsiz tovar — sotilmaydi) */
+async function brakTovarlari(agent) {
+  const map = await omborQoldiq(agentBrakOmbori(agent.fullname));
+  return {
+    qatorlar: Object.keys(map).filter(id => map[id].qoldiq > EPS).map(id => ({
+      tovarId: String(id), tovar: map[id].tovar_nomi || '', turkum: map[id].turkum || '', qoldiq: +map[id].qoldiq.toFixed(3),
+    })).sort((a, b) => a.tovar.localeCompare(b.tovar)),
+  };
+}
+
+const SAVDO_KUN = 30;
+/* Agentning oxirgi 30 kundagi yetkazilgan sotuvlari — bog'langan qaytarish uchun (oflaynda ham).
+   Qator miqdori — oldingi qaytarishlardan keyin mijozda QOLGANI; bir tovar bir necha qatorda
+   bo'lsa birlashtiriladi (savdoQaytarish ham tovar bo'yicha taqsimlaydi). */
+async function agentSavdolari(agent) {
+  const dan = new Date(Date.now() - SAVDO_KUN * 24 * 3600 * 1000);
+  const rows = await ArizaModel.findAll({
+    where: { agent_id: agent.id, turi: 'sotish', holat: 'yetkazildi', yetkazilgan_sana: { [Op.gte]: dan } },
+    include: [{ model: ArizaQatorModel, as: 'qatorlar' }],
+    order: [['yetkazilgan_sana', 'DESC'], ['id', 'DESC']],
+    limit: 2000,
+  });
+  return rows.map(a => {
+    const tov = new Map();
+    for (const q of (a.qatorlar || []).slice().sort((x, y) => x.id - y.id)) {
+      if (!q.tovar_id) continue;
+      const x = tov.get(q.tovar_id) || { tovarId: String(q.tovar_id), tovar: q.tovar_nomi || '', dona: 0, narx: n(q.narx), summa: 0 };
+      x.dona += n(q.jami_dona); x.summa += n(q.summa);
+      tov.set(q.tovar_id, x);
+    }
+    return {
+      docId: String(a.id), docNumber: a.raqam || String(a.id), sana: a.yetkazilgan_sana || a.createdAt,
+      klientId: String(a.mijoz_id || ''), klient: a.mijoz_nomi || '',
+      jami: n(a.jami_summa), tolangan: n(a.tolangan_summa),
+      qatorlar: [...tov.values()]
+        .map(x => ({ ...x, dona: +x.dona.toFixed(3), summa: +x.summa.toFixed(2), narx: x.dona > EPS ? +(x.summa / x.dona).toFixed(2) : x.narx }))
+        .filter(x => x.dona > EPS),
+    };
+  });
+}
+
+/* Super agentga biriktirilgan agentning qisqa ko'rsatkichlari (agentlarim) */
+async function agentQisqa(agent, sana, viloyatlar) {
+  const [holat, mashina, [qarz]] = await Promise.all([
+    holatHisobla(agent, sana),
+    mashinaTovarlari(agent),
+    sequelize.query(`SELECT COALESCE(SUM(-balans), 0) q FROM mijoz WHERE agent_id = :id AND balans < 0 AND deletedAt IS NULL`,
+      { replacements: { id: agent.id }, type: sequelize.QueryTypes.SELECT }),
+  ]);
+  const b = holat.bugun;
+  return {
+    agentId: String(agent.id), ism: agent.fullname, telefon: agent.telefon || '',
+    viloyat: agent.territoriya_id && viloyatlar.get(agent.territoriya_id) ? { id: agent.territoriya_id, nomi: viloyatlar.get(agent.territoriya_id) } : null,
+    faol: !!agent.faol,
+    bugun: { sotuvSoni: b.sotuvSoni, sotuvSumma: b.sotuvSumma, naqdSotuv: b.naqdSotuv, qarzgaSotuv: b.qarzgaSotuv, naqdQolda: b.naqdQolda },
+    mijozQarzi: +n(qarz && qarz.q).toFixed(2),
+    omborDona: mashina.jami.dona, omborSumma: mashina.jami.summa,
+  };
+}
+
+const r2 = (v) => Math.round(v * 100) / 100;
+const r3 = (v) => Math.round(v * 1000) / 1000;
+const MAX_QAYTARISH_QATOR = 200;
+
+/* savdoQaytarish so'rovini tekshirish (tranzaksiyadan oldin) */
+function qaytarishSorovi(b) {
+  const savdoId = Number(b.savdoId);
+  if (!Number.isInteger(savdoId) || savdoId <= 0) throw new HttpException(400, "savdoId noto'g'ri");
+  const tolov = String(b.tolov || '');
+  if (!['qarz', 'naqd'].includes(tolov)) throw new HttpException(400, "tolov faqat 'qarz' yoki 'naqd' bo'lishi mumkin");
+  const list = b.qatorlar;
+  if (!Array.isArray(list) || !list.length) throw new HttpException(400, 'Kamida bitta qaytariladigan tovar kerak');
+  if (list.length > MAX_QAYTARISH_QATOR) throw new HttpException(400, `Bir qaytarishda ${MAX_QAYTARISH_QATOR} tadan ortiq qator bo'lmaydi`);
+  const qatorlar = list.map((q, i) => {
+    if (!q || typeof q !== 'object') throw new HttpException(400, `${i + 1}-qator noto'g'ri`);
+    const tovarId = Number(q.tovarId);
+    if (!Number.isInteger(tovarId) || tovarId <= 0) throw new HttpException(400, `${i + 1}-qator: tovarId noto'g'ri`);
+    const dona = typeof q.dona === 'number' ? q.dona : Number(String(q.dona ?? '').trim().replace(',', '.'));
+    if (!Number.isFinite(dona) || dona <= 0 || dona > 1e9) throw new HttpException(400, `${i + 1}-qator: miqdor noto'g'ri (0 dan katta bo'lishi kerak)`);
+    let yaroqli = q.yaroqli;
+    if (yaroqli === 'true') yaroqli = true; else if (yaroqli === 'false') yaroqli = false;
+    if (typeof yaroqli !== 'boolean') throw new HttpException(400, `${i + 1}-qator: yaroqli true yoki false bo'lishi kerak`);
+    const sabab = q.sabab === undefined || q.sabab === null ? null : String(q.sabab).trim().slice(0, 255) || null;
+    return { tovarId, dona: r3(dona), yaroqli, sabab };
+  });
+  const izoh = b.izoh === undefined || b.izoh === null ? null : String(b.izoh).trim().slice(0, 500) || null;
+  return { savdoId, tolov, qatorlar, izoh };
+}
+
+const qaytarishJavob = (q, takror = false) => ({
+  qaytarishId: String(q.id), savdoId: String(q.ariza_id), summa: n(q.summa), yangiJami: n(q.yangi_jami),
+  ...(takror ? { takror: true } : {}),
+});
 
 class MobileAvtolavkaController {
   // GET avtolavkaHolat/?sana= — "Mening kunim": bosqich, mashina, bugungi ko'rsatkichlar
@@ -542,22 +662,19 @@ class MobileAvtolavkaController {
     const agent = avtoAgent(req, res); if (!agent) return;
     const sana = bugun();
     const mashina = await mashinaTovarlari(agent);
-    const [holat, mijozRows, rejalar, tashriflar, ombor, tavsiya, yuklashlar] = await Promise.all([
+    const [holat, mijozlar, rejalar, tashriflar, ombor, tavsiya, yuklashlar, brak, savdolar, viloyat] = await Promise.all([
       holatHisobla(agent, sana, mashina),
-      // Barcha faol mijozlar — ilovada "Barchasi" tabida boshqa agentlarning mijozlari ham mas'ul agent nomi bilan ko'rinadi
-      MijozModel.findAll({ where: { faol: true }, order: [['nomi', 'ASC']], raw: true }),
+      // 2026-11-21: faqat agentga biriktirilgan mijozlar (o'zi yaratganlari ham — saveKlient agent_id yozadi)
+      MijozModel.findAll({ where: { faol: true, agent_id: agent.id }, order: [['nomi', 'ASC']], raw: true }),
       MarshrutRejaModel.findAll({ where: { agent_id: agent.id, sana }, order: [['tartib', 'ASC'], ['id', 'ASC']], raw: true }),
       TashrifModel.findAll({ where: { agent_id: agent.id, sana }, order: [['id', 'ASC']], raw: true }),
       omborTovarlari(agent),
       tavsiyaShakli(agent).catch(() => null),
       bugungiYuklashlar(agent, sana),
+      brakTovarlari(agent),
+      agentSavdolari(agent),
+      agent.territoriya_id ? TerritoriyaModel.findByPk(agent.territoriya_id, { attributes: ['id', 'nomi'], raw: true }) : null,
     ]);
-    // Rejadagi, lekin boshqa agentga biriktirilgan mijozlar ham ro'yxatda bo'lsin
-    const bor = new Set(mijozRows.map(m => m.id));
-    const qoshimcha = rejalar.map(r => r.mijoz_id).filter(id => id && !bor.has(id));
-    const mijozlar = qoshimcha.length
-      ? mijozRows.concat(await MijozModel.findAll({ where: { id: qoshimcha }, raw: true }))
-      : mijozRows;
 
     const tovarIds = mashina.qatorlar.map(q => Number(q.tovarId));
     const narx = await narxSinxron(mijozlar, tovarIds);
@@ -567,9 +684,16 @@ class MobileAvtolavkaController {
     ok(res, {
       serverVaqt: new Date(),
       sana,
-      agent: { id: agent.id, ism: agent.fullname, ombor: mashina.ombor },
+      agent: {
+        id: agent.id, ism: agent.fullname, ombor: mashina.ombor, brakOmbor: agentBrakOmbori(agent.fullname),
+        viloyat: viloyat ? { id: viloyat.id, nomi: viloyat.nomi } : null,
+      },
+      // Super agent biriktirilgan agentni ko'ryapti (x-kuzat-agent) — ilova faqat o'qish rejimida
+      kuzatuv: !!req.kuzatuv,
       holat,
       mashina: { qatorlar: mashina.qatorlar, jami: mashina.jami },
+      brak,
+      savdolar,
       mijozlar: mijozlar.map(m => {
         const balans = n(m.balans);
         const rid = m.kategoriya_id ? narx.katRuyxat[m.kategoriya_id] : null;
@@ -600,6 +724,167 @@ class MobileAvtolavkaController {
       sabablar: SABABLAR.filter(x => x.tip === 'Причина').map(x => ({ id: x.id, name: x.name, neytral: !!x.neytral })),
       reytingQoida: await reytingQoidalari(),
     });
+  };
+
+  // GET agentlarim/ — super agentga biriktirilgan agentlar va ularning bugungi ko'rsatkichlari
+  agentlarim = async (req, res) => {
+    const sup = req.kuzatuv ? req.superAgent : req.currentAgent;
+    if (req.currentRole !== 'agent' || !sup || !sup.super_agent) throw new HttpException(403, 'Bu oyna faqat super agent uchun');
+    const agentlar = await AgentModel.findAll({ where: { super_agent_id: sup.id, faol: true }, order: [['fullname', 'ASC']] });
+    const tIds = [...new Set(agentlar.map(a => a.territoriya_id).filter(Boolean))];
+    const viloyatlar = new Map(tIds.length
+      ? (await TerritoriyaModel.findAll({ where: { id: tIds }, attributes: ['id', 'nomi'], raw: true })).map(t => [t.id, t.nomi]) : []);
+    const sana = bugun();
+    const natija = [];
+    for (const a of agentlar) natija.push(await agentQisqa(a, sana, viloyatlar));   // ketma-ket: pool to'lmasin
+    ok(res, natija);
+  };
+
+  // POST savdoQaytarish/ { savdoId, mobilId, vaqt, tolov:'qarz'|'naqd', izoh, qatorlar:[{ tovarId, dona, yaroqli, sabab }] }
+  // Agentning O'Z yetkazilgan sotuviga bog'langan qaytarish. Sotuv summasi kamayadi (KPI shundan),
+  // yaroqli tovar agent omboriga, yaroqsizi agentning brak omboriga kiradi.
+  //   tolov='qarz' — mijoz qarzi kamayadi (balans += summa); tolangan_summa yangi jamidan oshmaydi
+  //   tolov='naqd' — agent mijozga naqd qaytardi: tolangan_summa −= summa (≤ sotuvda to'langan naqd),
+  //                  kassa chiqimi agent nomidan (qo'lidagi naqd kamayadi), balans o'zgarmaydi
+  savdoQaytarish = async (req, res) => {
+    const agent = avtoAgent(req, res); if (!agent) return;
+    const sorov = qaytarishSorovi(req.body || {});
+    const mobilId = mobilKalit(req.body.mobilId);
+    const vaqt = mobilVaqt(req.body.vaqt);
+
+    const borini = async (t) => (mobilId ? SavdoQaytarishModel.findOne({ where: { mobil_id: mobilId }, ...(t ? { transaction: t } : {}) }) : null);
+    const takrorTekshir = (q) => {
+      if (Number(q.agent_id) !== Number(agent.id) || Number(q.ariza_id) !== sorov.savdoId) {
+        throw new HttpException(409, 'Bu mobilId boshqa amalga tegishli');
+      }
+      return ok(res, qaytarishJavob(q, true), 'Qaytarish allaqachon saqlangan');
+    };
+    const oldin = await borini();
+    if (oldin) return takrorTekshir(oldin);
+
+    let natija;
+    try {
+      natija = await sequelize.transaction(async (t) => {
+        // QULF TARTIBI (mavjud hujjat): ariza → qatorlar → tovar → mijoz
+        const ariza = await qulflabOl(ArizaModel, sorov.savdoId, t);
+        if (!ariza) throw new HttpException(404, 'Sotuv topilmadi');
+        if (Number(ariza.agent_id) !== Number(agent.id)) throw new HttpException(403, 'Bu sotuv sizga tegishli emas');
+        if (ariza.turi !== 'sotish' || ariza.holat !== 'yetkazildi') {
+          throw new HttpException(400, `Faqat yetkazilgan sotuvga qaytarish qilinadi (hujjat: ${ariza.turi}, ${ariza.holat})`);
+        }
+        // Parallel takror ariza qulfidan keyin ko'rinadi
+        const takror = await borini(t);
+        if (takror) return { takror };
+
+        const qatorlar = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
+        await tovarlarniQulfla(sorov.qatorlar.map(q => q.tovarId), t);
+        const mijoz = ariza.mijoz_id ? await qulflabOl(MijozModel, ariza.mijoz_id, t) : null;
+
+        // Joriy (oldingi qaytarishlardan keyin qolgan) qiymatlar — xotirada kamaytirib boriladi
+        const holat = new Map(qatorlar.map(q => [q.id, { q, jami_dona: n(q.jami_dona), dona: n(q.dona), summa: n(q.summa) }]));
+        const bolaklar = [];   // { qator, dona, summa, narx, yaroqli, sabab, tovar_id, tovar_nomi, turkum }
+        for (const p of sorov.qatorlar) {
+          const mos = qatorlar.filter(q => Number(q.tovar_id) === p.tovarId);
+          if (!mos.length) throw new HttpException(400, `Tovar #${p.tovarId} bu sotuvda yo'q`);
+          const qoldi = r3(mos.reduce((s2, q) => s2 + holat.get(q.id).jami_dona, 0));
+          if (p.dona > qoldi + 0.0005) {
+            throw new HttpException(400, `"${mos[0].tovar_nomi || `#${p.tovarId}`}" — qaytarish miqdori sotuvda qolganidan ko'p. Mumkin: ${Math.max(0, qoldi)}, so'raldi: ${p.dona}`);
+          }
+          let kerak = p.dona;
+          for (const q of mos) {
+            if (kerak <= 0.0005) break;
+            const h = holat.get(q.id);
+            if (h.jami_dona <= 0.0005) continue;
+            const dona = r3(Math.min(kerak, h.jami_dona));
+            const narx = n(q.narx);
+            // Qatorning oxirgi donasi qaytsa — qolgan summa (yaxlitlash farqi qolmasin)
+            const summa = dona >= h.jami_dona - 0.0005 ? r2(h.summa) : r2(Math.min(h.summa, narx * dona));
+            h.jami_dona = r3(h.jami_dona - dona);
+            h.dona = Math.max(0, r3(h.dona - dona));
+            h.summa = Math.max(0, r2(h.summa - summa));
+            bolaklar.push({ qator: q, dona, summa, narx, yaroqli: p.yaroqli, sabab: p.sabab });
+            kerak = r3(kerak - dona);
+          }
+        }
+
+        const qaytSumma = r2(bolaklar.reduce((s2, b) => s2 + b.summa, 0));
+        const eskiJami = n(ariza.jami_summa);
+        const yangiJami = Math.max(0, r2(eskiJami - qaytSumma));
+        const kamaydi = r2(eskiJami - yangiJami);   // chegirma bo'lsa jami 0 dan pastga tushmaydi
+        const tolangan = n(ariza.tolangan_summa);
+
+        const arizaYangi = { jami_summa: yangiJami };
+        if (sorov.tolov === 'naqd') {
+          if (kamaydi > tolangan + 0.005) {
+            throw new HttpException(400, `Naqd qaytarish (${kamaydi}) shu sotuvda olingan naqddan (${tolangan}) ko'p — "qarzdan ayirish" ni tanlang`);
+          }
+          arizaYangi.tolangan_summa = Math.max(0, r2(tolangan - kamaydi));
+          // Naqd to'liq qaytdi, lekin summa qoldi — hujjat endi qarzga sotuv (hisobotlar naqd deb sanamasin)
+          const naqdTur = ariza.tolov_turi === 'naqt' || ariza.tolov_turi === 'naqd';
+          if (naqdTur && arizaYangi.tolangan_summa <= 0.005 && yangiJami > 0.005) arizaYangi.tolov_turi = 'qarz';
+        } else if (tolangan > yangiJami) {
+          arizaYangi.tolangan_summa = yangiJami;
+        }
+
+        const qaytarish = await SavdoQaytarishModel.create({
+          mobil_id: mobilId, ariza_id: ariza.id, ariza_raqam: ariza.raqam, agent_id: agent.id, agent_nomi: agent.fullname,
+          mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, tolov: sorov.tolov, summa: kamaydi,
+          yaroqli_summa: r2(bolaklar.filter(b => b.yaroqli).reduce((s2, b) => s2 + b.summa, 0)),
+          yaroqsiz_summa: r2(bolaklar.filter(b => !b.yaroqli).reduce((s2, b) => s2 + b.summa, 0)),
+          eski_jami: eskiJami, yangi_jami: yangiJami, izoh: sorov.izoh, sana: vaqt,
+        }, { transaction: t });
+
+        const ombor = agentOmbori(agent.fullname), brakOmbor = agentBrakOmbori(agent.fullname);
+        await SavdoQaytarishQatorModel.bulkCreate(bolaklar.map(b => ({
+          qaytarish_id: qaytarish.id, ariza_qator_id: b.qator.id, tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi,
+          dona: b.dona, narx: b.narx, summa: b.summa, yaroqli: b.yaroqli, ombor: b.yaroqli ? ombor : brakOmbor, sabab: b.sabab,
+        })), { transaction: t });
+        await TovarRegisterModel.bulkCreate(bolaklar.map(b => ({
+          tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi || '', turkum: b.qator.turkum || null,
+          ombor: b.yaroqli ? ombor : brakOmbor, tur: 'qaytarma_kirim',
+          // manba — asl sotuv (hisobotlar 'qaytarma' ni ariza bilan bog'laydi); tafsilot savdo_qaytarish jadvalida
+          manba_tur: 'qaytarma', manba_id: ariza.id,
+          donada: b.dona, bloklarda: 0, qutilarda: 0, hajm: 0, kirim_narx: 0, sotuv_narx: b.narx, summa: b.summa, sana: vaqt,
+        })), { transaction: t });
+
+        for (const h of holat.values()) {
+          if (Math.abs(h.jami_dona - n(h.q.jami_dona)) > 0.0001 || Math.abs(h.summa - n(h.q.summa)) > 0.001) {
+            await h.q.update({ jami_dona: h.jami_dona, dona: h.dona, summa: h.summa }, { transaction: t });
+          }
+        }
+        await ariza.update(arizaYangi, { transaction: t });
+
+        if (kamaydi > 0) {
+          if (sorov.tolov === 'qarz' && mijoz) {
+            await MijozModel.increment('balans', { by: kamaydi, where: { id: mijoz.id }, transaction: t });
+          }
+          if (sorov.tolov === 'naqd') {
+            const kassa = await KassaModel.create({
+              tur: 'chiqim', kategoriya: 'sotuv_qaytarish', summa: kamaydi, tolov_usul: 'naqt',
+              manba_tur: 'savdo_qaytarish', manba_id: qaytarish.id, mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi,
+              izoh: `${ariza.raqam || ariza.id} — qaytarish, naqd mijozga qaytarildi`.slice(0, 255),
+              sana: vaqt, user_id: agent.id,
+            }, { transaction: t });
+            await qaytarish.update({ kassa_id: kassa.id }, { transaction: t });
+          }
+          // Agent plan-fakti va bonusi haqiqiy (kamaygan) savdodan
+          const regs = await AgentRegisterModel.findAll({ where: { ariza_id: ariza.id, tur: 'savdo' }, transaction: t, lock: t.LOCK.UPDATE });
+          for (const r of regs) {
+            const yangiSumma = Math.max(0, r2(n(r.summa) - kamaydi));
+            await r.update({ summa: yangiSumma, bonus_summa: Math.round(yangiSumma * n(r.bonus_foiz) / 100) }, { transaction: t });
+          }
+        }
+        return { qaytarish };
+      });
+    } catch (e) {
+      if (takrorXato(e)) {
+        const b = await borini();
+        if (b) return takrorTekshir(b);
+      }
+      throw e;
+    }
+    if (natija.takror) return takrorTekshir(natija.takror);
+    ok(res, qaytarishJavob(natija.qaytarish), 'Qaytarish saqlandi');
   };
 
   // GET agentSinxron/ — DISTRIBUTSIYA (pre-sale) agenti uchun oflayn nusxa, bitta so'rovda:

@@ -68,7 +68,8 @@ async function mijozCheklar(req, res) {
   const page = Math.max(0, parseInt(req.query.page, 10) || 0);
   const HAJM = 20;
 
-  const [arizalar, tolovlar, qismlar] = await Promise.all([
+  const { SavdoQaytarishModel, SavdoQaytarishQatorModel } = require('../../models/savdoQaytarish.model');
+  const [arizalar, tolovlar, qismlar, qaytarishlar] = await Promise.all([
     ArizaModel.findAll({
       where: { mijoz_id: klientId, holat: Object.keys(HOLAT_NOM) },
       include: [{ model: ArizaQatorModel, as: 'qatorlar' }],
@@ -79,6 +80,11 @@ async function mijozCheklar(req, res) {
        WHERE tur = 'kirim' AND mijoz_id = :id AND kategoriya IN ('mijoz_tolov', 'qarz_qaytarish')
        ORDER BY sana DESC LIMIT 300`, { replacements: { id: klientId }, type: sequelize.QueryTypes.SELECT }),
     qarzQismlari([mijoz]),
+    // Sotuvga bog'langan qaytarishlar (savdoQaytarish) — chek tarixida alohida yozuv
+    SavdoQaytarishModel.findAll({
+      where: { mijoz_id: klientId }, include: [{ model: SavdoQaytarishQatorModel, as: 'qatorlar' }],
+      order: [['sana', 'DESC']], limit: 300,
+    }),
   ]);
   const ochiq = new Map((qismlar.get(mijoz.id) || []).filter(q => q.ariza_id).map(q => [q.ariza_id, q]));
 
@@ -109,6 +115,15 @@ async function mijozCheklar(req, res) {
         })),
       };
     }),
+    ...qaytarishlar.map(q => ({
+      tur: 'savdo_qaytarish', id: 'q' + q.id, raqam: `QT-${q.id}`, sana: q.sana, jami: n(q.summa),
+      savdoId: String(q.ariza_id), savdoRaqam: q.ariza_raqam || String(q.ariza_id),
+      tolov: q.tolov, agent: q.agent_nomi || '', izoh: q.izoh || '', yangiJami: n(q.yangi_jami),
+      qatorlar: (q.qatorlar || []).map(x => ({
+        tovarId: String(x.tovar_id), tovar: x.tovar_nomi || '', dona: n(x.dona), narx: n(x.narx), summa: n(x.summa),
+        yaroqli: !!x.yaroqli, sabab: x.sabab || '',
+      })),
+    })),
     ...tolovlar.map(t => ({
       tur: 'tolov', id: 'k' + t.id, raqam: `TL-${t.id}`, sana: t.sana, jami: n(t.summa),
       usul: t.tolov_usul || 'naqt', izoh: t.izoh || '',

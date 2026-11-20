@@ -10,6 +10,7 @@ const { xarajatTurlari } = require('../../utils/xarajat.utils');
 // Kategoriya yorliqlari (frontda ko'rsatish uchun)
 const KATEGORIYA = {
   sotuv:             { label: 'Sotuv (naqd)',        tur: 'kirim' },
+  sotuv_qaytarish:   { label: 'Qaytarish (naqd mijozga qaytarildi)', tur: 'chiqim' },   // mobil savdoQaytarish, user_id = agent
   mijoz_tolov:       { label: 'Mijoz to\'lovi',       tur: 'kirim' },
   dostavchik_inkassatsiya: { label: 'Dostavchik naqd topshirdi', tur: 'chiqim' },
   boshqa_daromad:    { label: 'Boshqa daromad',       tur: 'kirim' },
@@ -31,7 +32,7 @@ const KATEGORIYA = {
  * ular o'z bo'limida yaratiladi va bog'liq hisobni (yetkazuvchi/shaxs/dostavchi balansi,
  * sotuv) ham to'g'rilaydi. Kassa sahifasidan kiritilsa hisob buziladi. */
 const TIZIM_KATEGORIYA = new Set([
-  'sotuv', 'dostavchik_inkassatsiya', 'yetkazuvchi_tolov', 'ishlab_chiqarish',
+  'sotuv', 'sotuv_qaytarish', 'dostavchik_inkassatsiya', 'yetkazuvchi_tolov', 'ishlab_chiqarish',
   'qarz_berildi', 'qarz_qaytdi', 'qarz_olindi', 'qarz_qaytarildi',
 ]);
 
