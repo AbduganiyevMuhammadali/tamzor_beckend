@@ -5,7 +5,7 @@ const KassaModel = require('../../models/kassa.model');
 const HttpException = require('../../utils/HttpException.utils');
 const { generateRaqam } = require('../../utils/arizaRaqam.utils');
 const { kreditTekshir } = require('../../utils/kreditLimit.utils');
-const { ok, requireRole, mobilVaqt, mobilKalit, takrorXato, summaOl } = require('./shared');
+const { ok, requireRole, mobilVaqt, mobilKalit, takrorXato, summaOl, mijozRuxsat } = require('./shared');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { agentOmbori, ASOSIY_OMBOR } = require('../../utils/ombor.utils');
@@ -354,6 +354,16 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
   return sequelize.transaction(ish);
 }
 
+/* saveSell mijoz ruxsati: mijozRuxsat yoki (super agent) mijoz egasi — unga biriktirilgan agent */
+async function sotuvMijozRuxsat(req, mijoz) {
+  if (await mijozRuxsat(req, mijoz)) return true;
+  const a = req.currentAgent;
+  if (req.currentRole !== 'agent' || !a || !a.super_agent || mijoz.agent_id == null) return false;
+  const AgentModel = require('../../models/agent.model');
+  const egasi = await AgentModel.findByPk(mijoz.agent_id, { attributes: ['id', 'super_agent_id'] });
+  return !!egasi && Number(egasi.super_agent_id) === Number(a.id);
+}
+
 // Tahrirlanadigan (ombordan hali chiqmagan) zakaz holatlari — zaxira.utils OCHIQ_HOLAT bilan bir xil
 const TAHRIR_HOLAT = ['yangi', 'tasdiqlangan', 'yigilmoqda'];
 
@@ -382,6 +392,12 @@ class MobileSavdoController {
       ? ArizaModel.findOne({ where: { mobil_id: mobilId, agent_id: req.currentAgent.id } }) : null;
     const bor = await borini();
     if (bor) return ok(res, javob(bor, true), 'Sotuv allaqachon saqlangan');
+    // 2026-11-24: MIJOZ EGALIGI — agent faqat o'z / o'ziga biriktirilgan mijozga sotadi (shared.mijozRuxsat:
+    // mijoz.agent_id, marshrut rejasi, shu agentning avvalgi hujjati). Super agent — o'ziga biriktirilgan
+    // agentlarning mijoziga ham. Takror (yuqorida) tekshiruvdan oldin qaytadi — oflayn navbat buzilmaydi.
+    // savePayment'ga QO'YILMAGAN (AUDIT-VA-REJA §5g).
+    const mijozTek = req.body && req.body.klientId ? await MijozModel.findByPk(req.body.klientId, { attributes: ['id', 'agent_id'] }) : null;
+    if (mijozTek && !await sotuvMijozRuxsat(req, mijozTek)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
     let ariza;
     try {
       ariza = await createAriza({ body: req.body, agent: req.currentAgent, turi: 'sotish' });
@@ -486,11 +502,11 @@ class MobileSavdoController {
     ok(res, { androidId: req.body.androidId ?? 0 }, 'Yangilandi');
   };
 
-  // POST chekYuklash/ (multipart, maydon `chek`, 1 rasm ≤10MB) → data: { chekRasm: '/uploads/kassa/<nom>' }
+  // POST chekYuklash/ (multipart, maydon `chek`, 1 fayl ≤10MB: rasm yoki pdf/doc/docx/xls/xlsx — 2026-11-24) → data: { chekRasm: '/uploads/kassa/<nom>' }
   // 2026-11-23: plastik to'lov (savePayment / saveSell) va karta topshiruvi (pulTopshirish) chekini
   // oldindan yuklash — qaytgan yo'l keyingi so'rovda chekRasm sifatida yuboriladi.
   chekYuklash = async (req, res) => {
-    if (!req.file) throw new HttpException(400, 'Chek rasmi yuborilmadi yoki rasm emas (jpg, png, webp, heic)');
+    if (!req.file) throw new HttpException(400, "Chek fayli yuborilmadi yoki turi ruxsat etilmagan (rasm: jpg, png, webp, gif, heic; hujjat: pdf, doc, docx, xls, xlsx)");
     ok(res, { chekRasm: `/uploads/kassa/${req.file.filename}` }, 'Chek yuklandi');
   };
 
