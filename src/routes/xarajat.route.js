@@ -10,8 +10,8 @@ router.get('/turlar',        auth(), ahf(c.turlar));
 router.post('/turlar',       auth(), ahf(c.turQosh));
 router.patch('/turlar/:id',  auth(), ahf(c.turTahrir));
 router.get('/',              auth(), ahf(c.royxat));
-router.post('/',             auth(), uploadKassa.single('rasm'), ahf(c.create));
-router.patch('/:id',         auth(), uploadKassa.single('rasm'), ahf(c.update));
+router.post('/',             auth(), uploadKassa.rasm.single('rasm'), ahf(c.create));
+router.patch('/:id',         auth(), uploadKassa.rasm.single('rasm'), ahf(c.update));
 router.delete('/:id',        auth(), ahf(c.delete));
 
 module.exports = router;

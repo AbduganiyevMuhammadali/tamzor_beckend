@@ -83,9 +83,10 @@ async function auditRoyxat(obyekt, obyektId) {
   }));
 }
 
-/* Chek rasmi yo'li (chekYuklash/ qaytargan): '/uploads/kassa/<nom>' — boshqa papka, '..' va diskda
+/* Chek fayli yo'li (chekYuklash/ qaytargan): '/uploads/kassa/<nom>' — boshqa papka, '..' va diskda
    yo'q fayl qabul qilinmaydi. Bo'sh: majburiy bo'lsa 400, aks holda null. */
-const CHEK_YOL = /^\/uploads\/kassa\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,200})$/;
+// 2026-11-24: chek — rasm yoki hujjat; kengaytma oq ro'yxatda (uploadKassa saqlagan nom)
+const CHEK_YOL = /^\/uploads\/kassa\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,200}\.(?:jpg|jpeg|png|webp|gif|heic|heif|pdf|doc|docx|xls|xlsx))$/;
 function chekRasmOl(v, { majburiy = false, xabar = 'Chek rasmi majburiy' } = {}) {
   const s = v === undefined || v === null ? '' : String(v).trim();
   if (!s) {

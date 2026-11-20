@@ -4,6 +4,7 @@ const path = require("path");
 const cookieParser = require('cookie-parser')
 const i18n = require('./i18n.config')
 const errorMiddleware = require('../middleware/error.middleware');
+const faylAuth = require('../middleware/faylAuth.middleware');
 const userRouter        = require('../routes/user.route');
 const tovarRouter       = require('../routes/tovar.route');
 const turkumRouter      = require('../routes/turkum.route');
@@ -43,18 +44,21 @@ module.exports = async function(app){
         // Enable pre-flight
         app.options("*", cors());
         app.use(express.static(path.join(__dirname, '../../dist')));
-        // Yuklangan fayllar (audit rasmlari va h.k.)
+        // req.mf (xato xabarlari) /uploads auth'ida ham kerak — shuning uchun shu yerda
+        app.use(cookieParser());
+        app.use(i18n.init)
+        // Yuklangan fayllar (audit rasmlari, to'lov cheklari) — 2026-11-24 dan faqat tizimga kirganlarga:
+        // web Bearer JWT yoki mobil `token` sarlavhasi (faylAuth). Yo'l tekshiruvi ('..') — express.static.
         // nosniff + CSP: yuklangan fayl (masalan .html/.svg) brauzerda skript sifatida ishlamasin
-        app.use('/uploads', (req, res, next) => {
+        app.use('/uploads', faylAuth(), (req, res, next) => {
+          res.setHeader('Cache-Control', 'private, max-age=3600');
           res.setHeader('X-Content-Type-Options', 'nosniff');
           res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox");
           next();
         }, express.static(path.join(__dirname, '../../uploads')));
         // Maxfiylik siyosati (Play Market / App Store talab qiladi)
         app.get(['/privacy', '/maxfiylik'], (req, res) => res.sendFile(path.join(__dirname, '../../static/privacy.html')));
-        // i18n.setLocale('uz');
-        app.use(cookieParser());
-        app.use(i18n.init)
+        // i18n.setLocale('uz');  (cookieParser + i18n.init — /uploads dan oldin, yuqorida)
 
         // Mobil API prefikslari: asl server kabi (RashMilkNew/hs/AgentDostavshik)
         // + eski /api/mobile (moslik uchun)
