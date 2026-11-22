@@ -27,5 +27,17 @@ const ruxsat = (modul, ...amallar) => {
   };
 };
 
+/* Bir nechta moduldan istalgan biri yetarli (2026-11-26):
+     ruxsat.biri([['avtolavka', 'create'], ['ombor', 'edit']])
+   Har element — [modul, amal] yoki [modul, [amal1, amal2]]. Admin/Programmer — doim ochiq. */
+ruxsat.biri = (variantlar) => {
+  const list = (variantlar || []).map(([modul, amal]) => [modul, Array.isArray(amal) ? amal : [amal || 'view']]);
+  return function (req, res, next) {
+    if (!req.currentUser) return next(new HttpException(401, 'Authentication failed!'));
+    if (!list.some(([modul, amallar]) => ruxsatBormi(req.currentUser, modul, amallar))) return next(new HttpException(403, "Ruxsat yo'q"));
+    next();
+  };
+};
+
 ruxsat.ruxsatBormi = ruxsatBormi;
 module.exports = ruxsat;

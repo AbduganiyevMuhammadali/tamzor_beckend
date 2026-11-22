@@ -9,12 +9,15 @@
  *    oldingi 90 kun bo'yicha; yangi kirimi bo'lmasa — butun tarix bo'yicha.
  *    Oddiy AVG(kirim_narx) ishlatilmaydi: qaytarma yozuvlarida kirim_narx = 0
  *    va eski narxlar o'rtachani buzadi.
- *  • Ichki ko'chirish (avtolavka yuklash/qabul) savdo ham, kirim ham emas.
+ *  • Ichki ko'chirish (avtolavka yuklash/qabul, tur o'zgarishi, agentdan agentga) savdo ham, kirim ham emas.
  */
 const sequelize = require('../db/db-sequelize');
 const HttpException = require('./HttpException.utils');
 
-const ICHKI = ['yuklash', 'qabul'];            // tovar_register.manba_tur — ichki ko'chirish
+const ICHKI = ['yuklash', 'qabul'];            // tovar_register.manba_tur — ichki ko'chirish (avtolavka_hujjat)
+/* Barcha ichki ko'chirishlar (savdo ham, kirim ham emas): avtolavka yuklash/qabul, tovar turi o'zgarishi
+   ('kochirish', manba_id = tovar id) va agentdan agentga ('agent_kochirish', manba_id = agent_kochirish.id) */
+const KOCHIRISH_MANBA = [...ICHKI, 'kochirish', 'agent_kochirish'];
 const TANNARX_MANBA = ['prixod', 'ishlab_chiqarish'];   // kirim narxi manbai: xarid va o'zimiz ishlab chiqargan mahsulot
 const BRAK_OMBOR = 'Brak ombori';
 const AGENT_OMBOR = 'Agent: ';                 // avtolavka mashinasi ombori prefiksi
@@ -196,7 +199,7 @@ const TOLOV_NOM = { naqd: 'Naqd', plastik: 'Plastik / bank', qarz: 'Qarzga (nasi
 
 
 module.exports = {
-  ICHKI, TANNARX_MANBA, BRAK_OMBOR, AGENT_OMBOR,
+  ICHKI, KOCHIRISH_MANBA, TANNARX_MANBA, BRAK_OMBOR, AGENT_OMBOR,
   tzOffset, kunKey, sanaTogrimi, davr, guruhSql, guruhKalitlari,
   tannarxXaritasi, sotuvQatorlari, qaytarishQatorlari, sotuvTahlil,
   tolovKalit, TOLOV_NOM, n, yax, miq, foiz,

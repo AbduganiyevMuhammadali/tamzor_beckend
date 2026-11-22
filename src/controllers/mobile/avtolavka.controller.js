@@ -35,6 +35,7 @@ const { InkassatsiyaModel } = require('../../models/inkassatsiya.model');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const { tzOffset, kunKey } = require('../../utils/tahlil.utils');
+const { agentKochirishlari } = require('../../utils/agentKochirish.utils');
 const { agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, topshiruvYarat, kassaTekshir, chekRasmOl } = require('../../utils/agentPul.utils');
 const {
   INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
@@ -711,7 +712,7 @@ class MobileAvtolavkaController {
     const agent = avtoAgent(req, res); if (!agent) return;
     const sana = bugun();
     const mashina = await mashinaTovarlari(agent);
-    const [holat, mijozlar, rejalar, tashriflar, ombor, tavsiya, yuklashlar, brak, savdolar, viloyat, kassalar, pul] = await Promise.all([
+    const [holat, mijozlar, rejalar, tashriflar, ombor, tavsiya, yuklashlar, brak, savdolar, viloyat, kassalar, pul, kochirishlar] = await Promise.all([
       holatHisobla(agent, sana, mashina),
       // 2026-11-21: faqat agentga biriktirilgan mijozlar (o'zi yaratganlari ham — saveKlient agent_id yozadi)
       MijozModel.findAll({ where: { faol: true, agent_id: agent.id }, order: [['nomi', 'ASC']], raw: true }),
@@ -725,6 +726,7 @@ class MobileAvtolavkaController {
       agent.territoriya_id ? TerritoriyaModel.findByPk(agent.territoriya_id, { attributes: ['id', 'nomi'], raw: true }) : null,
       agentPlastikKassalar(agent),
       pulBloki(agent),
+      agentKochirishlari(agent.id),   // 2026-11-26: agentdan agentga ko'chirishlar (30 kun, ikki yo'nalish)
     ]);
 
     const tovarIds = mashina.qatorlar.map(q => Number(q.tovarId));
@@ -745,6 +747,9 @@ class MobileAvtolavkaController {
       mashina: { qatorlar: mashina.qatorlar, jami: mashina.jami },
       brak,
       savdolar,
+      // Agentdan agentga ko'chirishlar: yonalish 'kirim' (boshqa agentdan keldi) | 'chiqim' (boshqa agentga ketdi).
+      // ombor/mashina qoldig'i bularni allaqachon hisobga olgan.
+      kochirishlar,
       // 2026-11-22: plastik to'lov uchun kassalar (agent viloyatidagi faol plastik kassalar) va agent puli
       kassalar: kassalar.map(k => ({ id: k.id, nomi: k.nomi })),
       pul,

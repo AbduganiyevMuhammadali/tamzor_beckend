@@ -534,7 +534,7 @@ class TahlilController {
         sotilgan[r.tovar_id] = (sotilgan[r.tovar_id] || 0) + dona;
       } else if (r.tur === 'qaytarma_kirim') {
         d.qaytgan += dona * (narx[r.tovar_id] || 0);
-      } else if ((U.ICHKI.includes(r.manba_tur) || r.manba_tur === 'kochirish') && r.tur === 'chiqim') {
+      } else if (U.KOCHIRISH_MANBA.includes(r.manba_tur) && r.tur === 'chiqim') {
         d.kochirish_dona += dona; d.kochirish_son += n(r.son);
       } else if (r.manba_tur === 'inventar') {
         d.inventar += n(r.dona) * (narx[r.tovar_id] || 0);
@@ -709,7 +709,7 @@ class TahlilController {
     const limit = Math.min(200, Math.max(10, parseInt(req.query.limit, 10) || 50));
     const HARAKAT_SQL = {
       xarid: "r.manba_tur = 'prixod'", sotuv: "r.manba_tur = 'sotuv'", qaytarish: "r.manba_tur = 'qaytarma'",
-      kochirish: "r.manba_tur IN ('yuklash', 'qabul', 'kochirish')", inventar: "r.manba_tur = 'inventar'",
+      kochirish: "r.manba_tur IN ('yuklash', 'qabul', 'kochirish', 'agent_kochirish')", inventar: "r.manba_tur = 'inventar'",
       ishlab: "r.manba_tur = 'ishlab_chiqarish'",
     };
     const shart = ['r.sana BETWEEN :from AND :to'];
@@ -737,20 +737,21 @@ class TahlilController {
 
     // Hujjatlar: prixod / ariza / avtolavka hujjati
     const ids = t => [...new Set(rows.filter(r => t.includes(r.manba_tur)).map(r => r.manba_id))];
-    const [px, az, al, ic] = await Promise.all([
+    const [px, az, al, ic, ak] = await Promise.all([
       ids(['prixod']).length ? Q(`SELECT p.id, p.hujjat_raqam AS raqam, COALESCE(y.ism, p.yetkazuvchi) AS izoh FROM prixod p LEFT JOIN yetkazuvchi y ON y.id = p.yetkazuvchi_id WHERE p.id IN (:ids)`, { ids: ids(['prixod']) }) : [],
       ids(['sotuv', 'qaytarma']).length ? Q(`SELECT id, raqam, mijoz_nomi AS izoh FROM ariza WHERE id IN (:ids)`, { ids: ids(['sotuv', 'qaytarma']) }) : [],
       ids(U.ICHKI).length ? Q(`SELECT h.id, h.raqam, h.sana, h.agent_id, ag.fullname AS izoh FROM avtolavka_hujjat h LEFT JOIN agent ag ON ag.id = h.agent_id WHERE h.id IN (:ids)`, { ids: ids(U.ICHKI) }) : [],
       ids(['ishlab_chiqarish']).length ? Q(`SELECT id, raqam, izoh FROM ishlab_chiqarish WHERE id IN (:ids)`, { ids: ids(['ishlab_chiqarish']) }) : [],
+      ids(['agent_kochirish']).length ? Q(`SELECT id, raqam, dan_agent_nomi, ga_agent_nomi, holat FROM agent_kochirish WHERE id IN (:ids)`, { ids: ids(['agent_kochirish']) }) : [],
     ]);
     const mp = a => Object.fromEntries(a.map(x => [x.id, x]));
-    const pxM = mp(px), azM = mp(az), alM = mp(al), icM = mp(ic);
+    const pxM = mp(px), azM = mp(az), alM = mp(al), icM = mp(ic), akM = mp(ak);
 
     const turi = r => {
       if (r.manba_tur === 'prixod') return 'xarid';
       if (r.manba_tur === 'sotuv') return 'sotuv';
       if (r.manba_tur === 'qaytarma') return 'qaytarish';
-      if (U.ICHKI.includes(r.manba_tur) || r.manba_tur === 'kochirish') return 'kochirish';
+      if (U.KOCHIRISH_MANBA.includes(r.manba_tur)) return 'kochirish';
       if (r.manba_tur === 'inventar') return 'inventar';
       if (r.manba_tur === 'ishlab_chiqarish') return 'ishlab';
       return 'boshqa';
@@ -759,6 +760,7 @@ class TahlilController {
       xarid: 'Xarid (kirim)', sotuv: 'Sotuv', qaytarish: 'Qaytarish', inventar: 'Inventarizatsiya', boshqa: 'Boshqa',
       ishlab: 'Ishlab chiqarish',
       yuklash: 'Mashinaga yuklash', qabul: 'Mashinadan qabul', kochirish: 'Ombordan omborga',
+      agent_kochirish: 'Agentdan agentga',
     };
     const data = rows.map(r => {
       const h = turi(r);
@@ -773,13 +775,16 @@ class TahlilController {
         // Yo'nalish: Xom ashyo omboriga kirgan yoki asosiy skladdan chiqqan yozuv — "skladdan xom ashyo omboriga"
         const xomga = (r.ombor === XOM_ASHYO_OMBOR) === (n(r.donada) > 0);
         hujjat = { raqam: 'Tovar turi o\'zgardi', izoh: xomga ? 'Asosiy sklad → Xom ashyo ombori' : 'Xom ashyo ombori → Asosiy sklad', yol: null };
+      } else if (r.manba_tur === 'agent_kochirish') {
+        const x = akM[r.manba_id];
+        hujjat = { raqam: x?.raqam || `KO #${r.manba_id}`, izoh: x ? `${x.dan_agent_nomi} → ${x.ga_agent_nomi}${x.holat === 'bekor' ? ' (bekor qilingan)' : ''}` : null, yol: `/avtolavka/kochirish/${r.manba_id}` };
       } else if (r.manba_tur === 'ishlab_chiqarish') {
         const x = icM[r.manba_id];
         hujjat = { raqam: x?.raqam || `IC #${r.manba_id}`, izoh: r.tur === 'chiqim' ? 'xom ashyo sarfi' : r.tur === 'kirim' ? 'tayyor mahsulot' : 'bekor qilindi', yol: `/ishlab/${r.manba_id}` };
       } else hujjat = { raqam: `#${r.manba_id}`, izoh: null, yol: null };
       const dona = n(r.donada);
       return {
-        id: r.id, sana: r.sana, harakat: h, nom: NOM[U.ICHKI.includes(r.manba_tur) ? r.manba_tur : h] || NOM[h],
+        id: r.id, sana: r.sana, harakat: h, nom: NOM[(U.ICHKI.includes(r.manba_tur) || r.manba_tur === 'agent_kochirish') ? r.manba_tur : h] || NOM[h],
         yonalish: dona >= 0 ? 'kirdi' : 'chiqdi', tovar_id: r.tovar_id, tovar_nomi: r.tovar_nomi, ombor: r.ombor,
         dona, narx: yax(h === 'sotuv' ? r.sotuv_narx : r.kirim_narx), summa: yax(Math.abs(n(r.summa))), hujjat,
       };
@@ -909,6 +914,8 @@ class TahlilController {
         SELECT DISTINCT DATE_FORMAT(d, '%Y-%m-%d') AS d FROM (
           SELECT sana AS d FROM avtolavka_hujjat WHERE agent_id = :agent_id AND sana BETWEEN :dan AND :gacha
           UNION SELECT sana FROM avtolavka_kun WHERE agent_id = :agent_id AND sana BETWEEN :dan AND :gacha
+          UNION SELECT DATE(CONVERT_TZ(sana, '+00:00', :tz)) FROM agent_kochirish
+            WHERE (dan_agent_id = :agent_id OR ga_agent_id = :agent_id) AND sana BETWEEN :from AND :to
           UNION SELECT DATE(CONVERT_TZ(yetkazilgan_sana, '+00:00', :tz)) FROM ariza
             WHERE agent_id = :agent_id AND ombor = :ombor AND turi = 'sotish' AND holat = 'yetkazildi' AND deletedAt IS NULL
               AND yetkazilgan_sana BETWEEN :from AND :to

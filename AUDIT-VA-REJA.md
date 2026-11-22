@@ -281,6 +281,19 @@ Batafsil — `FRONTEND-UCHUN.md` §20, validatsiya — `API-VALIDATSIYA.md` §3.
 - **Diqqat (joriy bazalar):** migratsiyadan keyin viloyati bor agentlar narx kiritilmaguncha web'da xodim nomidan sota olmaydi, ilova (yangi versiya) ham sotmaydi — ishga tushirishdan oldin viloyat narxlarini kiritish kerak. `editPrice` hamma agentda `false` bo'lib qoladi — kerakli agentlarga `narx_ozgartirish` qo'yilsin.
 - **Sinov (lokal):** yangi `test-narx`; `test-javoblar` viloyat narxlari bilan to'ldirildi (aks holda web plastik sotuv 400).
 
+## 5i. Agentdan agentga ko'chirish (2026-11-26)
+
+Batafsil — `FRONTEND-UCHUN.md` §21, validatsiya — `API-VALIDATSIYA.md` §3.25. Migratsiya `20261126000001-agent-kochirish.js`.
+
+- **Jadvallar** `agent_kochirish` (KO-000001, kimdan/kimga, holat faol|bekor, `sorov_id` UNIQUE), `agent_kochirish_qator` (dona, tannarx), `agent_kochirish_audit` (yaratildi/tahrirlandi/bekor_qilindi, eski→yangi JSON, sabab, kim, vaqt). `tovar_register.manba_tur` ga `'agent_kochirish'` (manba_id = hujjat id) — eski `'kochirish'` (tur o'zgarishi, manba_id = tovar id) bilan aralashmaydi.
+- **Qoida:** operator web'da, istalgan ikki agent, faqat sotiladigan ombor ↔ sotiladigan ombor (brak, asosiy sklad emas), darhol. Yuboruvchi nofaol bo'lishi mumkin, qabul qiluvchi faol. Tahrir — delta (ikki tomonda qoldiq tekshiriladi), bekor — teskari yozuv (qabul qiluvchida yetishi shart). Yozuvlar o'chirilmaydi.
+- **Ruxsat:** yangi `ruxsat.biri([[modul, amal], …])` (`middleware/ruxsat.middleware.js`) — bir nechta moduldan biri yetarli; eski `ruxsat(modul, …amallar)` o'zgarmagan.
+- **Savdo emas:** agent_register, kassa, KPI, plan-fakt, tahlil sotuv/kirim — tegilmaydi (testda tekshirildi). `tahlil.utils.KOCHIRISH_MANBA` (yuklash, qabul, kochirish, agent_kochirish) — tahlil/ombor va jurnal ichki harakat sifatida ko'radi. `kunHisobla` — `tovar.kochirish {kirim, chiqim}` balansga kiradi (solishtirma kamomad ko'rsatmaydi), voqealarda `kochirish`.
+- **Mobil:** `avtolavkaSinxron.kochirishlar` (30 kun, ikki yo'nalish), kuzatuvda ham.
+- **Ochiq savol:** oflayn mobil sotuv — agent oflayn sotgan tovar shu orada boshqa agentga ko'chirilgan bo'lsa, `saveSell` (avtolavka) qoldiqni har doim tekshiradi va 400 `"<tovar>" mashinada yetarli emas` bilan **rad etadi** (oflayn ham) — tovar mijozga topshirilgan bo'lsa ham sotuv yozilmaydi. Hozircha o'zgartirilmadi; operatorga ko'chirishdan oldin agent bilan kelishish tavsiya etiladi.
+- **Eslatma:** `hisobot/*` (ombor oboroti, register) tur bo'yicha (kirim/chiqim) yig'adi va ichki harakatlarni (yuklash/qabul ham) ajratmaydi — ko'chirish u yerda ikki tomonlama (kirim+chiqim) ko'rinadi, sof qoldiq o'zgarmaydi (avvalgi yuklash/qabul bilan bir xil xulq).
+- **Sinov (lokal):** yangi `test-kochirish` (93 tekshiruv).
+
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |
 |---|---|

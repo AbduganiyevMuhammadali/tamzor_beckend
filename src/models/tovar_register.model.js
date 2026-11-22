@@ -25,7 +25,8 @@ TovarRegisterModel.init({
     // yuklash/qabul — avtolavka: asosiy ombor ↔ agent ombori o'tkazmalari
     // ishlab_chiqarish — xom ashyo chiqimi (chiqim) va tayyor mahsulot kirimi (kirim, tannarxda)
     // kochirish — tovar turi o'zgarganda qoldig'i turi omboriga ko'chadi (asosiy sklad ↔ Xom ashyo ombori)
-    type: DataTypes.ENUM('prixod', 'sotuv', 'qaytarma', 'inventar', 'yuklash', 'qabul', 'ishlab_chiqarish', 'kochirish'),
+    // agent_kochirish — agentdan agentga ko'chirish (manba_id = agent_kochirish.id), ichki harakat
+    type: DataTypes.ENUM('prixod', 'sotuv', 'qaytarma', 'inventar', 'yuklash', 'qabul', 'ishlab_chiqarish', 'kochirish', 'agent_kochirish'),
     allowNull: false,
   },
   manba_id: { type: DataTypes.INTEGER, allowNull: false },

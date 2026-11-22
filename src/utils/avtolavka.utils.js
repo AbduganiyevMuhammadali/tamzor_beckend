@@ -205,7 +205,7 @@ async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } 
     type: sequelize.QueryTypes.SELECT, ...(transaction ? { transaction } : {}) });
 
   const [
-    [yuk], [qab], [sot], [qayt], [boshi], [oxiri], [pul], [ink], [tash], [reja], sorovlar, [kunYopish],
+    [yuk], [qab], [sot], [qayt], [boshi], [oxiri], [pul], [ink], [tash], [reja], sorovlar, [kunYopish], [koch],
   ] = await Promise.all([
     q(`SELECT COUNT(*) soni, COALESCE(SUM(jami_dona),0) dona, COALESCE(SUM(jami_summa),0) summa,
               MIN(tasdiqlagan_sana) vaqt, COALESCE(SUM(agent_qabul_vaqt IS NOT NULL),0) agent_qabul
@@ -242,16 +242,23 @@ async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } 
        WHERE agent_id = :agent_id AND sana = :sana AND tur = 'yuklash' AND holat = 'qoralama' AND manba = 'mobil'
        ORDER BY id`),
     q(`SELECT yopish_vaqt, naqd_elon, izoh, ochish_vaqt, ochish_soni FROM avtolavka_kun WHERE agent_id = :agent_id AND sana = :sana LIMIT 1`),
+    // 2026-11-26: agentdan agentga ko'chirish — kelgan (kirim) va ketgan (chiqim); tahrir/bekor yozuvlari ham shu yerda
+    q(`SELECT COALESCE(SUM(CASE WHEN donada > 0 THEN donada ELSE 0 END),0) kirim,
+              COALESCE(SUM(CASE WHEN donada < 0 THEN -donada ELSE 0 END),0) chiqim
+       FROM tovar_register WHERE ombor = :ombor AND manba_tur = 'agent_kochirish' AND ${lokalKun('sana')} = :sana`),
   ]);
 
   const kunBoshi = n(boshi.dona), berildi = n(yuk.dona), qaytdi = n(qayt.dona);
   const sotildi = n(sot.dona), brak = n(qab.brak), topshirildi = n(qab.dona);
-  const kerak = kunBoshi + berildi + qaytdi - sotildi - brak;
+  const kKirim = n(koch && koch.kirim), kChiqim = n(koch && koch.chiqim);
+  const kerak = kunBoshi + berildi + qaytdi + kKirim - kChiqim - sotildi - brak;
   const farq = +(kerak - topshirildi).toFixed(3);
   R.tovar = {
     kun_boshi:     { dona: kunBoshi, summa: n(boshi.summa) },
     berildi:       { dona: berildi, summa: n(yuk.summa), hujjat_soni: +yuk.soni },
     qaytarildi:    { dona: qaytdi, summa: n(qayt.summa) },
+    // Boshqa agentlardan kelgan / boshqa agentlarga ketgan (agentdan agentga ko'chirish)
+    kochirish:     { kirim: +kKirim.toFixed(3), chiqim: +kChiqim.toFixed(3) },
     sotildi:       { dona: sotildi, summa: n(sot.summa), hujjat_soni: +sot.soni },
     brak:          { dona: brak },
     qolishi_kerak: { dona: +kerak.toFixed(3) },
@@ -304,7 +311,7 @@ async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } 
     ? (!!ink && keyin(ink.tasdiqlagan_sana)) || (R.pul.farq <= 0.5 && tovarTopshirdi)
     : !!ink || (naqdOlindi <= 0 && tovarTopshirdi);
   // Agent mobilda kunni yopgan bo'lsa — savdo tugagan, topshirish kutilmoqda
-  if (!tovarTopshirdi && !pulTopshirdi) R.holat = R.kun_yopish ? 'topshirilmoqda' : (berildi > 0 || sotildi > 0 ? 'ochiq' : 'bosh');
+  if (!tovarTopshirdi && !pulTopshirdi) R.holat = R.kun_yopish ? 'topshirilmoqda' : (berildi > 0 || kKirim > 0 || sotildi > 0 ? 'ochiq' : 'bosh');
   else if (!tovarTopshirdi || !pulTopshirdi) R.holat = 'topshirilmoqda';
   else R.holat = (farq > EPS || R.pul.farq > 0.5) ? 'kamomad' : 'yopiq';
   // Bosqich: 0 yuklash · 1 savdo · 2 topshirish · 3 yopilgan
@@ -330,10 +337,11 @@ async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } 
               SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.manba_tur = 'sotuv' THEN -r.donada ELSE 0 END) sotildi,
               SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.tur = 'qaytarma_kirim' THEN r.donada ELSE 0 END) qaytdi,
               SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.manba_tur = 'qabul' THEN -r.donada ELSE 0 END) topshirildi,
+              SUM(CASE WHEN ${lokalKun('r.sana')} = :sana AND r.manba_tur = 'agent_kochirish' THEN r.donada ELSE 0 END) kochirildi,
               SUM(r.donada) kun_oxiri
        FROM tovar_register r WHERE r.ombor = :ombor AND ${lokalKun('r.sana')} <= :sana
        GROUP BY r.tovar_id
-       HAVING ABS(kun_boshi) + berildi + sotildi + qaytdi + topshirildi + ABS(kun_oxiri) > 0.001
+       HAVING ABS(kun_boshi) + berildi + sotildi + qaytdi + topshirildi + ABS(kochirildi) + ABS(kun_oxiri) > 0.001
        ORDER BY tovar_nomi`),
   ]);
   const brakRows = await q(`SELECT q.tovar_id, SUM(q.brak_dona) brak FROM avtolavka_qator q
@@ -365,6 +373,7 @@ async function kunHisobla(agent, sana, { tafsilot = false, transaction = null } 
       tovar_id: t.tovar_id, tovar_nomi: t.tovar_nomi, turkum: t.turkum,
       kun_boshi: n(t.kun_boshi), berildi: n(t.berildi), sotildi: n(t.sotildi), qaytdi: n(t.qaytdi),
       topshirildi: +topsh.toFixed(3), brak: brakD,
+      kochirildi: +n(t.kochirildi).toFixed(3),   // agentdan agentga: + kelgan, − ketgan (sof)
       farq: +n(t.kun_oxiri).toFixed(3),
     };
   });
@@ -421,7 +430,15 @@ async function kunVoqealari(agent, sana) {
        WHERE agent_id = :agent_id AND sana = :sana AND tur = 'yuklash' AND manba = 'mobil'`),
     q(`SELECT yopish_vaqt vaqt, naqd_elon, ochish_vaqt, ochish_soni FROM avtolavka_kun WHERE agent_id = :agent_id AND sana = :sana`),
   ]);
+  const kochirishlar = await q(`SELECT k.raqam, k.sana vaqt, k.holat, k.dan_agent_id, k.dan_agent_nomi, k.ga_agent_nomi,
+       (SELECT COALESCE(SUM(dona),0) FROM agent_kochirish_qator x WHERE x.kochirish_id = k.id) dona
+     FROM agent_kochirish k WHERE (k.dan_agent_id = :agent_id OR k.ga_agent_id = :agent_id) AND ${lokalKun('k.sana')} = :sana`);
   const v = [];
+  kochirishlar.forEach(k => {
+    const chiqim = Number(k.dan_agent_id) === Number(agent.id);
+    v.push({ tur: 'kochirish', vaqt: k.vaqt, raqam: k.raqam, yonalish: chiqim ? 'chiqim' : 'kirim',
+      agent: chiqim ? k.ga_agent_nomi : k.dan_agent_nomi, dona: n(k.dona), holat: k.holat });
+  });
   sorovlar.forEach(h => v.push({ tur: 'sorov', vaqt: h.vaqt, raqam: h.raqam, dona: n(h.jami_dona), summa: n(h.jami_summa),
     holat: h.holat, sabab: h.rad_sababi || null }));
   hujjatlar.forEach(h => {

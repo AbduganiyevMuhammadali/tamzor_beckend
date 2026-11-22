@@ -5,6 +5,13 @@ const auth = require('../middleware/auth.middleware');
 const h = require('../middleware/awaitHandlerFactory.middleware');
 const ruxsat = require('../middleware/ruxsat.middleware');
 const uploadKassa = require('../middleware/uploadKassa.middleware');
+const kc = require('../controllers/web/agentKochirish.controller');
+
+/* Agentdan agentga ko'chirish (2026-11-26): yozish — avtolavka 'create' YOKI ombor 'edit';
+   o'qish — avtolavka 'view' YOKI ombor 'view'; forma qoldig'i — o'qish yoki yozish ruxsatlaridan biri */
+const KOCHIRISH_YOZISH = ruxsat.biri([['avtolavka', 'create'], ['ombor', 'edit']]);
+const KOCHIRISH_OQISH = ruxsat.biri([['avtolavka', 'view'], ['ombor', 'view']]);
+const KOCHIRISH_FORMA = ruxsat.biri([['avtolavka', ['view', 'create']], ['ombor', ['view', 'edit']]]);
 
 router.get('/doska',          auth(), h(c.doska));
 router.get('/kalendar',       auth(), h(c.kalendar));
@@ -39,5 +46,12 @@ router.get('/sotuv/tayyor',            auth(), h(c.sotuvTayyor));
 router.post('/sotuv',                  auth(), uploadKassa.single('chek'), h(c.sotuvCreate));
 // Takror/xato chekni bekor qilish — faqat Admin (ombor, kassa, mijoz qarzi, bonus teskari yoziladi)
 router.post('/sotuv/:id/bekor',        auth('Admin', 'Programmer'), h(c.sotuvBekor));
+
+router.get('/agent-qoldiq',            auth(), KOCHIRISH_FORMA, h(kc.agentQoldiq));
+router.get('/kochirish',               auth(), KOCHIRISH_OQISH, h(kc.royxat));
+router.post('/kochirish',              auth(), KOCHIRISH_YOZISH, h(kc.yarat));
+router.get('/kochirish/:id',           auth(), KOCHIRISH_OQISH, h(kc.bitta));
+router.patch('/kochirish/:id',         auth(), KOCHIRISH_YOZISH, h(kc.tahrirla));
+router.post('/kochirish/:id/bekor',    auth(), KOCHIRISH_YOZISH, h(kc.bekor));
 
 module.exports = router;
