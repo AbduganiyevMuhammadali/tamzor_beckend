@@ -19,11 +19,11 @@ const KassaModel = require('../../models/kassa.model');
 const XarajatTuriModel = require('../../models/xarajatTuri.model');
 const HttpException = require('../../utils/HttpException.utils');
 const U = require('../../utils/tahlil.utils');
-const { xarajatTurlari } = require('../../utils/xarajat.utils');
+const { xarajatTurlari, tasdiqlanganSorovYozuvimi, TASDIQLI_OCHIRISH_XATO } = require('../../utils/xarajat.utils');
 const XarajatSorovModel = require('../../models/xarajatSorov.model');
 const { KassalarModel } = require('../../models/kassalar.model');
 const { qulflabOl } = require('../../utils/qulf.utils');
-const { kassaBalans, kassaBalanslari, auditYoz, auditRoyxat, sababOl, userNomi } = require('../../utils/agentPul.utils');
+const { kassaQulfla, kassaBalansTekshir, kassaUsul, kassaBalanslari, auditYoz, auditRoyxat, sababOl, userNomi } = require('../../utils/agentPul.utils');
 const { ruxsatBormi } = require('../../middleware/ruxsat.middleware');
 
 const n = v => Number(v) || 0;
@@ -69,7 +69,6 @@ function limitOl(u) {
   return v === null || v === undefined || v === '' ? null : yax(v);
 }
 const tasdiqlovchimi = (u) => ruxsatBormi(u, 'moliya', ['approve']);
-const kassaUsul = (k) => (k.tur === 'plastik' ? 'karta' : 'naqt');
 const HOLATLAR = ['kutilmoqda', 'tasdiqlangan', 'rad_etildi', 'bekor'];
 const HOLAT_NOMI = { tasdiqlangan: 'tasdiqlangan', rad_etildi: 'rad etilgan', bekor: 'bekor qilingan', kutilmoqda: 'kutilmoqda' };
 
@@ -87,19 +86,7 @@ function idOl(v, nomi = 'id') {
 }
 const bosmi = (v) => v === undefined || v === null || v === '';
 
-/* Kassani tranzaksiyada qulflab oladi (parallel xarajatlar navbatma-navbat): mavjud va faol bo'lishi shart */
-async function kassaQulfla(kassaId, t, { faolShart = true } = {}) {
-  if (bosmi(kassaId)) throw new HttpException(400, 'Kassani tanlang (kassa_id majburiy)');
-  const id = idOl(kassaId, 'kassa_id');
-  const k = await qulflabOl(KassalarModel, id, t);
-  if (!k || (faolShart && !k.faol)) throw new HttpException(400, 'Kassa topilmadi yoki faol emas');
-  return k;
-}
-async function balansTekshir(kassaId, summa, t, qoshimcha = 0) {
-  const b = await kassaBalans(kassaId, t);
-  if (summa > b + qoshimcha + 0.005) throw new HttpException(400, `Kassada yetarli mablag' yo'q (balans ${b})`);
-  return b;
-}
+/* kassaQulfla / kassaBalansTekshir / kassaUsul — agentPul.utils (barcha kassadan chiqim oqimlari uchun bitta qoida) */
 
 /* So'rovlar (JOIN: kassa nomi, yaratuvchining joriy limiti) */
 async function sorovlarOl(where, rep, { limit = null, offset = 0 } = {}) {
@@ -272,7 +259,7 @@ class XarajatController {
       const natija = await sequelize.transaction(async (tr) => {
         const k = await kassaQulfla(req.body.kassa_id, tr);
         // Kutilayotgan so'rovda ham erta tekshiriladi; hal qiluvchi tekshiruv — tasdiqda
-        await balansTekshir(k.id, summa, tr);
+        await kassaBalansTekshir(k.id, summa, tr);
         if (kutish) {
           const s = await XarajatSorovModel.create({
             kategoriya: t.kod, summa, kassa_id: k.id, tolov_usul: kassaUsul(k), sana, izoh, chek_rasm: fayl,
@@ -342,7 +329,7 @@ class XarajatController {
           const kassaOzgardi = u.kassa_id !== undefined;
           if (kassaOzgardi || yangiSumma > eskiSumma + 0.005) {
             // Shu kassada qolsa — joriy yozuv balansdan allaqachon ayirilgan
-            await balansTekshir(k.id, yangiSumma, tr, kassaOzgardi ? 0 : eskiSumma);
+            await kassaBalansTekshir(k.id, yangiSumma, tr, kassaOzgardi ? 0 : eskiSumma);
           }
         } else if (req.body.tolov_usul !== undefined && USUL.includes(req.body.tolov_usul)) u.tolov_usul = req.body.tolov_usul;
         if (req.body.sana) {
@@ -413,7 +400,7 @@ class XarajatController {
       if (s.holat !== 'kutilmoqda') throw new HttpException(400, `So'rov allaqachon ${HOLAT_NOMI[s.holat]}`);
       if (Number(s.user_id) === Number(user.id) && !toliqmi(user)) throw new HttpException(403, "O'z so'rovingizni o'zingiz tasdiqlay olmaysiz");
       const k = await kassaQulfla(s.kassa_id, tr);
-      await balansTekshir(k.id, n(s.summa), tr);
+      await kassaBalansTekshir(k.id, n(s.summa), tr);
       const rec = await KassaModel.create({
         tur: 'chiqim', kategoriya: s.kategoriya, summa: n(s.summa), tolov_usul: kassaUsul(k),
         manba_tur: 'xarajat', manba_id: s.id, mijoz_id: null, mijoz_nomi: null,
@@ -470,6 +457,7 @@ class XarajatController {
     const turlar = await xarajatTurlari();
     if (!rec || rec.tur !== 'chiqim' || !turlar.has(rec.kategoriya)) throw new HttpException(404, 'Xarajat topilmadi');
     if (!TAHRIR_MANBA.includes(rec.manba_tur)) throw new HttpException(400, "Bu avtomatik yozuv — o'chirib bo'lmaydi");
+    if (await tasdiqlanganSorovYozuvimi(rec.id)) throw new HttpException(400, TASDIQLI_OCHIRISH_XATO);
     const rasm = rec.chek_rasm;
     await rec.destroy();
     await yozuvRasminiOchir(rasm);

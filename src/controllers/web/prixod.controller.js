@@ -14,6 +14,7 @@ const { adminMi } = require('../../utils/sotuvBekor.utils');
 const { ochirishParoliTekshir } = require('../../utils/xavfsizlik.utils');
 const { miq } = require('../../utils/tahlil.utils');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
+const { ixtiyoriyKassa } = require('../../utils/agentPul.utils');
 
 const ROYXAT_MAX_LIMIT = 500;
 
@@ -239,6 +240,10 @@ class PrixodController extends BaseController {
       const prixod = await qulflabOl(PrixodModel, req.params.id, t);
       if (!prixod) throw new HttpException(404, req.mf('data not found'));
       if (prixod.holat === 'tasdiqlangan') throw new HttpException(400, 'Allaqachon tasdiqlangan');
+      // 2026-11-27: ixtiyoriy body.kassa_id — oldindan to'lov (tolangan_summa) shu kassadan chiqadi, balansdan
+      // oshmasin. Kassa qulfi — birinchi oddiy o'qishdan OLDIN (snapshot qulfdan keyin). Yuborilmasa — avvalgidek.
+      const oldindan = prixod.yetkazuvchi_id ? (Number(prixod.tolangan_summa) || 0) : 0;
+      const kx = oldindan > 0 ? await ixtiyoriyKassa(req.body && req.body.kassa_id, t, { tur: 'chiqim', summa: oldindan }) : null;
       const qatorlar = await PrixodQatorModel.findAll({ where: { prixod_id: prixod.id }, order: [['id', 'ASC']], transaction: t });
       if (!qatorlar.length) throw new HttpException(400, 'Qatorlar bo\'sh — tasdiqlash mumkin emas');
 
@@ -317,7 +322,8 @@ class PrixodController extends BaseController {
             tur:        'chiqim',
             kategoriya: 'yetkazuvchi_tolov',
             summa:      tolangan,
-            tolov_usul: 'naqt',
+            tolov_usul: kx ? kx.tolov_usul : 'naqt',
+            kassa_id:   kx ? kx.kassa.id : null,
             manba_tur:  'prixod',
             manba_id:   prixod.id,
             izoh:       `Prixod ${hujjat} — ${yetk.ism} ga to'lov`,

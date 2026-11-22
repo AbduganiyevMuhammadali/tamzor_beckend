@@ -216,6 +216,47 @@ async function kassaBalans(kassaId, transaction = null) {
   return r2(n(j && j.s) + n(tp && tp.s));
 }
 
+/* ── KASSADAN CHIQIM: yagona balans tekshiruvi (2026-11-27, FRONTEND-UCHUN §22.14) ──────────
+   Xarajat, xarajat so'rovi tasdig'i, Kassa sahifasidagi qo'lda chiqim, yetkazuvchiga to'lov (alohida va
+   prixod tasdig'ida), qarz oldi-berdi chiqimlari — kassa_id bilan yozilsa, summa kassa balansidan oshmasin.
+   QULF: kassalar qatori FOR UPDATE — parallel chiqimlar navbatma-navbat. MUHIM: tranzaksiyadagi BIRINCHI
+   oddiy (qulfsiz) o'qishdan OLDIN chaqiring — REPEATABLE READ snapshot qulfdan keyin olinsin, aks holda
+   balans eski nusxadan o'qiladi (ishlab.controller dagi izoh bilan bir xil sabab). */
+const bosmi = (v) => v === undefined || v === null || v === '';
+const kassaUsul = (k) => (k.tur === 'plastik' ? 'karta' : 'naqt');
+function kassaIdOl(v) {
+  const id = Number(v);
+  if (!Number.isInteger(id) || id <= 0) throw new HttpException(400, "kassa_id noto'g'ri");
+  return id;
+}
+/* Kassani tranzaksiyada qulflab oladi: mavjud va (faolShart) faol bo'lishi shart */
+async function kassaQulfla(kassaId, t, { faolShart = true } = {}) {
+  if (bosmi(kassaId)) throw new HttpException(400, 'Kassani tanlang (kassa_id majburiy)');
+  const k = await qulflabOl(KassalarModel, kassaIdOl(kassaId), t);
+  if (!k || (faolShart && !k.faol)) throw new HttpException(400, 'Kassa topilmadi yoki faol emas');
+  return k;
+}
+/* summa > balans (+ qoshimcha: shu kassadagi tahrirlanayotgan yozuvning eski summasi) → 400 */
+async function kassaBalansTekshir(kassaId, summa, t, qoshimcha = 0) {
+  const b = await kassaBalans(kassaId, t);
+  if (n(summa) > b + n(qoshimcha) + 0.005) throw new HttpException(400, `Kassada yetarli mablag' yo'q (balans ${b})`);
+  return b;
+}
+/* Ixtiyoriy kassa_id li pul harakati (POST /kassa bilan bir xil qoida):
+   kassa_id bo'sh → null (eski xatti-harakat, tekshiruv yo'q). Aks holda: faol kassa qulflanadi,
+   tolov_usul kassa turiga mos (naqd → naqt; plastik → karta yoki bank), tur 'chiqim' bo'lsa balans tekshiriladi.
+   Qaytaradi { kassa, tolov_usul }. */
+async function ixtiyoriyKassa(kassaIdRaw, t, { tur = 'chiqim', summa = 0, tolovUsul = null } = {}) {
+  if (bosmi(kassaIdRaw)) return null;
+  const k = await kassaQulfla(kassaIdRaw, t);
+  const usul = kassaUsul(k);
+  if (tolovUsul && tolovUsul !== usul && !(k.tur === 'plastik' && tolovUsul === 'bank')) {
+    throw new HttpException(400, "To'lov usuli kassa turiga mos emas");
+  }
+  if (tur === 'chiqim') await kassaBalansTekshir(k.id, summa, t);
+  return { kassa: k, tolov_usul: tolovUsul || usul };
+}
+
 /* ── Plastik to'lov amallari (web) ─────────────────────────────────── */
 const plastikShakli = (p) => ({
   holat: p.holat, summa: n(p.summa), kassa_id: p.kassa_id,
@@ -394,6 +435,7 @@ async function topshiruvRad(id, user, sababRaw) {
 
 module.exports = {
   kassaTekshir, chekRasmOl, agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, kassaBalanslari, kassaBalans,
+  kassaUsul, kassaQulfla, kassaBalansTekshir, ixtiyoriyKassa,
   plastikTasdiqla, plastikRad, plastikTahrir, sotuvPlastikRad,
   topshiruvYarat, topshiruvTasdiqla, topshiruvRad, auditYoz, auditRoyxat, sababOl, userNomi, Op,
 };

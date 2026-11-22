@@ -5,7 +5,8 @@ const KassaModel = require('../../models/kassa.model');
 const { MijozModel } = require('../../models/mijoz.model');
 const HttpException = require('../../utils/HttpException.utils');
 const BaseController = require('../BaseController');
-const { xarajatTurlari } = require('../../utils/xarajat.utils');
+const { xarajatTurlari, tasdiqlanganSorovYozuvimi, TASDIQLI_OCHIRISH_XATO } = require('../../utils/xarajat.utils');
+const { ixtiyoriyKassa } = require('../../utils/agentPul.utils');
 
 // Kategoriya yorliqlari (frontda ko'rsatish uchun)
 const KATEGORIYA = {
@@ -206,17 +207,8 @@ class KassaController extends BaseController {
       throw new HttpException(400, `Summa limitingizdan (${Number(cu.xarajat_limit)}) oshadi — Xarajatlar bo'limidan tasdiqqa yuboring`);
     }
     // 2026-11-22: ixtiyoriy kassa_id — yozuv shu kassaga (kassa balansi). tolov_usul kassa turidan olinadi.
-    let kassaId = null;
-    if (req.body.kassa_id !== undefined && req.body.kassa_id !== null && req.body.kassa_id !== '') {
-      const k = await KassalarModel.findByPk(Number(req.body.kassa_id));
-      if (!k || !k.faol) throw new HttpException(400, 'Kassa topilmadi yoki faol emas');
-      kassaId = k.id;
-      const usul = k.tur === 'plastik' ? 'karta' : 'naqt';
-      if (tolov_usul && tolov_usul !== usul && !(k.tur === 'plastik' && tolov_usul === 'bank')) {
-        throw new HttpException(400, "To'lov usuli kassa turiga mos emas");
-      }
-      tolov_usul = tolov_usul || usul;
-    }
+    // 2026-11-27: kassa tranzaksiya ichida qulflanadi (ixtiyoriyKassa); chiqim kassa balansidan oshmasin.
+    const kassaBor = req.body.kassa_id !== undefined && req.body.kassa_id !== null && req.body.kassa_id !== '';
     // mijoz_id faqat mijoz to'lovida saqlanadi: mijoz hisob-kitobi kassa kirimlarini mijoz_id
     // bo'yicha yig'adi — boshqa kategoriyadagi yozuv mijoz qarzini noto'g'ri kamaytirib ko'rsatardi
     const mijozId = kategoriya === 'mijoz_tolov' ? mijoz_id : null;
@@ -237,6 +229,13 @@ class KassaController extends BaseController {
 
     const t = await sequelize.transaction();
     try {
+      // Kassa qulfi — tranzaksiyadagi birinchi o'qish (snapshot qulfdan keyin): parallel chiqimlar balansni oshirmasin
+      let kassaId = null;
+      if (kassaBor) {
+        const kx = await ixtiyoriyKassa(req.body.kassa_id, t, { tur, summa: Number(summa), tolovUsul: tolov_usul || null });
+        kassaId = kx.kassa.id;
+        tolov_usul = kx.tolov_usul;
+      }
       let mijoz_nomi = null, eskiBalans = null;
       // Mijoz to'lovi bo'lsa — balansni oshiramiz (qarz kamayadi)
       if (kategoriya === 'mijoz_tolov' && mijozId) {
@@ -297,6 +296,10 @@ class KassaController extends BaseController {
       }
       if (!['qol', 'mijoz', 'xarajat'].includes(rec.manba_tur)) {
         throw new HttpException(400, 'Avtomatik yozuvni o\'chirib bo\'lmaydi (sotuv/prixod)');
+      }
+      // 2026-11-27: tasdiqlangan xarajat so'rovining yozuvi o'chirilmaydi (FRONTEND-UCHUN §22.14)
+      if (rec.manba_tur === 'xarajat' && await tasdiqlanganSorovYozuvimi(rec.id, t)) {
+        throw new HttpException(400, TASDIQLI_OCHIRISH_XATO);
       }
       // Mijoz to'lovi bo'lsa — balansni qaytaramiz
       if (rec.kategoriya === 'mijoz_tolov' && rec.mijoz_id) {

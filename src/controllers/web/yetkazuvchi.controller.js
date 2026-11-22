@@ -4,6 +4,7 @@ const HttpException = require('../../utils/HttpException.utils');
 const BaseController = require('../BaseController');
 const { Op } = require('sequelize');
 const sequelize = require('../../db/db-sequelize');
+const { ixtiyoriyKassa } = require('../../utils/agentPul.utils');
 
 class YetkazuvchiController extends BaseController {
 
@@ -92,7 +93,7 @@ class YetkazuvchiController extends BaseController {
     res.send({ message: "O'chirildi" });
   };
 
-  // To'lov qilish: balans oshadi (manfiy qarzni kamaytiradi)
+  // To'lov qilish: balans oshadi (manfiy qarzni kamaytiradi). Body: summa, tolov_turi, izoh?, sana?, kassa_id? (2026-11-27)
   tolov = async (req, res) => {
     this.checkValidation(req);
     const y = await YetkazuvchiModel.findByPk(req.params.id);
@@ -105,6 +106,9 @@ class YetkazuvchiController extends BaseController {
     if (Number.isNaN(sanaQiymat.getTime())) throw new HttpException(400, "Sana noto'g'ri (YYYY-MM-DD)");
     const t = await sequelize.transaction();
     try {
+      // 2026-11-27: ixtiyoriy kassa_id — to'lov shu kassadan (faol; tolov_usul kassa turidan), summa kassa
+      // balansidan oshmasin. Kassa qulfi — tranzaksiyadagi birinchi o'qish. kassa_id siz — avvalgidek (naqt, kassasiz).
+      const kx = await ixtiyoriyKassa(req.body.kassa_id, t, { tur: 'chiqim', summa: Number(summa) });
       await y.increment('balans', { by: Number(summa), transaction: t });
       await YetkazuvchiHarakatlarModel.create({
         yetkazuvchi_id: y.id,
@@ -121,7 +125,8 @@ class YetkazuvchiController extends BaseController {
         tur:        'chiqim',
         kategoriya: 'yetkazuvchi_tolov',
         summa:      Number(summa),
-        tolov_usul: 'naqt',
+        tolov_usul: kx ? kx.tolov_usul : 'naqt',
+        kassa_id:   kx ? kx.kassa.id : null,
         manba_tur:  'yetkazuvchi',
         manba_id:   y.id,
         izoh:       izoh || `${y.ism} ga to'lov`,

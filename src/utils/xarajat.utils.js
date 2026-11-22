@@ -16,4 +16,14 @@ async function xarajatTurlari() {
   return map;
 }
 
-module.exports = { xarajatTurlari };
+/* 2026-11-27 (egasi qarori): TASDIQLANGAN xarajat so'rovining jurnal yozuvini (xarajat_sorov.kassa_yozuv_id)
+   o'chirib bo'lmaydi — DELETE /xarajatlar/:id va DELETE /kassa/:id. Tahrirlash mumkin (limit qoidalari bilan). */
+const TASDIQLI_OCHIRISH_XATO = "Bu xarajat tasdiqlangan so'rov orqali yozilgan — o'chirib bo'lmaydi";
+async function tasdiqlanganSorovYozuvimi(kassaYozuvId, transaction = null) {
+  const [r] = await sequelize.query(
+    "SELECT COUNT(*) AS c FROM xarajat_sorov WHERE kassa_yozuv_id = :id AND holat = 'tasdiqlangan'",
+    { replacements: { id: kassaYozuvId }, type: sequelize.QueryTypes.SELECT, ...(transaction ? { transaction } : {}) });
+  return Number(r && r.c) > 0;
+}
+
+module.exports = { xarajatTurlari, tasdiqlanganSorovYozuvimi, TASDIQLI_OCHIRISH_XATO };

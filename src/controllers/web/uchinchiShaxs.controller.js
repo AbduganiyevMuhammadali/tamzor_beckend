@@ -11,6 +11,7 @@ const sequelize = require('../../db/db-sequelize');
 const KassaModel = require('../../models/kassa.model');
 const { UchinchiShaxsModel, UchinchiShaxsHarakatModel, HARAKAT_TUR } = require('../../models/uchinchiShaxs.model');
 const HttpException = require('../../utils/HttpException.utils');
+const { ixtiyoriyKassa } = require('../../utils/agentPul.utils');
 
 const n = v => Number(v) || 0;
 const yax = v => Math.round(n(v) * 100) / 100;
@@ -79,14 +80,18 @@ async function harakatYoz(shaxs, b, userId, t) {
   const summa = yax(b.summa);
   if (!(summa > 0)) throw new HttpException(400, "Summa noto'g'ri");
   const sana = sanaOl(b.sana);
-  const usul = USUL.includes(b.tolov_usul) ? b.tolov_usul : 'naqt';
+  let usul = USUL.includes(b.tolov_usul) ? b.tolov_usul : 'naqt';
   const muddat = (tur === 'qarz_berdik' || tur === 'qarz_oldik' || tur.startsWith('bosh_')) ? muddatOl(b.muddat) : null;
   if (b.izoh && String(b.izoh).trim().length > 255) throw new HttpException(400, 'Izoh 255 belgidan oshmasin');
   const izoh = b.izoh ? String(b.izoh).trim().slice(0, 255) : null;
   let kassa = null;
   if (T.kassa) {
+    // 2026-11-27: ixtiyoriy b.kassa_id (kassalar) — faol kassa, tolov_usul kassa turiga mos; chiqim (qarz_berdik,
+    // qaytardik) kassa balansidan oshmasin. Qulf — tranzaksiyadagi birinchi o'qish. Yuborilmasa — avvalgidek.
+    const kx = await ixtiyoriyKassa(b.kassa_id, t, { tur: T.kassa, summa, tolovUsul: USUL.includes(b.tolov_usul) ? b.tolov_usul : null });
+    if (kx) usul = kx.tolov_usul;
     kassa = await KassaModel.create({
-      tur: T.kassa, kategoriya: T.kategoriya, summa, tolov_usul: usul,
+      tur: T.kassa, kategoriya: T.kategoriya, summa, tolov_usul: usul, kassa_id: kx ? kx.kassa.id : null,
       manba_tur: 'uchinchi_shaxs', manba_id: null, mijoz_id: null, mijoz_nomi: shaxs.ism,
       izoh: `${T.nom}: ${shaxs.ism}${izoh ? ' — ' + izoh : ''}`.slice(0, 255), sana, user_id: userId || null,
     }, { transaction: t });
@@ -181,7 +186,7 @@ class UchinchiShaxsController {
     res.send({ message: "O'chirildi" });
   };
 
-  /* POST /uchinchi-shaxslar/:id/harakat { tur, summa, tolov_usul, sana, muddat, izoh } */
+  /* POST /uchinchi-shaxslar/:id/harakat { tur, summa, tolov_usul, sana, muddat, izoh, kassa_id? } */
   harakat = async (req, res) => {
     const s = await UchinchiShaxsModel.findByPk(req.params.id);
     if (!s) throw new HttpException(404, 'Shaxs topilmadi');
