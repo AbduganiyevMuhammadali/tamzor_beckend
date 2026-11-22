@@ -6,7 +6,7 @@ const { MijozModel } = require('../../models/mijoz.model');
 const HttpException = require('../../utils/HttpException.utils');
 const BaseController = require('../BaseController');
 const { xarajatTurlari, tasdiqlanganSorovYozuvimi, TASDIQLI_OCHIRISH_XATO } = require('../../utils/xarajat.utils');
-const { ixtiyoriyKassa } = require('../../utils/agentPul.utils');
+const { ixtiyoriyKassa, kassaKirimKamayTekshir } = require('../../utils/agentPul.utils');
 
 // Kategoriya yorliqlari (frontda ko'rsatish uchun)
 const KATEGORIYA = {
@@ -301,6 +301,8 @@ class KassaController extends BaseController {
       if (rec.manba_tur === 'xarajat' && await tasdiqlanganSorovYozuvimi(rec.id, t)) {
         throw new HttpException(400, TASDIQLI_OCHIRISH_XATO);
       }
+      // 2026-11-28 (egasi qarori 25): kassa_id li kirimni o'chirish kassa balansini minusga tushirmasin (kassa qulfi)
+      if (rec.tur === 'kirim' && rec.kassa_id) await kassaKirimKamayTekshir(rec.kassa_id, rec.summa, t);
       // Mijoz to'lovi bo'lsa — balansni qaytaramiz
       if (rec.kategoriya === 'mijoz_tolov' && rec.mijoz_id) {
         await MijozModel.decrement('balans', { by: rec.summa, where: { id: rec.mijoz_id }, transaction: t });

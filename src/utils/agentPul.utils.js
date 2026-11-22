@@ -242,6 +242,18 @@ async function kassaBalansTekshir(kassaId, summa, t, qoshimcha = 0) {
   if (n(summa) > b + n(qoshimcha) + 0.005) throw new HttpException(400, `Kassada yetarli mablag' yo'q (balans ${b})`);
   return b;
 }
+/* KIRIMNI KAMAYTIRISH (2026-11-28, egasi qarori 25): kassa_id li kirim yozuvini o'chirish (yoki kirimni kamaytiruvchi
+   boshqa amal) kassa balansini minusga tushirmasin. Kassa qatori FOR UPDATE (parallel chiqimlar bilan navbat) — xuddi
+   kassaQulfla kabi tranzaksiyadagi birinchi oddiy o'qishdan OLDIN chaqiring. Faol emas kassa ham tekshiriladi;
+   kassa butunlay yo'q bo'lsa (o'chirilgan) — tekshiruv yo'q. summa > balans → 400. */
+async function kassaKirimKamayTekshir(kassaId, summa, t) {
+  if (bosmi(kassaId)) return null;
+  const k = await qulflabOl(KassalarModel, Number(kassaId), t);
+  if (!k) return null;
+  const b = await kassaBalans(k.id, t);
+  if (n(summa) > b + 0.005) throw new HttpException(400, `Kassa balansi manfiy bo'lib qoladi (balans ${b}, o'chiriladigan ${r2(n(summa))})`);
+  return b;
+}
 /* Ixtiyoriy kassa_id li pul harakati (POST /kassa bilan bir xil qoida):
    kassa_id bo'sh → null (eski xatti-harakat, tekshiruv yo'q). Aks holda: faol kassa qulflanadi,
    tolov_usul kassa turiga mos (naqd → naqt; plastik → karta yoki bank), tur 'chiqim' bo'lsa balans tekshiriladi.
@@ -435,7 +447,7 @@ async function topshiruvRad(id, user, sababRaw) {
 
 module.exports = {
   kassaTekshir, chekRasmOl, agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, kassaBalanslari, kassaBalans,
-  kassaUsul, kassaQulfla, kassaBalansTekshir, ixtiyoriyKassa,
+  kassaUsul, kassaQulfla, kassaBalansTekshir, ixtiyoriyKassa, kassaKirimKamayTekshir,
   plastikTasdiqla, plastikRad, plastikTahrir, sotuvPlastikRad,
   topshiruvYarat, topshiruvTasdiqla, topshiruvRad, auditYoz, auditRoyxat, sababOl, userNomi, Op,
 };

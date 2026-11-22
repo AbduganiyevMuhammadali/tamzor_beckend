@@ -11,7 +11,8 @@ const sequelize = require('../../db/db-sequelize');
 const KassaModel = require('../../models/kassa.model');
 const { UchinchiShaxsModel, UchinchiShaxsHarakatModel, HARAKAT_TUR } = require('../../models/uchinchiShaxs.model');
 const HttpException = require('../../utils/HttpException.utils');
-const { ixtiyoriyKassa } = require('../../utils/agentPul.utils');
+const { ixtiyoriyKassa, kassaKirimKamayTekshir } = require('../../utils/agentPul.utils');
+const { qulflabOl } = require('../../utils/qulf.utils');
 
 const n = v => Number(v) || 0;
 const yax = v => Math.round(n(v) * 100) / 100;
@@ -198,10 +199,18 @@ class UchinchiShaxsController {
 
   /* DELETE /uchinchi-shaxslar/harakat/:hid — harakat va uning kassa yozuvi birga o'chadi */
   harakatOchir = async (req, res) => {
-    const h = await UchinchiShaxsHarakatModel.findByPk(req.params.hid);
-    if (!h) throw new HttpException(404, 'Yozuv topilmadi');
+    const hid = Number(req.params.hid);
+    if (!Number.isInteger(hid) || hid <= 0) throw new HttpException(404, 'Yozuv topilmadi');
     await sequelize.transaction(async (t) => {
-      if (h.kassa_id) await KassaModel.destroy({ where: { id: h.kassa_id }, transaction: t });
+      // Qulflar — tranzaksiyadagi birinchi o'qishlar: harakat → kassa yozuvi → kassa (parallel o'chirish/chiqim bilan navbat)
+      const h = await qulflabOl(UchinchiShaxsHarakatModel, hid, t);
+      if (!h) throw new HttpException(404, 'Yozuv topilmadi');
+      if (h.kassa_id) {
+        const rec = await qulflabOl(KassaModel, h.kassa_id, t);
+        // 2026-11-28 (egasi qarori 25): kassa_id li kirim (qaytardi, qarz_oldik) o'chsa kassa balansi minusga tushmasin
+        if (rec && rec.tur === 'kirim' && rec.kassa_id) await kassaKirimKamayTekshir(rec.kassa_id, rec.summa, t);
+        if (rec) await rec.destroy({ transaction: t });
+      }
       await h.destroy({ transaction: t });
     });
     res.send({ message: "O'chirildi" });
