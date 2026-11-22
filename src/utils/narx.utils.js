@@ -8,10 +8,19 @@
  *
  * Toifa ro'yxatida tovar yo'q bo'lsa 2-band ishlaydi. Ro'yxat umuman bo'lmasa ham 3-band
  * ishlaydi, shuning uchun mavjud sotuvlar o'zgarmaydi.
+ *
+ * VILOYAT NARXI (2026-11-25, agentNarxXaritasi): AGENT sotuvida agentning viloyati
+ * (agent.territoriya_id) bo'lsa ustunlik boshqacha:
+ *   1. mijoz toifasining narx ro'yxati (narxi > 0 bo'lsa)
+ *   2. tovar_viloyat_narx: agent viloyatidagi narx, mijoz narx_turi bo'yicha (chakana | optom)
+ *   3. aks holda tovar shu agent tomonidan SOTILMAYDI (standart ro'yxat / eski narxga tushmaydi)
+ * Viloyati yo'q agent va sklad (agentsiz) sotuvi — yuqoridagi eski qoida (narxXaritasi).
  */
 const { NarxRuyxatModel, NarxRuyxatQatorModel } = require('../models/narxRuyxat.model');
 const { MijozModel, MijozKategoriyaModel } = require('../models/mijoz.model');
 const { narxMap } = require('./avtolavka.utils');
+const TovarViloyatNarxModel = require('../models/tovarViloyatNarx.model');
+const TerritoriyaModel = require('../models/territoriya.model');
 
 async function standartRuyxat(tur) {
   return NarxRuyxatModel.findOne({ where: { tur, standart: true, faol: true } });
@@ -81,4 +90,61 @@ async function narxXaritasi({ mijozId = null, tovarIds }) {
   };
 }
 
-module.exports = { standartRuyxat, mijozRuyxati, narxXaritasi };
+/** Viloyat narxlari: { tovar_id: { chakana: number|null, optom: number|null } } (0 → null). */
+async function viloyatNarxlari(territoriyaId, tovarIds = null) {
+  if (!territoriyaId) return {};
+  const where = { territoriya_id: territoriyaId };
+  if (tovarIds) {
+    const ids = [...new Set(tovarIds.map(Number))].filter(Boolean);
+    if (!ids.length) return {};
+    where.tovar_id = ids;
+  }
+  const rows = await TovarViloyatNarxModel.findAll({ where, attributes: ['tovar_id', 'chakana_narx', 'optom_narx'], raw: true });
+  const musbat = (v) => { const x = parseFloat(v); return x > 0 ? x : null; };
+  const out = {};
+  for (const r of rows) out[r.tovar_id] = { chakana: musbat(r.chakana_narx), optom: musbat(r.optom_narx) };
+  return out;
+}
+
+/** Mijoz toifasiga biriktirilgan (faol) narx ro'yxati — standartga tushmaydi. */
+async function toifaRuyxati(mijoz) {
+  if (!mijoz || !mijoz.kategoriya_id) return null;
+  const kat = await MijozKategoriyaModel.findByPk(mijoz.kategoriya_id, { attributes: ['id', 'narx_ruyxat_id'] });
+  if (!kat || !kat.narx_ruyxat_id) return null;
+  return NarxRuyxatModel.findOne({ where: { id: kat.narx_ruyxat_id, faol: true } });
+}
+
+/**
+ * Agent sotuvi uchun narx xaritasi. Agentda viloyat yo'q bo'lsa — narxXaritasi (eski qoida).
+ * @returns {{ ruyxat, narxlar: [{ tovar_id, narx, manba }], viloyat: {id,nomi}|null }}
+ *   manba (viloyat rejimida): 'ruyxat' (toifa ro'yxati) | 'viloyat' | 'yoq' (sotilmaydi)
+ */
+async function agentNarxXaritasi({ agent, mijozId = null, tovarIds }) {
+  if (!agent || !agent.territoriya_id) {
+    const r = await narxXaritasi({ mijozId, tovarIds });
+    return { ...r, viloyat: null };
+  }
+  const ids = [...new Set((tovarIds || []).map(Number))].filter(Boolean);
+  const viloyat = await TerritoriyaModel.findByPk(agent.territoriya_id, { attributes: ['id', 'nomi'], raw: true });
+  const mijoz = mijozId ? await MijozModel.findByPk(mijozId, { attributes: ['id', 'narx_turi', 'kategoriya_id'] }) : null;
+  const tur = mijoz && mijoz.narx_turi === 'optom' ? 'optom' : 'chakana';
+  const toifa = await toifaRuyxati(mijoz);
+  const toifaNarx = {};
+  if (toifa && ids.length) {
+    const q = await NarxRuyxatQatorModel.findAll({ where: { narx_ruyxat_id: toifa.id, tovar_id: ids }, attributes: ['tovar_id', 'narx'], raw: true });
+    q.forEach(x => { if (parseFloat(x.narx) > 0) toifaNarx[x.tovar_id] = parseFloat(x.narx); });
+  }
+  const vil = viloyat ? await viloyatNarxlari(viloyat.id, ids) : {};
+  const narxlar = ids.map(id => {
+    if (toifaNarx[id]) return { tovar_id: id, narx: toifaNarx[id], manba: 'ruyxat' };
+    const v = vil[id] && vil[id][tur];
+    return v ? { tovar_id: id, narx: v, manba: 'viloyat' } : { tovar_id: id, narx: 0, manba: 'yoq' };
+  });
+  return {
+    ruyxat: toifa ? { id: toifa.id, nomi: toifa.nomi, tur: toifa.tur } : null,
+    narxlar,
+    viloyat: viloyat ? { id: viloyat.id, nomi: viloyat.nomi } : null,
+  };
+}
+
+module.exports = { standartRuyxat, mijozRuyxati, narxXaritasi, viloyatNarxlari, agentNarxXaritasi };

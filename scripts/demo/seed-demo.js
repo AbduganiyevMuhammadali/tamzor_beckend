@@ -8,6 +8,7 @@
  * Natija (2026-11 modeli: mobil ilovada faqat agent va super agent):
  *   - REVIEW_LOGIN — super agent: o'z ombori, mijozlari, savdolari + 2 ta biriktirilgan agentni kuzatadi;
  *   - viloyat "Farg'ona viloyati", naqd kassa va shu viloyatga bog'langan plastik kassa;
+ *   - shu viloyatda barcha tovarlarga chakana (= sotuv narxi) va optom (≈ 95%) viloyat narxi;
  *   - namunaviy savdolar: naqd, qarz (vozvrat va qarz to'lovi uchun), tasdiq kutayotgan plastik (chek bilan).
  */
 // Sanalar Toshkent kuni bo'yicha (server UTC'da, cron 03:00 Toshkent = 22:00 UTC)
@@ -65,6 +66,11 @@ async function chekYukla() {
   const vil = await w('POST', '/mijozlar/territoriya', { nomi: "Farg'ona viloyati" });
   await w('POST', '/kassalar', { nomi: 'Asosiy naqd kassa', tur: 'naqd', viloyatlar: [] });
   const plastik = await w('POST', '/kassalar', { nomi: "Uzcard Farg'ona", tur: 'plastik', viloyatlar: [vil.id] });
+  // Viloyat narxlari (2026-11-25): viloyati bor agent faqat viloyat narxi bilan sotadi — hamma tovarga
+  // chakana = sotuv narxi, optom ≈ 95% (kirimdagi optom_narx bilan bir xil)
+  await w('PUT', `/tovar/viloyat-narxlari/${vil.id}`, {
+    narxlar: tovarlar.map(t => ({ tovar_id: t.id, chakana_narx: t.sotuv, optom_narx: Math.round(t.sotuv * 0.95) })),
+  });
 
   // Super agent (tekshiruv logini) + unga biriktirilgan 2 agent
   const kunlar = ['Du', 'Se', 'Ch', 'Pa', 'Ju', 'Sh', 'Ya'];

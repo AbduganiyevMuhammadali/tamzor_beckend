@@ -32,6 +32,8 @@ const asos = Joi.object({
   // Super agent bayrog'i va biriktirish (agent.controller superAgentTekshir — qoidalar)
   super_agent:       Joi.boolean().optional(),
   super_agent_id:    Joi.number().integer().positive().allow(null).optional(),
+  // Mobil ilovada narxni o'zgartirish ruxsati (login → editPrice)
+  narx_ozgartirish:  Joi.boolean().optional(),
   // Mobil ilova kirishi (login bo'sh — agent ilovaga kirmaydi; parol bo'sh — o'zgarmaydi)
   login:             Joi.string().trim().max(50).allow('', null).optional(),
   parol:             Joi.string().min(4).max(100).allow('', null).optional()

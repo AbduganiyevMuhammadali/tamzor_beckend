@@ -507,6 +507,8 @@ class MijozController {
     // Plastik kassalarning shu viloyatga biriktirilishi ham olib tashlanadi (kassalar.controller)
     await sequelize.transaction(async (tr) => {
       await require('../../models/kassalar.model').KassaViloyatModel.destroy({ where: { territoriya_id: t.id }, transaction: tr });
+      // Viloyat narxlari ham (FK CASCADE bor, lekin aniq o'chiriladi)
+      await require('../../models/tovarViloyatNarx.model').destroy({ where: { territoriya_id: t.id }, transaction: tr });
       await t.destroy({ transaction: tr });
     });
     res.send({ message: 'O\'chirildi' });

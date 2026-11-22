@@ -176,6 +176,13 @@ AgentModel.init({
     type: DataTypes.INTEGER,
     allowNull: true,
   },
+  // 2026-11-25: mobil ilovada sotuvda narxni o'zgartirish ruxsati (login javobida editPrice).
+  // Faqat web panelda belgilanadi; super agentning o'z bayrog'i o'z savdosiga amal qiladi.
+  narx_ozgartirish: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false,
+  },
 }, {
   sequelize,
   modelName: 'AgentModel',

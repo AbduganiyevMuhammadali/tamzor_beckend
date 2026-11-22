@@ -269,6 +269,18 @@ Batafsil — `FRONTEND-UCHUN.md` §19, validatsiya — `API-VALIDATSIYA.md` §3.
 
 ---
 
+## 5h. Viloyat narxlari (2026-11-25)
+
+Batafsil — `FRONTEND-UCHUN.md` §20, validatsiya — `API-VALIDATSIYA.md` §3.24. Migratsiya `20261125000001-tovar-viloyat-narx.js`.
+
+- **Jadval** `tovar_viloyat_narx` (tovar × viloyat: `chakana_narx`, `optom_narx`, `user_id`, `user_nomi`), UNIQUE, FK CASCADE. `agent.narx_ozgartirish` (standart 0) → mobil `editPrice` (avval har agentga `true`).
+- **Ustunlik** (`utils/narx.utils.js` `agentNarxXaritasi`): agentning viloyati bo'lsa toifa ro'yxati → agent viloyati narxi (`narx_turi`) → sotilmaydi. Viloyatsiz agent va sklad — eski `narxXaritasi` (toifa → standart → eski), o'zgarmagan.
+- **Web xodim nomidan sotuv:** server narxi ustun, so'rovdagi `narx` e'tiborsiz; narx yo'q → 400. `sotuv/tayyor` — `viloyat`, `viloyat_qoida`, `sotiladi`.
+- **Mobil:** `avtolavkaSinxron`/`agentSinxron` `narx.viloyat`, `viloyatId`, `viloyatQoida`; `mijozNarxlari` agent viloyati bilan. `saveSell` — oflayn narx qabul qilinadi (o'zgarmagan, qayta hisoblanmaydi).
+- **Demo:** `scripts/demo/seed-demo.js` — demo viloyatida hamma tovarga chakana = sotuv narxi, optom ≈ 95%.
+- **Diqqat (joriy bazalar):** migratsiyadan keyin viloyati bor agentlar narx kiritilmaguncha web'da xodim nomidan sota olmaydi, ilova (yangi versiya) ham sotmaydi — ishga tushirishdan oldin viloyat narxlarini kiritish kerak. `editPrice` hamma agentda `false` bo'lib qoladi — kerakli agentlarga `narx_ozgartirish` qo'yilsin.
+- **Sinov (lokal):** yangi `test-narx`; `test-javoblar` viloyat narxlari bilan to'ldirildi (aks holda web plastik sotuv 400).
+
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |
 |---|---|

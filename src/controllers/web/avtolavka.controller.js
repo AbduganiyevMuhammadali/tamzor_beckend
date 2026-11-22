@@ -26,7 +26,7 @@ const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { SOTUV_RADIUS_M } = require('../../utils/geo.utils');
 const { davr } = require('../../utils/tahlil.utils');
 const { MijozModel } = require('../../models/mijoz.model');
-const { narxXaritasi } = require('../../utils/narx.utils');
+const { narxXaritasi, agentNarxXaritasi } = require('../../utils/narx.utils');
 const { kreditTekshir } = require('../../utils/kreditLimit.utils');
 const { createAriza } = require('../mobile/savdo.controller');
 const { agentPlastikKassalar } = require('../../utils/agentPul.utils');
@@ -616,7 +616,10 @@ class AvtolavkaController {
     if (mijozId && !mijoz) throw new HttpException(404, 'Mijoz topilmadi');
     const ids = Object.keys(map).filter(id => map[id].qoldiq > EPS).map(Number);
     const [narx, tovarlar] = await Promise.all([
-      narxXaritasi({ mijozId: mijoz ? mijoz.id : null, tovarIds: ids }),
+      // Agent nomidan: agent viloyati bo'lsa toifa ro'yxati → viloyat narxi → sotilmaydi (narx 0, manba 'yoq');
+      // viloyati yo'q agent va sklad — eski qoida (narx.utils)
+      sklad ? narxXaritasi({ mijozId: mijoz ? mijoz.id : null, tovarIds: ids })
+        : agentNarxXaritasi({ agent, mijozId: mijoz ? mijoz.id : null, tovarIds: ids }),
       ids.length ? TovarModel.findAll({ where: { id: ids }, attributes: ['id', 'olchov_birligi', 'blokdagi_soni', 'shtrix_kod'], raw: true }) : [],
     ]);
     const narxBy = new Map(narx.narxlar.map(x => [x.tovar_id, x]));
@@ -645,6 +648,10 @@ class AvtolavkaController {
       ombor, sana, bugun: kunKey(new Date()),
       kun: kun ? { holat: kun.holat, kun_yopish: kun.kun_yopish, sotildi: kun.tovar.sotildi, naqd: kun.pul.naqd_olindi, topshirish: kun.topshirish } : null,
       narx_ruyxat: narx.ruyxat,
+      // 2026-11-25: viloyat narxi qoidasi — true bo'lsa narx serverda aniqlanadi (forma narxni tahrirlamaydi),
+      // narx_manba 'yoq' tovar sotilmaydi
+      viloyat: narx.viloyat || null,
+      viloyat_qoida: !!narx.viloyat,
       // Agent viloyatidagi faol plastik kassalar [{ id, nomi }] — tolov_usuli 'plastik' uchun (sklad: [])
       plastik_kassalar: plastikKassalar.map(k => ({ id: k.id, nomi: k.nomi })),
       mijoz: mijozJson,
@@ -652,7 +659,7 @@ class AvtolavkaController {
         const t = tovarBy.get(id) || {}, x = narxBy.get(id) || { narx: 0, manba: 'yoq' };
         return {
           tovar_id: id, tovar_nomi: map[id].tovar_nomi, turkum: map[id].turkum,
-          qoldiq: +map[id].qoldiq.toFixed(3), narx: x.narx, narx_manba: x.manba,
+          qoldiq: +map[id].qoldiq.toFixed(3), narx: x.narx, narx_manba: x.manba, sotiladi: x.narx > 0,
           olchov: t.olchov_birligi || 'kg', blokdagi_soni: n(t.blokdagi_soni) || null, shtrix_kod: t.shtrix_kod || null,
         };
       }).sort((a, b) => a.tovar_nomi.localeCompare(b.tovar_nomi)),
@@ -722,12 +729,17 @@ class AvtolavkaController {
     // Bugungi sotuv — hozirgi vaqt; o'tgan kun — o'sha kunning tushi (kun hisobi o'sha kunga tushadi)
     const vaqt = sana === bugunKun ? new Date() : new Date(`${sana}T12:00:00`);
 
+    /* VILOYAT NARXI (2026-11-25): agentning viloyati bo'lsa narx SERVERDA aniqlanadi —
+       mijoz toifasi ro'yxati → agent viloyati narxi (mijoz narx_turi) → narx yo'q bo'lsa 400.
+       So'rovdagi `narx` bu holda e'tiborsiz. Viloyati yo'q agent va sklad — eski qoida (narx so'rovdan). */
+    const viloyatQoida = !!(agent && agent.territoriya_id);
+
     // Qatorlar: bir tovar ikki marta kelsa qo'shiladi
     const birlash = new Map();
     for (const q of Array.isArray(b.qatorlar) ? b.qatorlar : []) {
-      const id = parseInt(q.tovar_id, 10), dona = +n(q.dona).toFixed(3), narx = +n(q.narx).toFixed(2);
+      const id = parseInt(q.tovar_id, 10), dona = +n(q.dona).toFixed(3), narx = viloyatQoida ? 0 : +n(q.narx).toFixed(2);
       if (!id || dona <= 0) continue;
-      if (narx <= 0) throw new HttpException(400, 'Har bir tovarga narx kiriting');
+      if (!viloyatQoida && narx <= 0) throw new HttpException(400, 'Har bir tovarga narx kiriting');
       const old = birlash.get(id);
       if (old && old.narx !== narx) throw new HttpException(400, 'Bir tovar ikki xil narxda — bitta qatorga jamlang');
       birlash.set(id, { tovar_id: id, dona: +((old ? old.dona : 0) + dona).toFixed(3), narx });
@@ -735,10 +747,21 @@ class AvtolavkaController {
     if (!birlash.size) throw new HttpException(400, "Kamida bitta tovar qo'shing");
     const tovarlar = await TovarModel.findAll({ where: { id: [...birlash.keys()] }, attributes: ['id', 'nomi', 'turi'], raw: true });
     const nomBy = new Map(tovarlar.map(t => [t.id, t]));
+    const serverNarx = viloyatQoida
+      ? await agentNarxXaritasi({ agent, mijozId: mijoz.id, tovarIds: [...birlash.keys()] })
+      : null;
+    const serverBy = serverNarx ? new Map(serverNarx.narxlar.map(x => [x.tovar_id, x])) : null;
     const qatorlar = [...birlash.values()].map(q => {
       const t = nomBy.get(q.tovar_id);
       if (!t) throw new HttpException(400, `Tovar #${q.tovar_id} topilmadi`);
       if (t.turi === 'xom_ashyo') throw new HttpException(400, `"${t.nomi}" — xom ashyo, sotilmaydi`);
+      if (serverBy) {
+        const x = serverBy.get(q.tovar_id);
+        if (!x || !(x.narx > 0)) {
+          throw new HttpException(400, `"${t.nomi}" uchun ${serverNarx.viloyat ? serverNarx.viloyat.nomi : ''} viloyatida narx belgilanmagan`);
+        }
+        q.narx = +n(x.narx).toFixed(2);
+      }
       return { ...q, nomi: t.nomi, summa: Math.round(q.dona * q.narx) };
     });
     const itog = qatorlar.reduce((s, q) => s + q.summa, 0);

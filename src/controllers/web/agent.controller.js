@@ -21,6 +21,7 @@ const TAHRIR_MAYDONLAR = [
   'fullname', 'telefon', 'passport', 'tugilgan_sana', 'territoriya_id', 'plan_summa', 'bonus_foiz',
   'kredit_limit', 'max_chegirma', 'ish_boshlagan', 'tashrif_kunlari', 'boshlanish_manzil', 'transport',
   'mashina_raqam', 'radius_km', 'izoh', 'faol', 'login', 'parol', 'super_agent', 'super_agent_id',
+  'narx_ozgartirish',
 ];
 // 'avtolavka' endi so'rovdan yozilmaydi: 2026-11-21 dan HAMMA agent o'z omboridan sotadi (model standarti true)
 
@@ -65,6 +66,7 @@ const shakl = (a) => {
   j.super_agent = !!j.super_agent;
   j.super_agent_id = j.super_agent_id ?? null;
   j.super_agent_nomi = j.superAgent ? j.superAgent.fullname : null;
+  j.narx_ozgartirish = !!j.narx_ozgartirish;
   j.territoriya = j.territoriya || null;
   return j;
 };

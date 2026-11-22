@@ -56,7 +56,8 @@ async function buildUserData(user, token, rol = 'agent') {
     tipPechat: '2',
     oneSell: false,
     returnView: !isAgent,
-    editPrice: isAgent,
+    // 2026-11-25: web panelda agent kartasidagi "Narxni o'zgartirish" bayrog'i (standart — yo'q)
+    editPrice: isAgent && !!user.narx_ozgartirish,
     // Yangi Flutter ilova uchun: asosiy rol va ochiq rollar ro'yxati
     // 2026-11-21: faqat 2 rol — 'agent' va 'super_agent' (rollar = ['agent'] + 'super_agent')
     asosiyRol: asosiyRol(user, rol),

@@ -17,7 +17,7 @@ const { reytingKorinish, qoidalar: reytingQoidalari } = require('../../utils/rey
 const sequelize = require('../../db/db-sequelize');
 const { AvtolavkaHujjatModel, AvtolavkaQatorModel, AvtolavkaKunModel } = require('../../models/avtolavka.model');
 const TovarModel = require('../../models/tovar.model');
-const { narxXaritasi } = require('../../utils/narx.utils');
+const { narxXaritasi, agentNarxXaritasi, viloyatNarxlari } = require('../../utils/narx.utils');
 const { MijozModel, MijozKategoriyaModel } = require('../../models/mijoz.model');
 const { MarshrutRejaModel, TashrifModel } = require('../../models/marshrut.model');
 const { NarxRuyxatModel, NarxRuyxatQatorModel } = require('../../models/narxRuyxat.model');
@@ -240,8 +240,10 @@ async function bugungiYuklashlar(agent, sana) {
 }
 
 /* Oflayn sotuv uchun narx ma'lumoti: ilova mijoz narxini o'zi hisoblaydi
-   (toifa ro'yxati → mijoz turidagi standart → eski narx — narx.utils bilan bir xil). */
-async function narxSinxron(mijozlar, tovarIds) {
+   (toifa ro'yxati → mijoz turidagi standart → eski narx — narx.utils bilan bir xil).
+   2026-11-25: agentning viloyati bo'lsa viloyatQoida = true — ilova toifa ro'yxati → viloyat
+   narxi (mijoz narxTuri) → SOTILMAYDI qoidasini ishlatadi; viloyat: { tovarId: { chakana, optom } }. */
+async function narxSinxron(mijozlar, tovarIds, agent = null) {
   const katIds = [...new Set(mijozlar.map(m => m.kategoriya_id).filter(Boolean))];
   const katlar = katIds.length ? await MijozKategoriyaModel.findAll({ where: { id: katIds }, attributes: ['id', 'narx_ruyxat_id'], raw: true }) : [];
   const katRuyxat = {}; katlar.forEach(k => { if (k.narx_ruyxat_id) katRuyxat[k.id] = k.narx_ruyxat_id; });
@@ -255,6 +257,8 @@ async function narxSinxron(mijozlar, tovarIds) {
     ? await NarxRuyxatQatorModel.findAll({ where: { narx_ruyxat_id: ids, tovar_id: tovarIds }, attributes: ['narx_ruyxat_id', 'tovar_id', 'narx'], raw: true })
     : [];
   const eski = await narxMap(tovarIds);
+  const viloyatId = agent && agent.territoriya_id ? Number(agent.territoriya_id) : null;
+  const vil = viloyatId ? await viloyatNarxlari(viloyatId, tovarIds) : {};
   const standart = { chakana: null, optom: null };
   ruyxatlar.forEach(r => { if (r.standart && (r.tur === 'chakana' || r.tur === 'optom')) standart[r.tur] = r.id; });
   return {
@@ -267,6 +271,9 @@ async function narxSinxron(mijozlar, tovarIds) {
         return { id: r.id, nomi: r.nomi, tur: r.tur, narxlar };
       }),
       eski: Object.fromEntries(tovarIds.map(id => [id, { chakana: n(eski[id]?.chakana_narx), optom: n(eski[id]?.optom_narx) }])),
+      viloyat: vil,
+      viloyatId: viloyatId || null,
+      viloyatQoida: !!viloyatId,
     },
   };
 }
@@ -687,7 +694,10 @@ class MobileAvtolavkaController {
     const klientId = Number(req.query.klientId);
     if (!klientId) return fail(res, 'klientId kerak');
     const tovarlar = await TovarModel.findAll({ attributes: ['id'], where: { faol: true, turi: 'tovar' }, raw: true });
-    const r = await narxXaritasi({ mijozId: klientId, tovarIds: tovarlar.map(t => t.id) });
+    // 2026-11-25: agent viloyati bo'lsa toifa ro'yxati → viloyat narxi → 'yoq' (sotilmaydi)
+    const r = req.currentRole === 'agent'
+      ? await agentNarxXaritasi({ agent: req.currentAgent, mijozId: klientId, tovarIds: tovarlar.map(t => t.id) })
+      : await narxXaritasi({ mijozId: klientId, tovarIds: tovarlar.map(t => t.id) });
     ok(res, {
       ruyxat: r.ruyxat,
       narxlar: r.narxlar.map(x => ({ tovarId: String(x.tovar_id), narx: x.narx, manba: x.manba })),
@@ -718,7 +728,7 @@ class MobileAvtolavkaController {
     ]);
 
     const tovarIds = mashina.qatorlar.map(q => Number(q.tovarId));
-    const narx = await narxSinxron(mijozlar, tovarIds);
+    const narx = await narxSinxron(mijozlar, tovarIds, agent);
     const ruyxatIds = new Set(narx.javob.ruyxatlar.map(r => r.id));
     const agentNomi = new Map((await AgentModel.findAll({ attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]));
 
@@ -1009,7 +1019,7 @@ class MobileAvtolavkaController {
     const bor = new Set(mijozRows.map(m => m.id));
     const qoshimcha = rejalar.map(r => r.mijoz_id).filter(id => id && !bor.has(id));
     const mijozlar = qoshimcha.length ? mijozRows.concat(await MijozModel.findAll({ where: { id: qoshimcha }, raw: true })) : mijozRows;
-    const narx = await narxSinxron(mijozlar, sklad.qatorlar.map(q => Number(q.tovarId)));
+    const narx = await narxSinxron(mijozlar, sklad.qatorlar.map(q => Number(q.tovarId)), agent);
     const ruyxatIds = new Set(narx.javob.ruyxatlar.map(r => r.id));
     const agentNomi = new Map((await AgentModel.findAll({ attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]));
 
