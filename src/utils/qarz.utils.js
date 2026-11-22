@@ -35,7 +35,7 @@ async function qarzQismlari(mijozlar, { transaction } = {}) {
     SELECT id, raqam, mijoz_id, COALESCE(yetkazilgan_sana, createdAt) AS sana,
            jami_summa, tolangan_summa, tolov_turi, tolov_sana
     FROM ariza
-    WHERE turi = 'sotish' AND holat = 'yetkazildi' AND deletedAt IS NULL AND mijoz_id IN (:ids)
+    WHERE turi IN ('sotish', 'diller_sotuv') AND holat = 'yetkazildi' AND deletedAt IS NULL AND mijoz_id IN (:ids)
     ORDER BY sana DESC, id DESC`,
   { replacements: { ids: qarzdor.map(m => m.id) }, type: sequelize.QueryTypes.SELECT, transaction });
 

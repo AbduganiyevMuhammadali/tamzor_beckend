@@ -59,7 +59,30 @@ function agentNomi(ombor) {
   return s.startsWith(AGENT_PREFIKS) ? s.slice(AGENT_PREFIKS.length) : null;
 }
 
+/* 2026-11-29: DILLER ombori — dillerning O'Z tovari (kompaniya zaxirasi emas, tovar_register defaultScope chiqaradi) */
+const DILLER_PREFIKS = 'Diller: ';
+function dillerOmbori(nomi) {
+  const nom = String(nomi || '').trim() || "noma'lum";
+  return (DILLER_PREFIKS + nom).slice(0, 80);
+}
+function dillerBrakOmbori(nomi) {
+  const nom = String(nomi || '').trim() || "noma'lum";
+  return (DILLER_PREFIKS + nom).slice(0, 80 - BRAK_SUFFIKS.length) + BRAK_SUFFIKS;
+}
+function dillerOmboriMi(ombor) {
+  return String(ombor || '').startsWith(DILLER_PREFIKS);
+}
+/** Agent yoki diller: sotiladigan ombori */
+function sotuvOmbori(agent) {
+  return agent && agent.diller ? dillerOmbori(agent.fullname) : agentOmbori(agent && agent.fullname);
+}
+/** Agent yoki diller: brak ombori (qaytgan yaroqsiz tovar) */
+function brakOmbori(agent) {
+  return agent && agent.diller ? dillerBrakOmbori(agent.fullname) : agentBrakOmbori(agent && agent.fullname);
+}
+
 module.exports = {
+  DILLER_PREFIKS, dillerOmbori, dillerBrakOmbori, dillerOmboriMi, sotuvOmbori, brakOmbori,
   ASOSIY_OMBOR, XOM_ASHYO_OMBOR, AGENT_PREFIKS, BRAK_SUFFIKS, turOmbori, omborNomi, agentOmbori, agentBrakOmbori,
   brakOmboriMi, agentOmboriMi, agentNomi,
 };

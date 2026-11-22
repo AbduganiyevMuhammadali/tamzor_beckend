@@ -3,12 +3,12 @@ const sequelize = require('../../db/db-sequelize');
 const TovarModel = require('../../models/tovar.model');
 const HttpException = require('../../utils/HttpException.utils');
 const { ok, PAGE_SIZE, PRICE_TYPES } = require('./shared');
-const { agentOmbori } = require('../../utils/ombor.utils');
+const { sotuvOmbori } = require('../../utils/ombor.utils');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 
 // Avtolavka agenti faqat mashinasidagi tovarni sotadi — qoldiq uning omboridan
 const agentOmborNomi = (req) =>
-  (req.currentRole === 'agent' && req.currentAgent?.avtolavka) ? agentOmbori(req.currentAgent.fullname) : null;
+  (req.currentRole === 'agent' && req.currentAgent?.avtolavka) ? sotuvOmbori(req.currentAgent) : null;
 
 // Berilgan tovar id'lari uchun ombor qoldig'i + optom/chakana narx.
 // Web savdo bilan bir xil manba: tovar_register (kirim−chiqim qoldiq,
@@ -20,7 +20,7 @@ async function qoldiqMapFor(ids, ombor = null) {
   // Qoldiq = donada yig'indisi (kirim musbat, chiqim manfiy yozilgan)
   const [rows] = await sequelize.query(`
     SELECT tovar_id,
-      COALESCE(SUM(CASE WHEN ${ombor ? 'ombor = ?' : '1=1'} THEN donada ELSE 0 END), 0) AS qoldiq,
+      COALESCE(SUM(CASE WHEN ${ombor ? 'ombor = ?' : "(ombor IS NULL OR ombor NOT LIKE 'Diller: %')"} THEN donada ELSE 0 END), 0) AS qoldiq,
       (SELECT r2.optom_narx FROM tovar_register r2
          WHERE r2.tovar_id = tr.tovar_id AND r2.optom_narx > 0
          ORDER BY r2.sana DESC, r2.id DESC LIMIT 1) AS optomNarx,

@@ -62,6 +62,8 @@ async function yetkazilganSotuvniBekorQil(ariza, { sabab, user, transaction = nu
   adminTekshir(user);
   if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
   if (ariza.turi !== 'sotish') throw new HttpException(400, 'Faqat sotuv hujjati bekor qilinadi');
+  // 2026-11-29: dillerga berish — diller hujjati (DL-…) bilan bog'liq, bekor qilinmaydi (tuzatish — dillerdan qaytarish)
+  if (ariza.kanal === 'diller') throw new HttpException(400, "Dillerga berish hujjati bekor qilinmaydi — tuzatish uchun Dillerlar → Qaytarish ishlating");
   if (ariza.holat !== 'yetkazildi') throw new HttpException(400, `Hujjat "${ariza.holat}" holatida — bu amal faqat yetkazilgan sotuv uchun`);
   const sababMatn = String(sabab || '').trim();
   if (sababMatn.length < 3) throw new HttpException(400, 'Bekor qilish sababini yozing (kamida 3 ta belgi)');
@@ -76,6 +78,8 @@ async function yetkazilganSotuvniBekorQil(ariza, { sabab, user, transaction = nu
     ariza = await qulflabOl(ArizaModel, tashqi.id, t);
     if (!ariza) throw new HttpException(404, 'Ariza topilmadi');
     if (ariza.turi !== 'sotish') throw new HttpException(400, 'Faqat sotuv hujjati bekor qilinadi');
+  // 2026-11-29: dillerga berish — diller hujjati (DL-…) bilan bog'liq, bekor qilinmaydi (tuzatish — dillerdan qaytarish)
+  if (ariza.kanal === 'diller') throw new HttpException(400, "Dillerga berish hujjati bekor qilinmaydi — tuzatish uchun Dillerlar → Qaytarish ishlating");
     if (ariza.holat !== 'yetkazildi') throw new HttpException(400, `Hujjat "${ariza.holat}" holatida — bu amal faqat yetkazilgan sotuv uchun`);
     // Sotuvga bog'langan qaytarish (mobil savdoQaytarish) bo'lsa — bekor qilish tovar va pulni ikki marta
     // qaytarib yuboradi (qaytarma kirimi va naqd chiqimi alohida yozilgan). Rad etiladi.

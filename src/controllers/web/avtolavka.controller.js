@@ -45,7 +45,7 @@ class AvtolavkaController {
   // GET /avtolavka/agentlar — avtolavka rejimidagi agentlar + mashinadagi qoldiq
   agentlar = async (req, res) => {
     const agentlar = await AgentModel.findAll({
-      where: { faol: true, avtolavka: true },
+      where: { faol: true, avtolavka: true, diller: false },
       attributes: ['id', 'fullname', 'telefon', 'mashina_raqam', 'transport'],
       order: [['fullname', 'ASC']],
     });
@@ -383,7 +383,7 @@ class AvtolavkaController {
   doska = async (req, res) => {
     const sana = sanaMi(req.query.sana) ? req.query.sana : bugun();
     const agentlar = await AgentModel.findAll({
-      where: { faol: true, avtolavka: true },
+      where: { faol: true, avtolavka: true, diller: false },
       attributes: ['id', 'fullname', 'telefon', 'mashina_raqam'], order: [['fullname', 'ASC']],
     });
     const mashinalar = await Promise.all(agentlar.map(async a => {
@@ -428,7 +428,7 @@ class AvtolavkaController {
     const to = bugun();
     const from = new Date(Date.parse(to) - (kunSoni - 1) * 864e5).toISOString().slice(0, 10);
     const agentlar = await AgentModel.findAll({
-      where: { faol: true, avtolavka: true }, attributes: ['id', 'fullname'], order: [['fullname', 'ASC']], raw: true,
+      where: { faol: true, avtolavka: true, diller: false }, attributes: ['id', 'fullname'], order: [['fullname', 'ASC']], raw: true,
     });
     const ids = agentlar.map(a => a.id);
     const kunlar = [];

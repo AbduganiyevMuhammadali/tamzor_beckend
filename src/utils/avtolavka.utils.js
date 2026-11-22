@@ -51,6 +51,8 @@ async function avtolavkaAgent(agent_id) {
   const agent = await AgentModel.findByPk(agent_id);
   if (!agent) throw new HttpException(404, 'Agent topilmadi');
   if (!agent.avtolavka) throw new HttpException(400, `${agent.fullname} Won Sell rejimida emas (agent kartasida belgilang)`);
+  // 2026-11-29: diller — Won Sell (yuklash/qabul/xodim nomidan sotuv) emas, Dillerlar bo'limi orqali
+  if (agent.diller) throw new HttpException(400, `${agent.fullname} — diller: tovar Dillerlar → Berish / Qaytarish orqali beriladi`);
   return agent;
 }
 
@@ -80,7 +82,8 @@ async function narxMap(ids) {
     qulfla=true — qulflovchi o'qish (LOCK IN SHARE MODE): tranzaksiya snapshotidan emas, oxirgi
     commit qilingan holatdan o'qiydi va shu ombor yozuvlarini commitgacha ushlab turadi. */
 async function omborQoldiq(ombor, transaction, { qulfla = false } = {}) {
-  const rows = await TovarRegisterModel.findAll({
+  // unscoped: aniq bitta ombor so'raladi (diller ombori ham bo'lishi mumkin — defaultScope uni yashiradi)
+  const rows = await TovarRegisterModel.unscoped().findAll({
     where: { ombor },
     attributes: ['tovar_id', [fn('SUM', col('donada')), 'q'],
                  [fn('MAX', col('tovar_nomi')), 'tovar_nomi'], [fn('MAX', col('turkum')), 'turkum']],

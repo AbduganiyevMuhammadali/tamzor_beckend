@@ -50,7 +50,8 @@ ArizaModel.init({
     allowNull: false,
   },
   turi: {
-    type: DataTypes.ENUM('sotish','qaytarish','almashtirish'),
+    // diller_sotuv (2026-11-29) — dillerning O'Z mijoziga sotuvi: kompaniya sotuvi emas (hisobotlar turi='sotish' ni oladi)
+    type: DataTypes.ENUM('sotish','qaytarish','almashtirish','diller_sotuv'),
     defaultValue: 'sotish',
     allowNull: false,
   },
@@ -63,7 +64,8 @@ ArizaModel.init({
   // agent mashinasidan, darhol yetkazildi), sklad (Won Sell — admin asosiy skladdan xodimsiz sotadi).
   // Ro'yxatlar shu ustun bilan ajratiladi (ariza.controller kanalSharti); ombor nomiga qaralmaydi.
   kanal: {
-    type: DataTypes.ENUM('distributsiya','avtolavka','sklad'),
+    // diller (2026-11-29): kompaniyadan dillerga berish (turi='sotish', mijoz_id NULL) va diller sotuvi (turi='diller_sotuv')
+    type: DataTypes.ENUM('distributsiya','avtolavka','sklad','diller'),
     defaultValue: 'distributsiya',
     allowNull: false,
   },

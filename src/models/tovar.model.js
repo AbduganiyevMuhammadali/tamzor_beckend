@@ -24,6 +24,9 @@ TovarModel.init({
   faol:               { type: DataTypes.BOOLEAN,       allowNull: false, defaultValue: true },
   // 'xom_ashyo' — sotilmaydi, "Xom ashyo ombori"da turadi va ishlab chiqarishga beriladi (utils/ombor.utils.js turOmbori)
   turi:               { type: DataTypes.ENUM('tovar', 'xom_ashyo'), allowNull: false, defaultValue: 'tovar' },
+  // 2026-11-29: dillerga sotish narxi (dillerlar/:id/berish standart narxi); null — belgilanmagan
+  diller_narx:        { type: DataTypes.DECIMAL(18, 2), allowNull: true,
+                        get() { const v = this.getDataValue('diller_narx'); return v === null || v === undefined ? null : parseFloat(v); } },
 }, {
   sequelize,
   modelName: 'TovarModel',

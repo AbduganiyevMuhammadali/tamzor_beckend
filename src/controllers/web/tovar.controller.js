@@ -75,6 +75,13 @@ async function tovarlarniOchir(ids, transaction) {
   return soni;
 }
 
+/* 2026-11-29: diller narxi — son (2 xona), null / '' / 0 → null (belgilanmagan) */
+function dillerNarx(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === '' || Number(v) === 0) return null;
+  return Math.round(Number(v) * 100) / 100;
+}
+
 class TovarController extends BaseController {
 
   getAll = async (req, res) => {
@@ -146,6 +153,7 @@ class TovarController extends BaseController {
         tavsif:             body.tavsif             || null,
         faol:               body.faol !== undefined ? body.faol : true,
         turi:               body.turi === 'xom_ashyo' ? 'xom_ashyo' : 'tovar',
+        diller_narx:        dillerNarx(body.diller_narx) ?? null,
       }, { transaction: t });
     });
 
@@ -184,6 +192,7 @@ class TovarController extends BaseController {
     tovar.guruh              = body.guruh              ?? tovar.guruh;
     tovar.tavsif             = body.tavsif             ?? tovar.tavsif;
     if (body.faol !== undefined) tovar.faol = body.faol;
+    if (body.diller_narx !== undefined) tovar.diller_narx = dillerNarx(body.diller_narx);
 
     // Turi o'zgarsa (savdo tovari ↔ xom ashyo) — qoldig'i yangi turi omboriga ko'chadi
     const eskiTuri = tovar.turi;

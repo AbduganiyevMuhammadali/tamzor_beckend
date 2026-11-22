@@ -278,6 +278,8 @@ class MobileKlientController {
   // saqlaydi. `rol` ustuni yozib qo'yiladi, aks holda agent va dostavchi
   // bir xil ID'ga ega bo'lganda GPS izlari bir-biriga aralashib qolardi.
   sendLocation = async (req, res, next) => {
+    // 2026-11-29: diller GPS kuzatuvisiz ishlaydi — nuqtalar qabul qilinadi, lekin saqlanmaydi
+    if (req.currentRole === 'agent' && req.currentAgent && req.currentAgent.diller) return ok(res, null);
     const points = Array.isArray(req.body.location) ? req.body.location : [];
     // Bitta so'rovda ko'pi bilan 2000 nuqta (oflayn to'plangan iz) — ortig'i rad etiladi
     if (points.length > MAX_GPS_NUQTA) throw new HttpException(400, `Bitta so'rovda ${MAX_GPS_NUQTA} tadan ortiq nuqta yuborib bo'lmaydi`);

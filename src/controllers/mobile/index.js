@@ -128,6 +128,7 @@ module.exports = {
   agentlarim: avtolavka.agentlarim,
   savdoQaytarish: avtolavka.savdoQaytarish,
   pulTopshirish: avtolavka.pulTopshirish,
+  dillerNarxlari: avtolavka.dillerNarxlari,
   agentSinxron: avtolavka.agentSinxron,
   buyumHarakat: buyum.buyumHarakat,   // 2026-11-28: buyumlar (mijozga / mijozdan)
   yuklashTavsiya: avtolavka.yuklashTavsiya,

@@ -20,6 +20,8 @@ exports.tovarSchemas = {
     tavsif:             Joi.string().max(2000).allow('', null).optional(),
     faol:               Joi.boolean().optional(),
     turi:               Joi.string().valid('tovar', 'xom_ashyo').optional(),
+    // 2026-11-29: dillerga sotish narxi; null / '' / 0 — belgilanmagan
+    diller_narx:        Joi.number().min(0).max(1e12).allow(null, '').optional(),
   }),
 
   update: Joi.object({
@@ -41,5 +43,7 @@ exports.tovarSchemas = {
     tavsif:             Joi.string().max(2000).allow('', null).optional(),
     faol:               Joi.boolean().optional(),
     turi:               Joi.string().valid('tovar', 'xom_ashyo').optional(),
+    // 2026-11-29: dillerga sotish narxi; null / '' / 0 — belgilanmagan
+    diller_narx:        Joi.number().min(0).max(1e12).allow(null, '').optional(),
   }),
 };

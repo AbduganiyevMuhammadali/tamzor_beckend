@@ -18,6 +18,21 @@ const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.util
 const { kunKey } = require('../../utils/tahlil.utils');   // lokal (server/biznes) kun — UTC emas
 const { PlastikTolovModel } = require('../../models/kassalar.model');
 const { kassaTekshir, auditYoz, chekRasmOl } = require('../../utils/agentPul.utils');
+const AgentModel = require('../../models/agent.model');
+const Diller = require('../../utils/diller.utils');
+
+/* 2026-11-29: diller faqat O'Z mijozi bilan ishlaydi (mijoz.agent_id = diller); boshqa agent diller mijozi bilan ishlamaydi */
+async function dillerMijozTekshir(req, mijoz) {
+  const a = req.currentAgent;
+  if (a && a.diller) {
+    if (Number(mijoz.agent_id) !== Number(a.id)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
+    return;
+  }
+  if (mijoz.agent_id && Number(mijoz.agent_id) !== Number(a && a.id)
+      && await AgentModel.count({ where: { id: mijoz.agent_id, diller: true } })) {
+    throw new HttpException(403, 'Bu mijoz diller mijozi — u bilan ishlab bo\'lmaydi');
+  }
+}
 
 /* Avtolavka: agent omboridagi qoldiq, tovar bo'yicha */
 async function agentOmborQoldiq(ombor, transaction) {
@@ -119,6 +134,8 @@ function jamiHisobla(qatorlar, chegirmaRaw, agent) {
 // inkassatsiya uni agent puli deb sanamaydi), qarz mijoz balansiga. Agent bonusi yo'q.
 async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null, webUserId = null, keyin = null }) {
   const sklad = !agent;
+  // 2026-11-29: diller sotuvi bu yo'ldan o'tmaydi (Diller.mobilSotuv); diller mijoziga kompaniya sotuvi yo'q
+  if (agent && agent.diller) throw new HttpException(400, `${agent.fullname} — diller: uning sotuvi faqat mobil ilovadan (kompaniya nomidan sotuv qilinmaydi)`);
   if (sklad && turi !== 'sotish') throw new HttpException(400, 'Skladdan faqat sotuv qilinadi');
   const products = Array.isArray(body.products) ? body.products : [];
   if (!body.klientId || !products.length) {
@@ -127,6 +144,9 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
 
   const mijozOldin = await MijozModel.findByPk(body.klientId);
   if (!mijozOldin) throw new HttpException(404, 'Mijoz topilmadi');
+  if (mijozOldin.agent_id && await AgentModel.count({ where: { id: mijozOldin.agent_id, diller: true } })) {
+    throw new HttpException(400, `"${mijozOldin.nomi}" — diller mijozi: unga kompaniya nomidan sotuv qilinmaydi`);
+  }
 
   /* MOBIL OFLAYN: haqiqiy vaqt (internet yo'q paytda qilingan sotuv keyin keladi),
      takrorlanmas kalit va "oflayn" belgisi. */
@@ -375,7 +395,7 @@ class MobileSavdoController {
       masofa: ariza.masofa_m,
       uzoqda: ariza.masofa_m != null && ariza.masofa_m > SOTUV_RADIUS_M,
       // Plastik sotuv: to'lov web tasdig'ini kutadi
-      tolovHolat: ariza.tolov_turi === 'plastik' ? 'kutilmoqda' : null,
+      tolovHolat: ariza.tolov_turi === 'plastik' && ariza.turi !== 'diller_sotuv' ? 'kutilmoqda' : null,
       takror,
     });
     // Oflayn navbat bir xil sotuvni qayta yuborsa — borini qaytaramiz (ikki marta yozilmaydi)
@@ -389,10 +409,14 @@ class MobileSavdoController {
     // agentlarning mijoziga ham. Takror (yuqorida) tekshiruvdan oldin qaytadi — oflayn navbat buzilmaydi.
     // savePayment'ga QO'YILMAGAN (AUDIT-VA-REJA §5g).
     const mijozTek = req.body && req.body.klientId ? await MijozModel.findByPk(req.body.klientId, { attributes: ['id', 'agent_id'] }) : null;
+    if (mijozTek) await dillerMijozTekshir(req, mijozTek);
     if (mijozTek && !await sotuvMijozRuxsat(req, mijozTek)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
     let ariza;
     try {
-      ariza = await createAriza({ body: req.body, agent: req.currentAgent, turi: 'sotish' });
+      ariza = req.currentAgent.diller
+        // 2026-11-29: DILLER — erkin narx, o'z omboridan, kassa/agent_register/plastik navbati yo'q
+        ? await Diller.mobilSotuv({ body: req.body, diller: req.currentAgent, mapQator: (p) => mapQator(p), jamiHisobla, mobilVaqt, mobilKalit, sanaNormalla, kunKey, chekRasmOl })
+        : await createAriza({ body: req.body, agent: req.currentAgent, turi: 'sotish' });
     } catch (e) {
       if (e && e.name === 'SequelizeUniqueConstraintError') {
         const b = await borini();
@@ -406,6 +430,7 @@ class MobileSavdoController {
   // 6.2 saveVozvrat/ → data: { date (lokal id), docId }  (offline kontrakt)
   saveVozvrat = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
+    if (req.currentAgent.diller) throw new HttpException(403, 'Diller uchun — savdoQaytarish ishlatiladi');
     const agent = req.currentAgent;
     const javob = (ariza, takror = false) => ({ date: req.body.date ?? 0, docId: String(ariza.id), ...(takror ? { takror: true } : {}) });
 
@@ -465,6 +490,7 @@ class MobileSavdoController {
   // Qatorlar va jami serverda qayta hisoblanadi (mavjud chegirma saqlanadi).
   editSell = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
+    if (req.currentAgent.diller) throw new HttpException(403, 'Diller hujjatlari tahrirlanmaydi');
     const { docId, products } = req.body;
     const list = Array.isArray(products) ? products : [];
     if (!list.length) throw new HttpException(400, 'products majburiy');
@@ -523,6 +549,11 @@ class MobileSavdoController {
     for (const p of royxat) {
       const obj = p && typeof p === 'object' ? p : { summa: p };
       const x = summaOl(obj.summa, { bosh: 0, xabar: "To'lov summasi noto'g'ri" });
+      if (String(obj.paymentTypeId ?? '') === '2' && agent.diller) {
+        // 2026-11-29: diller plastigi — dillerning o'z hisobi (kassa va chek talab qilinmaydi)
+        if (x > 0) { plastik += x; if (!plastikChek && obj.chekRasm) plastikChek = chekRasmOl(obj.chekRasm); }
+        continue;
+      }
       if (String(obj.paymentTypeId ?? '') === '2') {
         if (!(x > 0)) continue;
         const k = obj.kassaId;
@@ -548,6 +579,13 @@ class MobileSavdoController {
     if (!klientId) throw new HttpException(400, 'klientId majburiy');
     const mijozOldin = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id'] });
     if (!mijozOldin) throw new HttpException(404, 'Mijoz topilmadi');
+    await dillerMijozTekshir(req, mijozOldin);
+    if (agent.diller) {
+      // 2026-11-29: diller mijozining to'lovi — dillerning puli (diller_pul), kompaniya kassasiga tushmaydi
+      const r = await Diller.mobilTolov({ diller: agent, klientId, naqd, plastik, komment, mobilId: mobilKalit(req.body.mobilId),
+        vaqt: mobilVaqt(req.body.vaqt), chekRasm: plastikChek || yuklanganChek });
+      return ok(res, { date: sana || '', holat: 'tasdiqlangan', ...(r.takror ? { takror: true } : {}) }, r.takror ? "To'lov allaqachon qabul qilingan" : "To'lov qabul qilindi");
+    }
     // Plastik kassa: faol, plastik va agent viloyatini qamraydi (aks holda 400)
     const kassa = plastik > 0 ? await kassaTekshir(plastikKassa, { tur: 'plastik', agent }) : null;
     const holat = plastik > 0 ? 'kutilmoqda' : 'tasdiqlangan';
@@ -633,3 +671,4 @@ class MobileSavdoController {
 
 module.exports = new MobileSavdoController();
 module.exports.createAriza = createAriza;   // web: Won Sell → Sotuv qilish (xodim nomidan)
+module.exports.dillerMijozTekshir = dillerMijozTekshir;

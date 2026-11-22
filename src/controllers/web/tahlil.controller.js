@@ -23,6 +23,7 @@ const { xarajatTurlari } = require('../../utils/xarajat.utils');
 const { n, yax, miq, foiz, sotuvTahlil } = U;
 const { kunHisobla } = require('../../utils/avtolavka.utils');
 const { agentOmbori, XOM_ASHYO_OMBOR } = require('../../utils/ombor.utils');
+const { DILLER_MIJOZ_EMAS } = require('../../utils/diller.utils');
 const { SOTUV_RADIUS_M } = require('../../utils/geo.utils');
 const { sababNomi } = require('../mobile/shared');
 const { qarzQismlari } = require('../../utils/qarz.utils');
@@ -47,6 +48,7 @@ async function omborQoldiq(narx) {
   const rows = await Q(`
     SELECT r.tovar_id, r.ombor, SUM(r.donada) AS dona, MAX(t.nomi) AS nomi, MAX(t.turkum) AS turkum
     FROM tovar_register r LEFT JOIN tovar t ON t.id = r.tovar_id
+    WHERE (r.ombor IS NULL OR r.ombor NOT LIKE 'Diller: %')   -- 2026-11-29: diller ombori kompaniya zaxirasi emas
     GROUP BY r.tovar_id, r.ombor HAVING dona > 0.0001`);
   return rows.map(r => ({
     tovar_id: r.tovar_id, nomi: r.nomi || '—', turkum: r.turkum || 'Boshqa', ombor: r.ombor || 'Nomaʼlum',
@@ -113,7 +115,7 @@ async function qarzTahlil({ agent_id = null } = {}) {
     SELECT m.id, m.nomi, m.telefon, m.sinf, m.balans, m.kredit_limit, m.tolov_muddati_kun, m.agent_id,
            ag.fullname AS agent
     FROM mijoz m LEFT JOIN agent ag ON ag.id = m.agent_id
-    WHERE m.deletedAt IS NULL AND m.balans < 0 ${agent_id ? 'AND m.agent_id = :agent_id' : ''}`, { agent_id });
+    WHERE m.deletedAt IS NULL AND m.balans < 0 AND ${DILLER_MIJOZ_EMAS('m')} ${agent_id ? 'AND m.agent_id = :agent_id' : ''}`, { agent_id });
   const ids = mijozlar.map(m => m.id);
   const [qismlar, tolovlar] = await Promise.all([
     qarzQismlari(mijozlar),
@@ -189,7 +191,7 @@ class TahlilController {
       omborQoldiq(narxHozir),
       // Zaxira kuni Ombor hisobotidagi bilan bir xil: davrda ombordan sotuvga chiqqan tovar tannarxi
       Q(`SELECT tovar_id, SUM(ABS(donada)) AS dona FROM tovar_register
-         WHERE manba_tur = 'sotuv' AND sana BETWEEN :from AND :to GROUP BY tovar_id`, { from: D.from, to: D.to }),
+         WHERE manba_tur = 'sotuv' AND sana BETWEEN :from AND :to AND (ombor IS NULL OR ombor NOT LIKE 'Diller: %') GROUP BY tovar_id`, { from: D.from, to: D.to }),
     ]);
 
     const keys = U.guruhKalitlari(D);
@@ -233,7 +235,7 @@ class TahlilController {
     const agent_id = parseInt(req.query.agent_id, 10) || null;
     const [J, O, agentList] = await Promise.all([
       sotuvTahlil(D.from, D.to, { agent_id }), sotuvTahlil(D.pFrom, D.pTo, { agent_id }),
-      Q(`SELECT id, fullname AS nomi FROM agent WHERE deletedAt IS NULL ORDER BY fullname`),
+      Q(`SELECT id, fullname AS nomi FROM agent WHERE deletedAt IS NULL AND diller = 0 ORDER BY fullname`),
     ]);
     const keys = U.guruhKalitlari(D);
     const tm = Object.fromEntries(keys.map(k => [k, { k, tushum: 0, foyda: 0, b: new Set() }]));
@@ -289,7 +291,7 @@ class TahlilController {
     const [J, tovarList, qoldiqRows, oxirgi] = await Promise.all([
       sotuvTahlil(D.from, D.to),
       Q(`SELECT id, nomi, turkum, blokdagi_soni FROM tovar WHERE deletedAt IS NULL`),
-      Q(`SELECT tovar_id, SUM(donada) AS q FROM tovar_register WHERE ombor <> :brak AND ombor NOT LIKE '% (brak)' GROUP BY tovar_id`, { brak: U.BRAK_OMBOR }),
+      Q(`SELECT tovar_id, SUM(donada) AS q FROM tovar_register WHERE ombor <> :brak AND ombor NOT LIKE '% (brak)' AND ombor NOT LIKE 'Diller: %' GROUP BY tovar_id`, { brak: U.BRAK_OMBOR }),
       Q(`SELECT q.tovar_id, MAX(COALESCE(a.yetkazilgan_sana, a.createdAt)) AS s
          FROM ariza_qator q JOIN ariza a ON a.id = q.ariza_id
          WHERE a.turi = 'sotish' AND a.holat = 'yetkazildi' AND a.deletedAt IS NULL GROUP BY q.tovar_id`),
@@ -375,7 +377,7 @@ class TahlilController {
     const aW = agentId ? ' AND m.agent_id = :agentId' : '';
     const bugun = U.kunKey(new Date());
     const rep = { from: D.from, to: D.to, pFrom: D.pFrom, pTo: D.pTo, agentId, tz: D.tz, bugun };
-    const FAOL = `m.deletedAt IS NULL AND m.faol = 1${aW}`;
+    const FAOL = `m.deletedAt IS NULL AND m.faol = 1 AND ${DILLER_MIJOZ_EMAS('m')}${aW}`;   // 2026-11-29: diller mijozlari kompaniya reytingida yo'q
     const darajaSql = R.DARAJALAR.map((d, i) => `SUM(m.reyting BETWEEN ${d.min} AND ${i === 0 ? R.MAX : R.DARAJALAR[i - 1].min - 1}) \`${d.kod}\``).join(', ');
     const diqqatChegara = R.darajaChegara('past').gacha;   // Past va Kritik
 
@@ -407,7 +409,7 @@ class TahlilController {
            (SELECT COUNT(*) FROM mijoz_reyting r JOIN mijoz m2 ON m2.id = r.mijoz_id WHERE m2.agent_id = a.id AND r.tur = 'rad_etildi' AND r.sana BETWEEN :from AND :to) rad,
            (SELECT COUNT(*) FROM mijoz_reyting r JOIN mijoz m2 ON m2.id = r.mijoz_id WHERE m2.agent_id = a.id AND r.tur = 'tolov_surildi' AND r.sana BETWEEN :from AND :to) surildi,
            (SELECT COUNT(*) FROM mijoz_reyting r JOIN mijoz m2 ON m2.id = r.mijoz_id WHERE m2.agent_id = a.id AND r.tur = 'buyurtma' AND r.ball > 0 AND r.sana BETWEEN :from AND :to) zakaz
-         FROM agent a JOIN mijoz m ON m.agent_id = a.id AND m.deletedAt IS NULL AND m.faol = 1
+         FROM agent a JOIN mijoz m ON m.agent_id = a.id AND m.deletedAt IS NULL AND m.faol = 1 AND a.diller = 0
          WHERE a.deletedAt IS NULL${agentId ? ' AND a.id = :agentId' : ''} GROUP BY a.id, a.fullname ORDER BY ortacha ASC`, rep),
       Q(`SELECT m.id, m.nomi, m.telefon, m.reyting, m.rad_ketma_ket, m.tolov_vada_sana vada, GREATEST(-m.balans, 0) qarz, a.fullname agent,
            (SELECT MAX(r.sana) FROM mijoz_reyting r WHERE r.mijoz_id = m.id) oxirgi
@@ -423,7 +425,7 @@ class TahlilController {
          WHERE r.sana BETWEEN :from AND :to${aW} GROUP BY m.id, m.nomi, m.reyting, a.fullname HAVING ball <> 0`, rep),
       Q(`SELECT r.id, r.tur, r.ball, r.reyting_keyin, r.sabab, r.sana, r.xodim_nomi, r.xodim_rol, m.id mijoz_id, m.nomi
          FROM mijoz_reyting r JOIN mijoz m ON m.id = r.mijoz_id WHERE 1 = 1${aW} ORDER BY r.sana DESC, r.id DESC LIMIT 15`, rep),
-      Q(`SELECT id, fullname nomi FROM agent WHERE deletedAt IS NULL AND faol = 1 ORDER BY fullname`),
+      Q(`SELECT id, fullname nomi FROM agent WHERE deletedAt IS NULL AND faol = 1 AND diller = 0 ORDER BY fullname`),
     ]);
 
     // O'rtacha reyting dinamikasi (har guruh oxiridagi holat)
@@ -482,7 +484,7 @@ class TahlilController {
            (SELECT COALESCE(SUM(k.summa), 0) FROM kassa k ${agent_id ? 'JOIN mijoz m ON m.id = k.mijoz_id AND m.agent_id = :agent_id' : ''}
              WHERE k.tur = 'kirim' AND k.mijoz_id IS NOT NULL AND k.sana >= :d30) AS tolandi`,
         { d30, agent_id }),
-      Q(`SELECT id, fullname AS nomi FROM agent WHERE deletedAt IS NULL ORDER BY fullname`),
+      Q(`SELECT id, fullname AS nomi FROM agent WHERE deletedAt IS NULL AND diller = 0 ORDER BY fullname`),
     ]);
     const ag = {};
     T.rows.forEach(r => {
@@ -515,9 +517,9 @@ class TahlilController {
       omborQoldiq(narx),
       Q(`SELECT tur, manba_tur, tovar_id, ${U.guruhSql('sana', D.guruh)} AS k,
                 SUM(donada) AS dona, SUM(summa) AS summa, COUNT(*) AS son
-         FROM tovar_register WHERE sana BETWEEN :from AND :to
+         FROM tovar_register WHERE sana BETWEEN :from AND :to AND (ombor IS NULL OR ombor NOT LIKE 'Diller: %')
          GROUP BY tur, manba_tur, tovar_id, k`, { from: D.from, to: D.to, tz: D.tz }),
-      Q(`SELECT tovar_id, MAX(sana) AS s FROM tovar_register WHERE manba_tur = 'sotuv' GROUP BY tovar_id`),
+      Q(`SELECT tovar_id, MAX(sana) AS s FROM tovar_register WHERE manba_tur = 'sotuv' AND (ombor IS NULL OR ombor NOT LIKE 'Diller: %') GROUP BY tovar_id`),
     ]);
     const keys = U.guruhKalitlari(D);
     const tm = Object.fromEntries(keys.map(k => [k, { k, kirim: 0, sotuv: 0 }]));
@@ -712,7 +714,7 @@ class TahlilController {
       kochirish: "r.manba_tur IN ('yuklash', 'qabul', 'kochirish', 'agent_kochirish')", inventar: "r.manba_tur = 'inventar'",
       ishlab: "r.manba_tur = 'ishlab_chiqarish'",
     };
-    const shart = ['r.sana BETWEEN :from AND :to'];
+    const shart = ['r.sana BETWEEN :from AND :to', "(r.ombor IS NULL OR r.ombor NOT LIKE 'Diller: %')"];   // 2026-11-29: diller omborlari jurnalda yo'q
     if (ombor) shart.push('r.ombor = :ombor');
     if (search) shart.push('r.tovar_nomi LIKE :search');
     const asos = shart.join(' AND ');
@@ -732,7 +734,7 @@ class TahlilController {
       Q(`SELECT COUNT(*) AS jami FROM tovar_register r WHERE ${toliq}`, rep),
       Q(`SELECT r.tur, r.manba_tur, COUNT(*) AS son, SUM(ABS(r.donada)) AS dona, SUM(ABS(r.summa)) AS summa
          FROM tovar_register r WHERE ${asos} GROUP BY r.tur, r.manba_tur`, rep),
-      Q(`SELECT DISTINCT ombor FROM tovar_register WHERE ombor IS NOT NULL ORDER BY ombor`),
+      Q(`SELECT DISTINCT ombor FROM tovar_register WHERE ombor IS NOT NULL AND ombor NOT LIKE 'Diller: %' ORDER BY ombor`),
     ]);
 
     // Hujjatlar: prixod / ariza / avtolavka hujjati
@@ -812,7 +814,7 @@ class TahlilController {
      Sotuv va foyda boshqa hisobotlar bilan bir xil qoida (sotuvTahlil) bilan hisoblanadi. */
   xodim = async (req, res) => {
     const D = U.davr(req.query);
-    const royxat = await Q(`SELECT id, fullname AS nomi, avtolavka FROM agent WHERE deletedAt IS NULL ORDER BY avtolavka DESC, fullname`);
+    const royxat = await Q(`SELECT id, fullname AS nomi, avtolavka FROM agent WHERE deletedAt IS NULL AND diller = 0 ORDER BY avtolavka DESC, fullname`);
     const agent_id = parseInt(req.query.agent_id, 10) || (royxat[0] && royxat[0].id) || null;
     if (!agent_id) return res.send({ davr: davrJavob(D), agentlar_royxat: royxat, agent: null });
     const [ag] = await Q(`

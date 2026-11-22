@@ -1,4 +1,4 @@
-const { DataTypes, Model } = require('sequelize');
+const { DataTypes, Model, Op } = require('sequelize');
 const sequelize = require('../db/db-sequelize');
 
 class TovarRegisterModel extends Model {}
@@ -26,7 +26,9 @@ TovarRegisterModel.init({
     // ishlab_chiqarish — xom ashyo chiqimi (chiqim) va tayyor mahsulot kirimi (kirim, tannarxda)
     // kochirish — tovar turi o'zgarganda qoldig'i turi omboriga ko'chadi (asosiy sklad ↔ Xom ashyo ombori)
     // agent_kochirish — agentdan agentga ko'chirish (manba_id = agent_kochirish.id), ichki harakat
-    type: DataTypes.ENUM('prixod', 'sotuv', 'qaytarma', 'inventar', 'yuklash', 'qabul', 'ishlab_chiqarish', 'kochirish', 'agent_kochirish'),
+    // diller_* (2026-11-29): diller ombori harakatlari (manba_id: berish/qaytarish — diller_hujjat.id; sotuv/qaytarma — ariza.id)
+    type: DataTypes.ENUM('prixod', 'sotuv', 'qaytarma', 'inventar', 'yuklash', 'qabul', 'ishlab_chiqarish', 'kochirish', 'agent_kochirish',
+                         'diller_berish', 'diller_qaytarish', 'diller_sotuv', 'diller_qaytarma'),
     allowNull: false,
   },
   manba_id: { type: DataTypes.INTEGER, allowNull: false },
@@ -54,6 +56,13 @@ TovarRegisterModel.init({
   tableName:  'tovar_register',
   timestamps: true,
   paranoid:   false,
+  /* 2026-11-29: DILLER OMBORLARI ("Diller: <ism>", "(brak)" bilan ham) — kompaniya zaxirasi EMAS. Standart scope ularni
+     barcha Sequelize so'rovlaridan (hisobotlar, qoldiqlar, jurnal) chiqaradi; diller kodi unscoped() ishlatadi.
+     Xom SQL so'rovlarda — utils/diller.utils DILLER_OMBOR_EMAS. whereMergeStrategy 'and' — so'rov where'i bilan AND. */
+  whereMergeStrategy: 'and',
+  defaultScope: {
+    where: { [Op.and]: [sequelize.literal("(ombor IS NULL OR ombor NOT LIKE 'Diller: %')")] },
+  },
 });
 
 module.exports = TovarRegisterModel;

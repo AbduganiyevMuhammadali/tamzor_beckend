@@ -31,7 +31,7 @@ class NavbatController {
       bir(`SELECT COUNT(*) qarzdor, COALESCE(-SUM(balans), 0) summa FROM mijoz
            WHERE deletedAt IS NULL AND balans < 0`),
       bir(`SELECT
-             (SELECT COUNT(*) FROM agent WHERE faol = 1 AND deletedAt IS NULL AND avtolavka = 1) jami,
+             (SELECT COUNT(*) FROM agent WHERE faol = 1 AND deletedAt IS NULL AND avtolavka = 1 AND diller = 0) jami,
              (SELECT COUNT(DISTINCT agent_id) FROM avtolavka_hujjat
                 WHERE tur = 'yuklash' AND holat = 'tasdiqlangan' AND sana = CURDATE()) yuklangan,
              (SELECT COUNT(DISTINCT agent_id) FROM avtolavka_hujjat
@@ -60,7 +60,7 @@ class NavbatController {
            LEFT JOIN inkassatsiya i ON i.dostavchi_id = k.user_id AND i.sana = CURDATE()
            WHERE k.s - COALESCE(i.topshirilgan_summa, 0) > 0.5`),
       bir(`SELECT
-             (SELECT COUNT(*) FROM agent WHERE faol = 1 AND deletedAt IS NULL) jami,
+             (SELECT COUNT(*) FROM agent WHERE faol = 1 AND deletedAt IS NULL AND diller = 0) jami,
              (SELECT COUNT(DISTINCT agent_id) FROM agent_location
                 WHERE rol = 'agent' AND sana >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)) online`),
     ]);

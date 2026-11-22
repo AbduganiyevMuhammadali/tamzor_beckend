@@ -8,6 +8,7 @@ const HttpException = require('../../utils/HttpException.utils');
 const { qarzQismlari } = require('../../utils/qarz.utils');
 
 const NAQD = ['naqt', 'naqd'];
+const SOTUV = ['sotish', 'diller_sotuv'];   // 2026-11-29: dillerning o'z sotuvi ham chek
 const n = v => parseFloat(v) || 0;
 const HOLAT_NOM = { yangi: 'Yangi', tasdiqlangan: 'Tasdiqlangan', yigilmoqda: "Yig'ilmoqda", yolda: "Yo'lda",
   yetkazildi: 'Yetkazilgan', qabul_kutilmoqda: 'Qabul kutilmoqda', qabul_qilindi: 'Qabul qilingan' };
@@ -69,7 +70,7 @@ async function mijozCheklar(req, res) {
   const HAJM = 20;
 
   const { SavdoQaytarishModel, SavdoQaytarishQatorModel } = require('../../models/savdoQaytarish.model');
-  const [arizalar, tolovlar, qismlar, qaytarishlar, plastiklar] = await Promise.all([
+  const [arizalar, tolovlar, qismlar, qaytarishlar, plastiklar, dillerTolov] = await Promise.all([
     ArizaModel.findAll({
       where: { mijoz_id: klientId, holat: Object.keys(HOLAT_NOM) },
       include: [{ model: ArizaQatorModel, as: 'qatorlar' }],
@@ -92,6 +93,9 @@ async function mijozCheklar(req, res) {
          p.ariza_id, p.ariza_raqam, p.agent_nomi, p.izoh, p.tasdiq_vaqt
        FROM plastik_tolov p LEFT JOIN kassalar k ON k.id = p.kassa_id
        WHERE p.mijoz_id = :id ORDER BY p.sana DESC, p.id DESC LIMIT 300`, { replacements: { id: klientId }, type: sequelize.QueryTypes.SELECT }),
+    // 2026-11-29: diller mijozining qarz to'lovlari (dillerning o'z daftari, kompaniya kassasi emas)
+    sequelize.query(`SELECT id, sana, summa, usul, izoh FROM diller_pul WHERE mijoz_id = :id AND kategoriya = 'mijoz_tolov'
+       ORDER BY sana DESC LIMIT 300`, { replacements: { id: klientId }, type: sequelize.QueryTypes.SELECT }),
   ]);
   const plastikSotuv = new Map(plastiklar.filter(p => p.ariza_id).map(p => [Number(p.ariza_id), p]));
   const ochiq = new Map((qismlar.get(mijoz.id) || []).filter(q => q.ariza_id).map(q => [q.ariza_id, q]));
@@ -101,7 +105,7 @@ async function mijozCheklar(req, res) {
       const jami = n(a.jami_summa), tol = n(a.tolangan_summa);
       const naqdTur = NAQD.includes(String(a.tolov_turi || '').toLowerCase());
       // Joyida to'langani: avtolavka/dostavchik yozgan tolangan_summa, aks holda to'lov turidan
-      const tolangan = a.turi === 'sotish' ? (tol > 0 ? Math.min(jami, tol) : (naqdTur ? jami : 0)) : 0;
+      const tolangan = SOTUV.includes(a.turi) ? (tol > 0 ? Math.min(jami, tol) : (naqdTur ? jami : 0)) : 0;
       const q = ochiq.get(a.id);
       const sana = a.yetkazilgan_sana || a.createdAt;
       return {
@@ -109,8 +113,8 @@ async function mijozCheklar(req, res) {
         id: String(a.id), raqam: a.raqam || String(a.id), sana,
         holat: a.holat, holatNomi: HOLAT_NOM[a.holat] || a.holat,
         agent: a.agent_nomi || '',
-        tolovTuri: a.turi !== 'sotish' ? null : tolangan >= jami - 0.5 ? 'naqd' : tolangan > 0 ? 'qisman' : 'qarz',
-        jami, tolangan, qarzga: a.turi === 'sotish' ? Math.max(0, jami - tolangan) : 0,
+        tolovTuri: !SOTUV.includes(a.turi) ? null : tolangan >= jami - 0.5 ? 'naqd' : tolangan > 0 ? 'qisman' : 'qarz',
+        jami, tolangan, qarzga: SOTUV.includes(a.turi) ? Math.max(0, jami - tolangan) : 0,
         // Hozir shu chekdan to'lanmay qolgan qarz (FIFO) va uning to'lov sanasi
         qolganQarz: q ? q.summa : 0,
         tolovSana: q ? q.tolov_sana : (a.tolov_sana || null),
@@ -150,6 +154,10 @@ async function mijozCheklar(req, res) {
     ...tolovlar.map(t => ({
       tur: 'tolov', id: 'k' + t.id, raqam: `TL-${t.id}`, sana: t.sana, jami: n(t.summa),
       usul: t.tolov_usul || 'naqt', izoh: t.izoh || '',
+    })),
+    ...dillerTolov.map(t => ({
+      tur: 'tolov', id: 'd' + t.id, raqam: `DT-${t.id}`, sana: t.sana, jami: n(t.summa),
+      usul: t.usul === 'plastik' ? 'karta' : 'naqt', izoh: t.izoh || '',
     })),
   ].sort((a, b) => new Date(b.sana) - new Date(a.sana));
 

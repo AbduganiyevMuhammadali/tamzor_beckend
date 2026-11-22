@@ -29,6 +29,7 @@ const avtolavkaRouter   = require('../routes/avtolavka.route');
 const navbatRouter      = require('../routes/navbat.route');
 const tahlilRouter      = require('../routes/tahlil.route');
 const buyumRouter       = require('../routes/buyum.route');    // 2026-11-28: sotilmaydigan jihozlar
+const dillerRouter      = require('../routes/diller.route');   // 2026-11-29: dillerlar
 const mobileRouter      = require('../routes/mobile.route');
 const HttpException = require('../utils/HttpException.utils');
 const { biznesRejim } = require('../utils/rejim.utils');
@@ -105,6 +106,7 @@ module.exports = async function(app){
         app.use(`/api/v1/navbat`,         navbatRouter);
         app.use(`/api/v1/tahlil`,         tahlilRouter);
         app.use(`/api/v1/buyumlar`,       buyumRouter);
+        app.use(`/api/v1/dillerlar`,      dillerRouter);
         app.use(MOBILE_PREFIXES,          mobileRouter);
 
         // 404 error

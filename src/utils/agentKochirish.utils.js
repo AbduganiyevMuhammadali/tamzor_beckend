@@ -86,6 +86,12 @@ function qatorlarOl(v) {
   return map;
 }
 
+/* 2026-11-29: diller ishtirokida agentdan agentga ko'chirish yo'q (diller tovari — uning mulki) */
+function dillerTaqiq(...agentlar) {
+  const d = agentlar.find(a => a && a.diller);
+  if (d) throw new HttpException(400, `${d.fullname} — diller: agentlar orasida ko'chirishda ishtirok etmaydi (Dillerlar → Berish / Qaytarish)`);
+}
+
 async function agentOl(id, nom) {
   const a = await AgentModel.findByPk(id);
   if (!a) throw new HttpException(400, `${nom}: agent topilmadi`);
@@ -269,6 +275,7 @@ async function yarat(b, user) {
   const izoh = matnOl(b.izoh, 'izoh'), sabab = matnOl(b.sabab, 'sabab');
 
   const [dan, ga] = await Promise.all([agentOl(danId, 'dan_agent_id'), agentOl(gaId, 'ga_agent_id')]);
+  dillerTaqiq(dan, ga);
   // Yuboruvchi faol bo'lmasa ham bo'ladi (ishdan ketgan agent omborini bo'shatish), qabul qiluvchi — faqat faol
   if (!ga.faol) throw new HttpException(400, `${ga.fullname} faol emas — unga tovar ko'chirib bo'lmaydi`);
   const danOmbor = agentOmbori(dan.fullname), gaOmbor = agentOmbori(ga.fullname);
@@ -327,6 +334,7 @@ async function hujjatAgentlari(k, t) {
     AgentModel.findByPk(k.ga_agent_id, { paranoid: false, transaction: t }),
   ]);
   if (!dan || !ga) throw new HttpException(400, 'Hujjat agenti topilmadi');
+  dillerTaqiq(dan, ga);
   return { dan, ga, danOmbor: agentOmbori(dan.fullname), gaOmbor: agentOmbori(ga.fullname) };
 }
 

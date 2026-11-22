@@ -9,6 +9,7 @@ const bcrypt = require('bcryptjs');
 const sequelize = require('../../db/db-sequelize');
 const { majburiyat, majburiyatlar, agentPulTarix } = require('../../utils/agentPul.utils');
 const { sanaTogrimi } = require('../../utils/tahlil.utils');
+const Diller = require('../../utils/diller.utils');
 
 /* ── Bo'sh string va noto'g'ri qiymatlarni tozalash ───── */
 const DATE_FIELDS   = ['tugilgan_sana', 'ish_boshlagan'];
@@ -21,7 +22,7 @@ const TAHRIR_MAYDONLAR = [
   'fullname', 'telefon', 'passport', 'tugilgan_sana', 'territoriya_id', 'plan_summa', 'bonus_foiz',
   'kredit_limit', 'max_chegirma', 'ish_boshlagan', 'tashrif_kunlari', 'boshlanish_manzil', 'transport',
   'mashina_raqam', 'radius_km', 'izoh', 'faol', 'login', 'parol', 'super_agent', 'super_agent_id',
-  'narx_ozgartirish',
+  'narx_ozgartirish', 'diller',
 ];
 // 'avtolavka' endi so'rovdan yozilmaydi: 2026-11-21 dan HAMMA agent o'z omboridan sotadi (model standarti true)
 
@@ -67,6 +68,7 @@ const shakl = (a) => {
   j.super_agent_id = j.super_agent_id ?? null;
   j.super_agent_nomi = j.superAgent ? j.superAgent.fullname : null;
   j.narx_ozgartirish = !!j.narx_ozgartirish;
+  j.diller = !!j.diller;
   j.territoriya = j.territoriya || null;
   return j;
 };
@@ -151,6 +153,7 @@ class AgentController {
       where.super_agent_id = sid;
     }
     if (super_agent !== undefined && super_agent !== '') where.super_agent = super_agent === 'true';
+    if (req.query.diller !== undefined && req.query.diller !== '') where.diller = req.query.diller === 'true';
 
     const agents = await AgentModel.findAll({
       where,
@@ -160,10 +163,11 @@ class AgentController {
 
     // Har bir agent uchun statistika qo'shamiz; pul — naqd majburiyat (agentPul.utils)
     const pullar = await majburiyatlar(agents.map(a => a.id));
+    const dQarz = await Diller.dillerQarzlari(agents.filter(a => a.diller).map(a => a.id));   // 2026-11-29
     const result = await Promise.all(
       agents.map(async a => {
         const stats = await buildStats(a, period);
-        return { ...shakl(a), ...stats, pul: pullar.get(a.id) };
+        return { ...shakl(a), ...stats, pul: pullar.get(a.id), diller_qarz: a.diller ? (dQarz.get(a.id) || 0) : null };
       })
     );
 
@@ -216,7 +220,8 @@ class AgentController {
           include: [{ model: TerritoriyaModel, as: 'territoriya', attributes: ['id', 'nomi'] }], order: [['fullname', 'ASC']] })
       : [];
 
-    res.send({ ...shakl(agent), ...stats, mijozlar, agentlari, pul: await majburiyat(agent.id) });
+    res.send({ ...shakl(agent), ...stats, mijozlar, agentlari, pul: await majburiyat(agent.id),
+      diller_qarz: agent.diller ? await Diller.dillerQarz(agent.id) : null });
   };
 
   /* Mobil login/parol: parol xeshlanadi, bo'sh parol mavjudini o'zgartirmaydi,
@@ -236,6 +241,7 @@ class AgentController {
     const body  = await this.mobilKirish(sanitize(req.body));
     body.avtolavka = true;
     const agent = await sequelize.transaction(async (t) => {
+      await Diller.bayroqTekshir(null, body, t);
       await this.superAgentTekshir(null, body, t);
       return AgentModel.create(body, { transaction: t });
     });
@@ -263,6 +269,7 @@ class AgentController {
     if (!sup) throw new HttpException(400, 'Super agent topilmadi');
     if (!sup.faol) throw new HttpException(400, `${sup.fullname} faol emas`);
     if (!sup.super_agent) throw new HttpException(400, `${sup.fullname} super agent emas (avval agent kartasida "Super agent" belgisini qo'ying)`);
+    if (sup.diller) throw new HttpException(400, `${sup.fullname} — diller, super agent bo'la olmaydi`);
     // Sikl: tanlangan super agentdan yuqoriga zanjir bo'ylab — o'zi (yoki o'z bo'ysunuvchisi orqali) qaytib kelmasin
     if (selfId) {
       const korildi = new Set([sid]);
@@ -287,6 +294,7 @@ class AgentController {
       const agent = await AgentModel.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
       if (!agent) throw new HttpException(404, 'Agent topilmadi');
       await this.kanalOzgarishTekshir(agent, body, t);
+      await Diller.bayroqTekshir(agent, body, t);
       await this.superAgentTekshir(agent, body, t);
       await agent.update(body, { transaction: t });
       return agent;
@@ -309,6 +317,10 @@ class AgentController {
         kanal: 'distributsiya',
       }, transaction });
       if (ochiq) throw new HttpException(400, `${agent.fullname}ning ${ochiq} ta ochiq zakazi bor — Won Sell'ga o'tkazishdan oldin ularni yetkazing yoki bekor qiling`);
+    }
+    if (agent.diller && ismYangi !== agent.fullname) {
+      const q = await Diller.dillerOmborJami(agent, transaction);
+      if (q > 0.001) throw new HttpException(400, `"Diller: ${agent.fullname}" omborida ${+q.toFixed(3)} birlik tovar bor — avval dillerdan qaytarish bilan bo'shating, keyin ismni o'zgartiring`);
     }
     if ((agent.avtolavka && !avtoYangi) || ismYangi !== agent.fullname) {
       const q = await this.omborQoldigi(agent, transaction);
@@ -339,6 +351,12 @@ class AgentController {
       if (!agent) throw new HttpException(404, 'Agent topilmadi');
       const q = await this.omborQoldigi(agent, t);
       if (q > 0.001) throw new HttpException(400, `"${agentOmbori(agent.fullname)}" omborida ${+q.toFixed(3)} birlik tovar bor — avval asosiy omborga qaytaring, keyin o'chiring`);
+      if (agent.diller) {
+        const dq = await Diller.dillerOmborJami(agent, t);
+        if (dq > 0.001) throw new HttpException(400, `"Diller: ${agent.fullname}" omborida ${+dq.toFixed(3)} birlik tovar bor — avval dillerdan qaytaring, keyin o'chiring`);
+        const qarz = await Diller.dillerQarz(agent.id, t);
+        if (Math.abs(qarz) > 0.005) throw new HttpException(400, `Diller qarzi ${qarz} — o'chirishdan oldin qarz 0 bo'lishi kerak`);
+      }
 
       // Agentga biriktirilgan mijozlarni agent_idsiz qoldirish (soft)
       await MijozModel.update({ agent_id: null }, { where: { agent_id: agent.id }, transaction: t });
@@ -375,7 +393,7 @@ class AgentController {
       AgentModel.findAll({
         where: { faol: true },
         include: INCLUDE,
-        attributes: ['id', 'fullname', 'territoriya_id', 'super_agent', 'super_agent_id'],
+        attributes: ['id', 'fullname', 'territoriya_id', 'super_agent', 'super_agent_id', 'diller'],
         order: [['fullname', 'ASC']],
       }),
       TerritoriyaModel.findAll({ order: [['nomi', 'ASC']] }),
@@ -387,8 +405,9 @@ class AgentController {
   statistika = async (req, res) => {
     const { period = 'month' } = req.query;
 
+    // 2026-11-29: dillerlar kompaniya KPI'siga kirmaydi
     const agentlar = await AgentModel.findAll({
-      where: { faol: true },
+      where: { faol: true, diller: false },
       include: INCLUDE,
       order: [['fullname', 'ASC']],
     });

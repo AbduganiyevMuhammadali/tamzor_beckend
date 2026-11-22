@@ -1,6 +1,7 @@
 const { Op, fn, col } = require('sequelize');
 const sequelize          = require('../../db/db-sequelize');
 const { sotuvTahlil, tannarxXaritasi, BRAK_OMBOR } = require('../../utils/tahlil.utils');
+const { DILLER_MIJOZ_EMAS, dillerMijozEmasWhere } = require('../../utils/diller.utils');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { PrixodModel }    = require('../../models/prixod.model');
 const { MijozModel } = require('../../models/mijoz.model');
@@ -192,13 +193,13 @@ class DashboardController {
       }),
 
       // ── Jami mijozlar ──
-      MijozModel.count(),
+      MijozModel.count({ where: dillerMijozEmasWhere() }),   // 2026-11-29: diller mijozlari kompaniyaniki emas
 
       // ── Faol mijozlar ──
-      MijozModel.count({ where: { faol: true } }),
+      MijozModel.count({ where: { faol: true, ...dillerMijozEmasWhere() } }),
 
       // ── Faol agentlar ──
-      AgentModel.count({ where: { faol: true } }),
+      AgentModel.count({ where: { faol: true, diller: false } }),   // 2026-11-29: dillerlar xodim emas
 
       // ── Yetkazuvchilar ──
       YetkazuvchiModel.count(),
@@ -212,7 +213,7 @@ class DashboardController {
       Promise.all([
         sequelize.query(`
           SELECT tovar_id, SUM(donada) AS q FROM tovar_register
-          WHERE ombor IS NULL OR (ombor <> :brak AND ombor NOT LIKE '% (brak)') GROUP BY tovar_id, ombor HAVING q > 0.0001
+          WHERE ombor IS NULL OR (ombor <> :brak AND ombor NOT LIKE '% (brak)' AND ombor NOT LIKE 'Diller: %') GROUP BY tovar_id, ombor HAVING q > 0.0001
         `, { replacements: { brak: BRAK_OMBOR }, type: sequelize.QueryTypes.SELECT }),
         tannarxXaritasi(new Date()),
       ]).then(([rows, narx]) => [{
@@ -288,7 +289,7 @@ class DashboardController {
       SELECT
         COALESCE(SUM(CASE WHEN balans < 0 THEN -balans ELSE 0 END), 0) AS jami_qarz,
         COUNT(CASE WHEN balans < 0 THEN 1 END) AS qarzdor_soni
-      FROM mijoz WHERE deletedAt IS NULL
+      FROM mijoz WHERE deletedAt IS NULL AND (agent_id IS NULL OR agent_id NOT IN (SELECT id FROM agent WHERE diller = 1))
     `, { type: sequelize.QueryTypes.SELECT });
     // Muddati o'tgan qarz (FIFO yoshi): mijoz qarzini avval eng yangi savdolar
     // "qoplaydi" deb hisoblanadi. To'lov muddati (mijoz.tolov_muddati_kun) ichidagi
@@ -305,7 +306,7 @@ class DashboardController {
           AND a.createdAt >= DATE_SUB(NOW(), INTERVAL COALESCE(NULLIF(mm.tolov_muddati_kun, 0), 30) DAY)
         GROUP BY a.mijoz_id
       ) r ON r.mijoz_id = m.id
-      WHERE m.deletedAt IS NULL AND m.balans < 0
+      WHERE m.deletedAt IS NULL AND m.balans < 0 AND ${DILLER_MIJOZ_EMAS('m')}
     `, { type: sequelize.QueryTypes.SELECT });
 
     // ── SOTUV (buyurtmalar) — bekor qilinganlardan tashqari barcha sotish arizalari ──
@@ -423,7 +424,7 @@ class DashboardController {
           SUM(CASE WHEN x.q >= 20 THEN 1 ELSE 0 END) AS yetarli
         FROM (
           SELECT t.id, COALESCE(SUM(tr.donada), 0) AS q
-          FROM tovar t LEFT JOIN tovar_register tr ON tr.tovar_id = t.id
+          FROM tovar t LEFT JOIN tovar_register tr ON tr.tovar_id = t.id AND (tr.ombor IS NULL OR tr.ombor NOT LIKE 'Diller: %')
           WHERE t.faol = 1 AND t.deletedAt IS NULL
           GROUP BY t.id
         ) x
@@ -541,7 +542,7 @@ class DashboardController {
 
     // ── Savdo rejasi KPI (agentlar plan_summa yig'indisiga nisbatan joriy SOTUV) ──
     const [planRow] = await sequelize.query(`
-      SELECT COALESCE(SUM(plan_summa), 0) AS jami_plan FROM agent WHERE deletedAt IS NULL AND faol = 1
+      SELECT COALESCE(SUM(plan_summa), 0) AS jami_plan FROM agent WHERE deletedAt IS NULL AND faol = 1 AND diller = 0
     `, { type: sequelize.QueryTypes.SELECT });
     const REJA_KOEF = rejaKoef(period);
     const jamiPlan = Number(planRow?.jami_plan || 0) * REJA_KOEF;
@@ -577,7 +578,7 @@ class DashboardController {
       LEFT JOIN ariza ar ON ar.agent_id = a.id
         AND ar.turi = 'sotish' AND ar.deletedAt IS NULL AND ar.holat <> 'bekor'
         AND ar.createdAt BETWEEN :from AND :to
-      WHERE a.deletedAt IS NULL AND a.faol = 1
+      WHERE a.deletedAt IS NULL AND a.faol = 1 AND a.diller = 0
       GROUP BY a.id, a.fullname, a.plan_summa
       ORDER BY savdo DESC
       LIMIT 5
@@ -618,7 +619,7 @@ class DashboardController {
         (SELECT COUNT(*) FROM ariza WHERE turi='sotish' AND deletedAt IS NULL AND holat='yetkazildi' AND ${LOKAL('yetkazilgan_sana')}) AS yetkazilgan,
         (SELECT COALESCE(SUM(summa),0) FROM kassa WHERE tur='kirim' AND kategoriya='mijoz_tolov' AND ${LOKAL('sana')}) AS tolov_summa,
         (SELECT COUNT(DISTINCT agent_id) FROM agent_location WHERE rol='agent' AND ${LOKAL('sana')}) AS faol_agentlar,
-        (SELECT COUNT(*) FROM mijoz WHERE deletedAt IS NULL AND ${LOKAL('createdAt')}) AS yangi_mijozlar,
+        (SELECT COUNT(*) FROM mijoz WHERE deletedAt IS NULL AND (agent_id IS NULL OR agent_id NOT IN (SELECT id FROM agent WHERE diller = 1)) AND ${LOKAL('createdAt')}) AS yangi_mijozlar,
         (SELECT COALESCE(SUM(jami_summa),0) FROM ariza WHERE turi='sotish' AND deletedAt IS NULL AND holat<>'bekor' AND ${LOKAL('createdAt')}) AS zakaz_summa,
         (SELECT COUNT(*) FROM marshrut_reja WHERE sana = :bugun) AS reja_tashrif,
         (SELECT COUNT(*) FROM tashrif WHERE sana = :bugun AND checkin_vaqt IS NOT NULL) AS tashrif
@@ -637,7 +638,7 @@ class DashboardController {
     // ── OGOHLANTIRISHLAR (amaliy signallar) ──
     const kamQoldiq = await sequelize.query(`
       SELECT t.id, t.nomi, COALESCE(SUM(tr.donada),0) AS qoldiq
-      FROM tovar t LEFT JOIN tovar_register tr ON tr.tovar_id = t.id
+      FROM tovar t LEFT JOIN tovar_register tr ON tr.tovar_id = t.id AND (tr.ombor IS NULL OR tr.ombor NOT LIKE 'Diller: %')
       WHERE t.faol = 1 AND t.deletedAt IS NULL
       GROUP BY t.id, t.nomi HAVING qoldiq < 20
       ORDER BY qoldiq ASC LIMIT 6
@@ -701,7 +702,7 @@ class DashboardController {
       // Yangi mijozlar — kunlik, kumulyativ (o'sib boruvchi jami)
       sequelize.query(`
         SELECT DATE_FORMAT(CONVERT_TZ(createdAt, '+00:00', :tz), '%Y-%m-%d') AS d, COUNT(*) AS v
-        FROM mijoz WHERE deletedAt IS NULL AND createdAt >= :from GROUP BY d
+        FROM mijoz WHERE deletedAt IS NULL AND (agent_id IS NULL OR agent_id NOT IN (SELECT id FROM agent WHERE diller = 1)) AND createdAt >= :from GROUP BY d
       `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Faol agentlar — kunlik GPS faolligi (distinct)
@@ -716,7 +717,7 @@ class DashboardController {
       // Ombor qoldig'i — kunlik dona harakati (chiqim manfiy), kumulyativ trend
       sequelize.query(`
         SELECT DATE_FORMAT(CONVERT_TZ(sana, '+00:00', :tz), '%Y-%m-%d') AS d, COALESCE(SUM(donada), 0) AS v
-        FROM tovar_register WHERE sana >= :from GROUP BY d
+        FROM tovar_register WHERE sana >= :from AND (ombor IS NULL OR ombor NOT LIKE 'Diller: %') GROUP BY d
       `, { replacements: { from: sparkFrom, tz: sparkTz }, type: sequelize.QueryTypes.SELECT }),
 
       // Sotuv — kunlik summa, buyurtma soni va xarid qilgan mijozlar
@@ -798,7 +799,7 @@ class DashboardController {
           FROM mijoz m
           LEFT JOIN ariza a ON a.mijoz_id = m.id AND a.turi = 'sotish'
             AND a.deletedAt IS NULL AND a.holat <> 'bekor'
-          WHERE m.deletedAt IS NULL AND m.faol = 1
+          WHERE m.deletedAt IS NULL AND m.faol = 1 AND ${DILLER_MIJOZ_EMAS('m')}
           GROUP BY m.id
         ) x
       `, { type: Q }),
@@ -811,7 +812,7 @@ class DashboardController {
         FROM mijoz m
         JOIN ariza a ON a.mijoz_id = m.id AND a.turi = 'sotish'
           AND a.deletedAt IS NULL AND a.holat <> 'bekor'
-        WHERE m.deletedAt IS NULL AND m.faol = 1
+        WHERE m.deletedAt IS NULL AND m.faol = 1 AND ${DILLER_MIJOZ_EMAS('m')}
         GROUP BY m.id, m.nomi, m.telefon
         HAVING MAX(a.createdAt) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)
         ORDER BY jami DESC
@@ -851,7 +852,7 @@ class DashboardController {
     // ── TOP QARZDORLAR ──
     const qarzRows = await sequelize.query(`
       SELECT id, nomi, telefon, -balans AS qarz
-      FROM mijoz WHERE balans < 0 AND deletedAt IS NULL
+      FROM mijoz WHERE balans < 0 AND deletedAt IS NULL AND (agent_id IS NULL OR agent_id NOT IN (SELECT id FROM agent WHERE diller = 1))
       ORDER BY balans ASC LIMIT 5
     `, { type: sequelize.QueryTypes.SELECT });
     const top_qarzdorlar = qarzRows.map(r => ({

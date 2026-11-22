@@ -22,7 +22,8 @@ const { MijozModel, MijozKategoriyaModel } = require('../../models/mijoz.model')
 const { MarshrutRejaModel, TashrifModel } = require('../../models/marshrut.model');
 const { NarxRuyxatModel, NarxRuyxatQatorModel } = require('../../models/narxRuyxat.model');
 const { ok, fail, SABABLAR, summaOl, mobilKalit, mobilVaqt, takrorXato } = require('./shared');
-const { ASOSIY_OMBOR, agentOmbori, agentBrakOmbori } = require('../../utils/ombor.utils');
+const { ASOSIY_OMBOR, agentOmbori, sotuvOmbori, brakOmbori } = require('../../utils/ombor.utils');
+const Diller = require('../../utils/diller.utils');
 const HttpException = require('../../utils/HttpException.utils');
 const KassaModel = require('../../models/kassa.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
@@ -59,6 +60,13 @@ function avtoAgent(req, res) {
     return null;
   }
   return req.currentAgent;
+}
+
+/* 2026-11-29: dillerda yo'q oqimlar (yuklash so'rovi, kun yopish, naqd topshiruv) */
+function dillerEmas(req, res) {
+  const a = avtoAgent(req, res); if (!a) return null;
+  if (a.diller) { fail(res, "Bu amal diller uchun emas — tovar kompaniyadan Dillerlar bo'limi orqali beriladi", 403); return null; }
+  return a;
 }
 
 const AGENT_BEKOR = 'Agent bekor qildi';
@@ -103,11 +111,13 @@ function mobilQatorlar(products) {
 
 /* Agent mashinasidagi hozirgi tovarlar, narx bilan */
 async function mashinaTovarlari(agent) {
-  const ombor = agentOmbori(agent.fullname);
+  const ombor = sotuvOmbori(agent);
   const map = await omborQoldiq(ombor);
   const ids = Object.keys(map).filter(id => map[id].qoldiq > EPS).map(Number);
+  // Diller: narx — o'z narx ro'yxatidan (bo'lmasa 0), kompaniya narxi emas
+  const dNarx = agent.diller ? await Diller.narxlarOl(agent.id) : null;
   const [narx, tovarlar] = await Promise.all([
-    narxMap(ids),
+    dNarx ? Object.fromEntries(ids.map(id => [id, { chakana_narx: dNarx[String(id)] || 0 }])) : narxMap(ids),
     ids.length ? TovarModel.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id', 'blokdagi_soni', 'turkum', 'olchov_birligi'], raw: true }) : [],
   ]);
   // Turkum — tovar kartasidan (Sozlamalar → Turkumlar); register yozuvidagi eski nom faqat zaxira
@@ -150,6 +160,7 @@ function eskiKeyingiQadam(kun, mashinaDona, qabulKutilmoqda) {
 
 /* "Mening kunim" — avtolavkaHolat va avtolavkaSinxron uchun umumiy */
 async function holatHisobla(agent, sana, tayyorMashina = null) {
+  if (agent.diller) return Diller.mobilHolat(agent, sana, tayyorMashina || await mashinaTovarlari(agent), { lokalKun, tzOffset });
   let [kun, mashina, qabulsiz, qaytNaqd] = await Promise.all([
     kunHisobla(agent, sana),
     tayyorMashina || mashinaTovarlari(agent),
@@ -202,6 +213,7 @@ async function holatHisobla(agent, sana, tayyorMashina = null) {
 
 /* Ombordagi tovarlar — yuklash so'rovi formasi (oflaynda ham ochilishi uchun sinxronga ham qo'shiladi) */
 async function omborTovarlari(agent, where = { faol: true, turi: 'tovar' }) {   // xom ashyo mashinaga yuklanmaydi
+  if (agent.diller) return [];   // diller asosiy ombordan yuklash so'ramaydi
   const tovarlar = await TovarModel.findAll({
     where, attributes: ['id', 'nomi', 'turkum', 'blokdagi_soni', 'olchov_birligi'], order: [['nomi', 'ASC']], raw: true,
   });
@@ -334,7 +346,7 @@ async function qaytarishNaqdi(agentId, sana) {
 
 /* Agentning brak ombori (qaytarilgan yaroqsiz tovar — sotilmaydi) */
 async function brakTovarlari(agent) {
-  const map = await omborQoldiq(agentBrakOmbori(agent.fullname));
+  const map = await omborQoldiq(brakOmbori(agent));
   return {
     qatorlar: Object.keys(map).filter(id => map[id].qoldiq > EPS).map(id => ({
       tovarId: String(id), tovar: map[id].tovar_nomi || '', turkum: map[id].turkum || '', qoldiq: +map[id].qoldiq.toFixed(3),
@@ -349,7 +361,7 @@ const SAVDO_KUN = 30;
 async function agentSavdolari(agent) {
   const dan = new Date(Date.now() - SAVDO_KUN * 24 * 3600 * 1000);
   const rows = await ArizaModel.findAll({
-    where: { agent_id: agent.id, turi: 'sotish', holat: 'yetkazildi', yetkazilgan_sana: { [Op.gte]: dan } },
+    where: { agent_id: agent.id, turi: agent.diller ? 'diller_sotuv' : 'sotish', holat: 'yetkazildi', yetkazilgan_sana: { [Op.gte]: dan } },
     include: [{ model: ArizaQatorModel, as: 'qatorlar' }],
     order: [['yetkazilgan_sana', 'DESC'], ['id', 'DESC']],
     limit: 2000,
@@ -372,7 +384,7 @@ async function agentSavdolari(agent) {
       klientId: String(a.mijoz_id || ''), klient: a.mijoz_nomi || '',
       jami: n(a.jami_summa), tolangan: n(a.tolangan_summa),
       // To'lov holati: plastik — web tasdig'i bo'yicha; naqd to'langan — tasdiqlangan; to'lovsiz (qarz) — null
-      tolovUsuli: pt ? 'plastik' : 'naqd',
+      tolovUsuli: a.turi === 'diller_sotuv' ? (a.tolov_turi === 'plastik' ? 'plastik' : a.tolov_turi === 'qarz' ? 'qarz' : 'naqd') : (pt ? 'plastik' : 'naqd'),
       tolovHolat: pt ? pt.holat : (n(a.tolangan_summa) > 0.005 ? 'tasdiqlangan' : null),
       ...(pt ? { plastikKassa: pt.kassa || null, plastikSumma: n(pt.summa) } : {}),
       qatorlar: [...tov.values()]
@@ -480,13 +492,13 @@ class MobileAvtolavkaController {
 
   // GET yuklashTavsiya/ — oxirgi 14 kun sotuvi asosida ertalabki yuklash taklifi
   yuklashTavsiya = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     ok(res, await tavsiyaShakli(agent));
   };
 
   // GET yuklashTovarlar/?searchKey=&categoryId= — asosiy ombordagi tovarlar (so'rov formasi)
   yuklashTovarlar = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     const where = { faol: true, turi: 'tovar' };
     const key = String(req.query.searchKey || '').trim();
     const kat = String(req.query.categoryId || '').trim();
@@ -498,7 +510,7 @@ class MobileAvtolavkaController {
   // POST yuklashSorov/ { androidId, izoh, products:[{ tovarId, kolbo }] }
   // Bugun uchun ochiq so'rov bo'lsa — uning qatorlari almashtiriladi (bitta so'rov tahrirlanadi).
   yuklashSorov = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     const qatorlar = mobilQatorlar(req.body.products);
     if (!qatorlar.length) return fail(res, "Kamida bitta tovar va miqdor kiriting");
     const sana = bugun();
@@ -559,14 +571,14 @@ class MobileAvtolavkaController {
 
   // GET yuklashlar/?sana= — agentning shu kungi yuklash hujjatlari (so'rov, yuklangan, qabul qilingan)
   yuklashlar = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     const sana = sanaMi(req.query.sana) ? req.query.sana : bugun();
     ok(res, await bugungiYuklashlar(agent, sana));
   };
 
   // POST yuklashQabul/ { docId, izoh } — agent yuklangan tovarni sanab qabul qildi
   yuklashQabul = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     const h = await AvtolavkaHujjatModel.findOne({
       where: { id: req.body.docId, agent_id: agent.id, tur: 'yuklash' }, include: INCLUDE,
     });
@@ -584,7 +596,7 @@ class MobileAvtolavkaController {
 
   // POST yuklashBekor/ { docId } — agent o'z so'rovini qaytarib oladi (faqat tasdiqlanmagan)
   yuklashBekor = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     // Qulf + qayta tekshiruv: omborchi shu paytda tasdiqlayotgan bo'lsa (tovar mashinaga o'tgan)
     // hujjat "bekor" bo'lib qolmasin — ikkinchisi tasdiqlash commit bo'lishini kutadi.
     const natija = await sequelize.transaction(async (t) => {
@@ -604,7 +616,7 @@ class MobileAvtolavkaController {
 
   // GET kunYakuni/?sana= — omborga nima topshirishi kerak: tovar ro'yxati va naqd
   kunYakuni = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     const sana = sanaMi(req.query.sana) ? req.query.sana : bugun();
     const [kun, mashina] = await Promise.all([kunHisobla(agent, sana, { tafsilot: true }), mashinaTovarlari(agent)]);
     const T = kun.tovar, P = kun.pul;
@@ -642,7 +654,7 @@ class MobileAvtolavkaController {
   // POST kunniYopish/ { naqdSumma, izoh }       — savdo tugadi, topshirishga tayyorman
   // POST kunniYopish/ { bekor: true }           — xato bosilgan bo'lsa qayta ochish
   kunniYopish = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     // Oflayn ilova kunni yopgan sanani yuboradi (keyin internet bo'lganda keladi) — 3 kundan eski bo'lmasin
     const kecha3 = kunKey(new Date(Date.now() - 3 * 24 * 3600 * 1000));   // mahalliy sana (bugun() bilan bir xil)
     const sana = sanaMi(req.body.sana) && req.body.sana >= kecha3 && req.body.sana <= bugun() ? req.body.sana : bugun();
@@ -720,15 +732,16 @@ class MobileAvtolavkaController {
       MarshrutRejaModel.findAll({ where: { agent_id: agent.id, sana }, order: [['tartib', 'ASC'], ['id', 'ASC']], raw: true }),
       TashrifModel.findAll({ where: { agent_id: agent.id, sana }, order: [['id', 'ASC']], raw: true }),
       omborTovarlari(agent),
-      tavsiyaShakli(agent).catch(() => null),
-      bugungiYuklashlar(agent, sana),
+      agent.diller ? null : tavsiyaShakli(agent).catch(() => null),
+      agent.diller ? [] : bugungiYuklashlar(agent, sana),
       brakTovarlari(agent),
       agentSavdolari(agent),
       agent.territoriya_id ? TerritoriyaModel.findByPk(agent.territoriya_id, { attributes: ['id', 'nomi'], raw: true }) : null,
-      agentPlastikKassalar(agent),
-      pulBloki(agent),
-      agentKochirishlari(agent.id),   // 2026-11-26: agentdan agentga ko'chirishlar (30 kun, ikki yo'nalish)
+      agent.diller ? [] : agentPlastikKassalar(agent),
+      agent.diller ? null : pulBloki(agent),
+      agent.diller ? [] : agentKochirishlari(agent.id),   // 2026-11-26: agentdan agentga ko'chirishlar (30 kun, ikki yo'nalish)
     ]);
+    const dillerBlok = agent.diller ? await Diller.mobilBlok(agent) : null;   // 2026-11-29
 
     const tovarIds = mashina.qatorlar.map(q => Number(q.tovarId));
     const [narx, buyumlar] = await Promise.all([
@@ -742,7 +755,7 @@ class MobileAvtolavkaController {
       serverVaqt: new Date(),
       sana,
       agent: {
-        id: agent.id, ism: agent.fullname, ombor: mashina.ombor, brakOmbor: agentBrakOmbori(agent.fullname),
+        id: agent.id, ism: agent.fullname, ombor: mashina.ombor, brakOmbor: brakOmbori(agent), diller: !!agent.diller,
         viloyat: viloyat ? { id: viloyat.id, nomi: viloyat.nomi } : null,
       },
       // Super agent biriktirilgan agentni ko'ryapti (x-kuzat-agent) — ilova faqat o'qish rejimida
@@ -759,6 +772,8 @@ class MobileAvtolavkaController {
       // 2026-11-22: plastik to'lov uchun kassalar (agent viloyatidagi faol plastik kassalar) va agent puli
       kassalar: kassalar.map(k => ({ id: k.id, nomi: k.nomi })),
       pul,
+      // 2026-11-29: diller — kompaniyaga qarzi, hujjatlar tarixi (90 kun), o'z narx ro'yxati; agentda null
+      diller: dillerBlok,
       mijozlar: mijozlar.map(m => {
         const balans = n(m.balans);
         const rid = m.kategoriya_id ? narx.katRuyxat[m.kategoriya_id] : null;
@@ -783,9 +798,10 @@ class MobileAvtolavkaController {
         tashrifId: t.id, klientId: String(t.mijoz_id), checkinVaqt: t.checkin_vaqt, checkoutVaqt: t.checkout_vaqt,
         natija: t.natija || null, arizaId: t.ariza_id ? String(t.ariza_id) : null,
       })),
-      narx: narx.javob,
+      // Diller: narx erkin — viloyat qoidasi yo'q
+      narx: agent.diller ? { ...narx.javob, viloyat: {}, viloyatQoida: false } : narx.javob,
       // Oflayn yuklash so'rovi va Mashina ekrani uchun
-      ombor, tavsiya, yuklashlar,
+      ombor, tavsiya: agent.diller ? null : tavsiya, yuklashlar,
       sabablar: SABABLAR.filter(x => x.tip === 'Причина').map(x => ({ id: x.id, name: x.name, neytral: !!x.neytral })),
       reytingQoida: await reytingQoidalari(),
     });
@@ -795,7 +811,7 @@ class MobileAvtolavkaController {
   agentlarim = async (req, res) => {
     const sup = req.kuzatuv ? req.superAgent : req.currentAgent;
     if (req.currentRole !== 'agent' || !sup || !sup.super_agent) throw new HttpException(403, 'Bu oyna faqat super agent uchun');
-    const agentlar = await AgentModel.findAll({ where: { super_agent_id: sup.id, faol: true }, order: [['fullname', 'ASC']] });
+    const agentlar = await AgentModel.findAll({ where: { super_agent_id: sup.id, faol: true, diller: false }, order: [['fullname', 'ASC']] });
     const tIds = [...new Set(agentlar.map(a => a.territoriya_id).filter(Boolean))];
     const viloyatlar = new Map(tIds.length
       ? (await TerritoriyaModel.findAll({ where: { id: tIds }, attributes: ['id', 'nomi'], raw: true })).map(t => [t.id, t.nomi]) : []);
@@ -835,7 +851,7 @@ class MobileAvtolavkaController {
         const ariza = await qulflabOl(ArizaModel, sorov.savdoId, t);
         if (!ariza) throw new HttpException(404, 'Sotuv topilmadi');
         if (Number(ariza.agent_id) !== Number(agent.id)) throw new HttpException(403, 'Bu sotuv sizga tegishli emas');
-        if (ariza.turi !== 'sotish' || ariza.holat !== 'yetkazildi') {
+        if (ariza.turi !== (agent.diller ? 'diller_sotuv' : 'sotish') || ariza.holat !== 'yetkazildi') {
           throw new HttpException(400, `Faqat yetkazilgan sotuvga qaytarish qilinadi (hujjat: ${ariza.turi}, ${ariza.holat})`);
         }
         // Parallel takror ariza qulfidan keyin ko'rinadi
@@ -900,7 +916,7 @@ class MobileAvtolavkaController {
           eski_jami: eskiJami, yangi_jami: yangiJami, izoh: sorov.izoh, sana: vaqt,
         }, { transaction: t });
 
-        const ombor = agentOmbori(agent.fullname), brakOmbor = agentBrakOmbori(agent.fullname);
+        const ombor = sotuvOmbori(agent), brakOmbor = brakOmbori(agent);
         await SavdoQaytarishQatorModel.bulkCreate(bolaklar.map(b => ({
           qaytarish_id: qaytarish.id, ariza_qator_id: b.qator.id, tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi,
           dona: b.dona, narx: b.narx, summa: b.summa, yaroqli: b.yaroqli, ombor: b.yaroqli ? ombor : brakOmbor, sabab: b.sabab,
@@ -909,7 +925,7 @@ class MobileAvtolavkaController {
           tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi || '', turkum: b.qator.turkum || null,
           ombor: b.yaroqli ? ombor : brakOmbor, tur: 'qaytarma_kirim',
           // manba — asl sotuv (hisobotlar 'qaytarma' ni ariza bilan bog'laydi); tafsilot savdo_qaytarish jadvalida
-          manba_tur: 'qaytarma', manba_id: ariza.id,
+          manba_tur: agent.diller ? 'diller_qaytarma' : 'qaytarma', manba_id: ariza.id,
           donada: b.dona, bloklarda: 0, qutilarda: 0, hajm: 0, kirim_narx: 0, sotuv_narx: b.narx, summa: b.summa, sana: vaqt,
         })), { transaction: t });
 
@@ -924,7 +940,15 @@ class MobileAvtolavkaController {
           if (sorov.tolov === 'qarz' && mijoz) {
             await MijozModel.increment('balans', { by: kamaydi, where: { id: mijoz.id }, transaction: t });
           }
-          if (sorov.tolov === 'naqd') {
+          if (sorov.tolov === 'naqd' && agent.diller) {
+            // 2026-11-29: diller mijozga o'z pulidan qaytardi — kompaniya kassasi/jurnaliga yozilmaydi
+            const { DillerPulModel } = require('../../models/diller.model');
+            await DillerPulModel.create({
+              diller_id: agent.id, tur: 'chiqim', kategoriya: 'qaytarish', usul: 'naqd', summa: kamaydi,
+              mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, ariza_id: ariza.id, qaytarish_id: qaytarish.id,
+              izoh: `${ariza.raqam || ariza.id} — qaytarish, naqd mijozga qaytarildi`.slice(0, 255), sana: vaqt,
+            }, { transaction: t });
+          } else if (sorov.tolov === 'naqd') {
             const kassa = await KassaModel.create({
               tur: 'chiqim', kategoriya: 'sotuv_qaytarish', summa: kamaydi, tolov_usul: 'naqt',
               manba_tur: 'savdo_qaytarish', manba_id: qaytarish.id, mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi,
@@ -960,7 +984,7 @@ class MobileAvtolavkaController {
   // Ikkalasi ham 'kutilmoqda' → tasdiqda majburiyat kamayadi, rad — yozuv qoladi.
   // summa ≤ qo'ldagi naqd − tasdiq kutilayotgan topshiruvlar, aks holda 400. mobilId — takror himoyasi.
   pulTopshirish = async (req, res) => {
-    const agent = avtoAgent(req, res); if (!agent) return;
+    const agent = dillerEmas(req, res); if (!agent) return;
     const b = req.body || {};
     const summa = summaOl(b.summa, { xabar: "Summa noto'g'ri" });
     if (!(summa > 0)) throw new HttpException(400, "Summa 0 dan katta bo'lishi kerak");
@@ -1000,6 +1024,12 @@ class MobileAvtolavkaController {
     }
     if (r.takror) return takrorTekshir(r.takror);
     ok(res, javob(r.row), 'Topshiruv yuborildi — kassir tasdiqlashi kutilmoqda');
+  };
+
+  // POST dillerNarxlari/ { narxlar: { "<tovarId>": number|null } } — dillerning o'z narx ro'yxati (upsert, null — o'chirish)
+  dillerNarxlari = async (req, res) => {
+    if (req.currentRole !== 'agent' || !req.currentAgent || !req.currentAgent.diller) throw new HttpException(403, 'Bu amal faqat diller uchun');
+    ok(res, await Diller.narxlarSaqla(req.currentAgent, req.body || {}), 'Narxlar saqlandi');
   };
 
   // GET agentSinxron/ — DISTRIBUTSIYA (pre-sale) agenti uchun oflayn nusxa, bitta so'rovda:

@@ -130,6 +130,7 @@ router.post('/savdoQaytarish',     mobileAuth(), h(c.savdoQaytarish));     // so
 router.post('/pulTopshirish',      mobileAuth(), h(c.pulTopshirish));      // 2026-11-22: agent naqdni kassaga topshiradi
 router.get('/agentlarim',          mobileAuth(), h(c.agentlarim));         // super agent: biriktirilgan agentlar
 router.get('/agentSinxron',        mobileAuth(), h(c.agentSinxron));   // distributsiya agenti (zakaz) oflayn nusxasi
+router.post('/dillerNarxlari',     mobileAuth(), h(c.dillerNarxlari)); // 2026-11-29: diller narx ro'yxati
 router.post('/buyumHarakat',       mobileAuth(), h(c.buyumHarakat));   // 2026-11-28: buyum mijozga / mijozdan
 router.get('/mashinaQoldiq',       mobileAuth(), h(c.mashinaQoldiq));
 router.get('/yuklashTavsiya',      mobileAuth(), h(c.yuklashTavsiya));

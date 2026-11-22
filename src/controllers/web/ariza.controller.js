@@ -191,7 +191,8 @@ class ArizaController {
     } = req.query;
 
     const where = {};
-    const shartlar = [];
+    // 2026-11-29: dillerning o'z sotuvlari kompaniya buyurtmalari ro'yxatiga kirmaydi (diller kartasida — dillerlar/:id/sotuvlar)
+    const shartlar = [{ turi: { [Op.ne]: 'diller_sotuv' } }];
     // Kanal: distributsiya (agent zakazi → ombor → dostavchik) yoki avtolavka (mashinadan to'g'ridan-to'g'ri)
     if (kanalSharti(kanal)) shartlar.push(kanalSharti(kanal));
     // holat bir nechta bo'lishi mumkin: "tasdiqlangan,yigilmoqda,yolda"
@@ -932,7 +933,8 @@ class ArizaController {
   // ── GET /arizalar/statistika ──────────────────────────────
   statistika = async (req, res) => {
     const k = kanalSharti(req.query.kanal);
-    const w = (x) => (k ? { [Op.and]: [k, x] } : x);
+    const dillerEmas = { turi: { [Op.ne]: 'diller_sotuv' } };   // 2026-11-29
+    const w = (x) => ({ [Op.and]: [dillerEmas, ...(k ? [k] : []), x] });
     const [
       jami, yangi, tasdiqlangan, yolda, yetkazildi, bekor,
       bugungi_summa, oylik_summa, yigilmoqda, yolda_sof, avtolavka, distributsiya,
@@ -1035,7 +1037,7 @@ class ArizaController {
             LIMIT 1
           ) AS kirim_narx
         FROM tovar_register r
-        WHERE r.ombor <> :xomOmbor
+        WHERE r.ombor <> :xomOmbor AND r.ombor NOT LIKE 'Diller: %'
           AND r.tovar_id NOT IN (SELECT id FROM tovar WHERE turi = 'xom_ashyo')
         GROUP BY r.tovar_id
         HAVING SUM(r.donada) > 0

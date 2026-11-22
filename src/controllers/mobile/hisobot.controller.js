@@ -5,8 +5,8 @@ const { ok, requireRole } = require('./shared');
 
 const parseDate = (s) => (s ? new Date(String(s).replace(/\./g, '-')) : null);
 
-async function savdoSummary(agentId, from, to) {
-  const where = { turi: 'sotish' };
+async function savdoSummary(agentId, from, to, diller = false) {
+  const where = { turi: diller ? 'diller_sotuv' : 'sotish' };
   if (agentId) where.agent_id = agentId;
   if (from && to) where.createdAt = { [Op.gte]: from, [Op.lt]: to };
   const row = await ArizaModel.findOne({
@@ -49,7 +49,7 @@ class MobileHisobotController {
     const day = parseDate(req.query.date) || new Date();
     const from = new Date(day); from.setHours(0, 0, 0, 0);
     const to = new Date(from); to.setDate(to.getDate() + 1);
-    const s = await savdoSummary(req.currentAgent.id, from, to);
+    const s = await savdoSummary(req.currentAgent.id, from, to, !!req.currentAgent.diller);
     ok(res, [{
       visited: '0', along_route: '0', remaining_places: '0', no_along_route: '0',
       Order_quantity: String(s.soni), total_Number_Order: String(s.soni),
@@ -65,7 +65,7 @@ class MobileHisobotController {
     const from = parseDate(req.query.date1);
     const to = parseDate(req.query.date2);
     if (to) to.setDate(to.getDate() + 1);
-    const s = await savdoSummary(req.currentAgent.id, from, to);
+    const s = await savdoSummary(req.currentAgent.id, from, to, !!req.currentAgent.diller);
     ok(res, {
       summa: String(s.summa),
       count: String(s.soni),

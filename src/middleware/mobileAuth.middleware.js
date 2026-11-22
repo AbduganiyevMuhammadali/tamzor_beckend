@@ -79,6 +79,7 @@ const mobileAuth = () => {
         if (rol !== 'agent' || !user.super_agent || !Number.isInteger(targetId) || targetId <= 0) rad();
         const target = await AgentModel.findOne({ where: { id: targetId } });
         if (!target || !target.faol || Number(target.super_agent_id) !== Number(user.id) || Number(target.id) === Number(user.id)) rad();
+        if (target.diller || user.diller) rad();   // 2026-11-29: super agent dillerni kuzatmaydi
         req.superAgent = user;
         req.currentAgent = target;
         req.kuzatuv = true;

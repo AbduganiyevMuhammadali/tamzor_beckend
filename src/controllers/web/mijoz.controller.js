@@ -88,6 +88,8 @@ class MijozController {
       if (c) where.reyting = { [Op.between]: [c.dan, c.gacha] };
     }
     if (qarzdor === '1') where.balans = { [Op.lt]: 0 };
+    // 2026-11-29: qarzdorlar ro'yxati — kompaniya debitorligi (diller mijozlari faqat agent_id bilan so'ralsa)
+    if (qarzdor === '1' && !agent_id) where[Op.and] = [require('../../utils/diller.utils').dillerMijozEmasWhere()];
     const order = tartib === 'reyting' ? [['reyting', 'ASC'], ['nomi', 'ASC']]
       : tartib === 'reyting_desc' ? [['reyting', 'DESC'], ['nomi', 'ASC']] : [['nomi', 'ASC']];
 
@@ -116,7 +118,8 @@ class MijozController {
         COUNT(*) jami, ROUND(AVG(reyting)) ortacha,
         SUM(balans < 0) qarzdor, COALESCE(-SUM(CASE WHEN balans < 0 THEN balans END), 0) qarz,
         SUM(tolov_vada_sana IS NOT NULL AND tolov_vada_sana < CURDATE() AND balans < 0) vada_otgan
-      FROM mijoz WHERE deletedAt IS NULL AND faol = 1`, { type: sequelize.QueryTypes.SELECT });
+      FROM mijoz WHERE deletedAt IS NULL AND faol = 1
+        AND (agent_id IS NULL OR agent_id NOT IN (SELECT id FROM agent WHERE diller = 1))`, { type: sequelize.QueryTypes.SELECT });
     res.send({
       darajalar: DARAJALAR.map(d => ({ kod: d.kod, nom: d.nom, min: d.min, soni: Number(r[d.kod]) || 0 })),
       jami: Number(r.jami) || 0, ortacha: Number(r.ortacha) || 0,
@@ -192,6 +195,13 @@ class MijozController {
       // Boshlang'ich qoldiq o'zgarsa — joriy balans shu farqga suriladi (savdo/to'lovlar tarixi o'z joyida qoladi)
       const yangi = body.boshlangich_balans;
       const farq = (yangi === undefined || yangi === null) ? 0 : +(Number(yangi) - parseFloat(m.boshlangich_balans || 0)).toFixed(2);
+      // 2026-11-29: ochiq hisobli mijoz kompaniya ↔ diller o'rtasida o'tkazilmaydi (qarz egasi almashib qolardi)
+      if (body.agent_id !== undefined && Number(body.agent_id || 0) !== Number(m.agent_id || 0) && Math.abs(parseFloat(m.balans) || 0) > 0.005) {
+        const dillerMi = async (id) => !!id && !!(await AgentModel.count({ where: { id, diller: true }, transaction: t }));
+        if (await dillerMi(m.agent_id) !== await dillerMi(body.agent_id)) {
+          throw new HttpException(400, `Mijozning ochiq hisobi bor (balans ${+parseFloat(m.balans).toFixed(2)}) — kompaniya va diller o'rtasida o'tkazishdan oldin hisobni yoping`);
+        }
+      }
       await m.update(body, { transaction: t });
       if (Math.abs(farq) > 0.005) await MijozModel.increment('balans', { by: farq, where: { id: m.id }, transaction: t });
       return m;

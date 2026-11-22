@@ -44,7 +44,7 @@ async function buildUserData(user, token, rol = 'agent') {
     isConfirmation: isAgent && rollar.includes('tasdiq'),
     editLocation: isAgent,
     add_client: isAgent,
-    location: true,
+    location: !(isAgent && user.diller),
     // Ish vaqti — shu oraliqda ilova marshrutni (GPS) yozadi. .env: GPS_BOSH=08:00, GPS_OXIR=20:00
     // (demo / tekshiruv instansiyasida 00:00–23:59 — tekshiruvchi istalgan vaqtda ko'ra olsin)
     locationStart: `0001-01-01T${soatEnv('GPS_BOSH', '08:00')}:00`,
@@ -57,7 +57,11 @@ async function buildUserData(user, token, rol = 'agent') {
     oneSell: false,
     returnView: !isAgent,
     // 2026-11-25: web panelda agent kartasidagi "Narxni o'zgartirish" bayrog'i (standart — yo'q)
-    editPrice: isAgent && !!user.narx_ozgartirish,
+    // 2026-11-29: diller narxni erkin qo'yadi (editPrice doim true)
+    editPrice: isAgent && (!!user.narx_ozgartirish || !!user.diller),
+    // 2026-11-29: DILLER — hamkor (o'z ombori, erkin narx, kassa/topshiruv yo'q). GPS kuzatuvi dillerda yo'q.
+    diller: isAgent && !!user.diller,
+    gps: !(isAgent && user.diller),
     // Yangi Flutter ilova uchun: asosiy rol va ochiq rollar ro'yxati
     // 2026-11-21: faqat 2 rol — 'agent' va 'super_agent' (rollar = ['agent'] + 'super_agent')
     asosiyRol: asosiyRol(user, rol),

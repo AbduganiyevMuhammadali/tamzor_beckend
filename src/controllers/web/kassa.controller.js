@@ -17,6 +17,7 @@ const KATEGORIYA = {
   boshqa_daromad:    { label: 'Boshqa daromad',       tur: 'kirim' },
   boshlangich_kapital: { label: 'Boshlang\'ich qoldiq (kapital)', tur: 'kirim' },   // tizimga o'tishdagi pul / egadan kiritilgan — daromad emas
   yetkazuvchi_tolov: { label: 'Yetkazuvchiga to\'lov', tur: 'chiqim' },
+  diller_tolov:      { label: 'Diller to\'lovi',       tur: 'kirim' },    // 2026-11-29: dillerlar/:id/berish|tolov (tizim)
   xarajat:           { label: 'Xarajat',              tur: 'chiqim' },
   ish_haqi:          { label: 'Ish haqi',             tur: 'chiqim' },
   ijara:             { label: 'Ijara',                tur: 'chiqim' },
@@ -34,7 +35,7 @@ const KATEGORIYA = {
  * sotuv) ham to'g'rilaydi. Kassa sahifasidan kiritilsa hisob buziladi. */
 const TIZIM_KATEGORIYA = new Set([
   'sotuv', 'sotuv_qaytarish', 'dostavchik_inkassatsiya', 'yetkazuvchi_tolov', 'ishlab_chiqarish',
-  'qarz_berildi', 'qarz_qaytdi', 'qarz_olindi', 'qarz_qaytarildi',
+  'qarz_berildi', 'qarz_qaytdi', 'qarz_olindi', 'qarz_qaytarildi', 'diller_tolov',
 ]);
 
 const TOLOV_USUL = ['naqt', 'karta', 'bank'];       // kassa.tolov_usul ENUM bilan bir xil

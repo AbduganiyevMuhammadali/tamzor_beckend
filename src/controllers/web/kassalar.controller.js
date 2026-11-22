@@ -342,7 +342,7 @@ class KassalarController {
 
   /* GET /kassalar/agentlar?territoriya_id=&faol= — har agent majburiyati */
   agentlar = async (req, res) => {
-    const where = {};
+    const where = { diller: false };   // 2026-11-29: diller puli — kompaniya majburiyati emas
     if (req.query.territoriya_id) where.territoriya_id = idOl(req.query.territoriya_id, 'territoriya_id');
     if (req.query.faol !== undefined && req.query.faol !== '') where.faol = boolOl(req.query.faol, 'faol');
     const agentlar = await AgentModel.findAll({ where, attributes: ['id', 'fullname', 'territoriya_id', 'super_agent_id', 'faol'], order: [['fullname', 'ASC']], raw: true });

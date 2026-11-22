@@ -1138,7 +1138,7 @@ class HisobotController {
         COALESCE(SUM(CASE WHEN ar.holat='yetkazildi' THEN 1 ELSE 0 END), 0) AS yetkazilgan
       FROM agent a
       LEFT JOIN ariza ar ON ar.agent_id = a.id AND ${arizaWhere}
-      WHERE a.deletedAt IS NULL AND a.faol = 1
+      WHERE a.deletedAt IS NULL AND a.faol = 1 AND a.diller = 0
       GROUP BY a.id, a.fullname, a.plan_summa
       ORDER BY savdo_summa DESC
     `, {
@@ -1182,7 +1182,7 @@ class HisobotController {
     const trekBilan = req.query.trek !== 'false';
 
     const agentlar = await AgentModel.findAll({
-      where: { faol: true },
+      where: { faol: true, diller: false },   // 2026-11-29: dillerda GPS yo'q
       attributes: ['id', 'fullname', 'telefon'],
       order: [['fullname', 'ASC']],
       raw: true,
@@ -1360,7 +1360,7 @@ class HisobotController {
   // Agentlar ro'yxati (hisobot filtrlari uchun)
   agentlarRuyxat = async (req, res) => {
     const rows = await AgentModel.findAll({
-      where: { faol: true },
+      where: { faol: true, diller: false },   // 2026-11-29: dillerlar kompaniya agent hisobotlariga kirmaydi
       attributes: ['id', 'fullname'],
       order: [['fullname', 'ASC']],
     });
@@ -2055,7 +2055,7 @@ class HisobotController {
         raw: true, limit: LIMIT,
       }),
       AgentModel.findAll({
-        where: { faol: true },
+        where: { faol: true, diller: false },
         attributes: ['id', 'fullname', 'telefon'],
         order: [['fullname', 'ASC']], raw: true,
       }),
@@ -2258,7 +2258,7 @@ class HisobotController {
     const [tashriflar, rejalar, agentlar] = await Promise.all([
       TashrifModel.findAll({ where: tashrifWhere, order: [['sana', 'DESC'], ['checkin_vaqt', 'ASC']], limit: LIMIT, raw: true }),
       MarshrutRejaModel.findAll({ where: rejaWhere, attributes: ['id', 'agent_id', 'mijoz_id', 'sana'], raw: true }),
-      AgentModel.findAll({ attributes: ['id', 'fullname', 'telefon'], order: [['fullname', 'ASC']], raw: true }),
+      AgentModel.findAll({ where: { diller: false }, attributes: ['id', 'fullname', 'telefon'], order: [['fullname', 'ASC']], raw: true }),
     ]);
 
     const agentNomi = {};
