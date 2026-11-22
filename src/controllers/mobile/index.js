@@ -16,6 +16,7 @@ const hisobot = require('./hisobot.controller');
 const tashrif = require('./tashrif.controller');
 const avtolavka = require('./avtolavka.controller');
 const dostavchik = require('./dostavchik.controller');
+const buyum = require('./buyum.controller');
 
 module.exports = {
   // 14. Bootstrap config
@@ -128,6 +129,7 @@ module.exports = {
   savdoQaytarish: avtolavka.savdoQaytarish,
   pulTopshirish: avtolavka.pulTopshirish,
   agentSinxron: avtolavka.agentSinxron,
+  buyumHarakat: buyum.buyumHarakat,   // 2026-11-28: buyumlar (mijozga / mijozdan)
   yuklashTavsiya: avtolavka.yuklashTavsiya,
   yuklashTovarlar: avtolavka.yuklashTovarlar,
   yuklashSorov: avtolavka.yuklashSorov,

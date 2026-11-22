@@ -142,7 +142,18 @@ async function mijozRuxsat(req, mijoz) {
   return !!bor;
 }
 
+/* SOTUV / BUYUM mijoz ruxsati (saveSell, buyumHarakat): mijozRuxsat yoki (super agent) mijoz egasi —
+   unga biriktirilgan agent */
+async function sotuvMijozRuxsat(req, mijoz) {
+  if (await mijozRuxsat(req, mijoz)) return true;
+  const a = req.currentAgent;
+  if (req.currentRole !== 'agent' || !a || !a.super_agent || mijoz.agent_id == null) return false;
+  const AgentModel = require('../../models/agent.model');
+  const egasi = await AgentModel.findByPk(mijoz.agent_id, { attributes: ['id', 'super_agent_id'] });
+  return !!egasi && Number(egasi.super_agent_id) === Number(a.id);
+}
+
 module.exports = {
   ok, raw, fail, requireRole, WEEK_KEYS, PAGE_SIZE, PRICE_TYPES, VALYUTALAR, mobilVaqt, mobilKalit, SABABLAR, sababNomi,
-  dostavchiIdOl, takrorXato, mijozRuxsat, summaOl, MAX_SUMMA, koordinataJuft,
+  dostavchiIdOl, takrorXato, mijozRuxsat, sotuvMijozRuxsat, summaOl, MAX_SUMMA, koordinataJuft,
 };

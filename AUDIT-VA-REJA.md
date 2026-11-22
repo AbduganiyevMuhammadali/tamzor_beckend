@@ -306,8 +306,17 @@ Batafsil — `FRONTEND-UCHUN.md` §22, validatsiya — `API-VALIDATSIYA.md` §3.
   - ✅ (2) Kassadan chiqim oqimlari kassa balansini tekshiradi (`kassa_id` bilan yozilganda): `POST /kassa` chiqim, `POST /yetkazuvchilar/:id/tolov`, `PATCH /prixod/:id/tasdiq` (oldindan to'lov), `POST /uchinchi-shaxslar/:id/harakat` (`qarz_berdik`, `qaytardik`). Oxirgi uchtasiga **ixtiyoriy** `kassa_id` qo'shildi (majburiy emas — yuborilmasa avvalgidek kassasiz `naqt`). Yagona yordamchi `agentPul.utils` `ixtiyoriyKassa` / `kassaQulfla` / `kassaBalansTekshir` (xarajat controller'dagi nusxa olib tashlandi), kassalar qatori `FOR UPDATE` — tranzaksiyadagi birinchi o'qish.
   - **Ataylab tekshirilmaydi** (tizim oqimlari, bloklanmasin): mobil `savdoQaytarish` / avtolavka qaytarish naqd chiqimi (agent qo'lidagi pul, `kassa_id` NULL, majburiyat), sotuv bekor (`sotuvBekor` — jurnal yozuvlarini o'chiradi), dostavchik inkassatsiya/kassa-qabul (`kassa_id` siz), ishlab chiqarish yakuni (`ishlab_chiqarish` chiqimi `kassa_id` siz; kassalar tanlovi yo'q — kerak bo'lsa alohida ish), plastik tasdiq / topshiruv (kirim).
   - ✅ (3) Egalik — egasi qarori: o'zgarishsiz (har kassir boshqaning xarajatini tahrirlay/o'chira oladi; tasdiqlangan so'rov yozuvi bundan mustasno — o'chirilmaydi).
-  - Qolgan nozik joy: kirim yozuvini o'chirish (`DELETE /kassa/:id` qo'lda kirim, qarz oldi-berdi `qaytardi` harakatini o'chirish) kassa balansini minusga tushirishi mumkin — chiqim emas, tekshirilmaydi (egasi so'ramagan).
+  - ✅ (2026-11-28, egasi qarori 25) Kirim yozuvini o'chirish (`DELETE /kassa/:id` kassali kirim, qarz oldi-berdi `qaytardi`/`qarz_oldik` harakatini o'chirish) kassa balansini minusga tushira olmaydi — 400 `Kassa balansi manfiy bo'lib qoladi (balans X, o'chiriladigan Y)`, kassa qatori qulflanadi (`agentPul.utils.kassaKirimKamayTekshir`). Kirimni tahrirlash/ko'chirish endpointi yo'q; sotuv bekor yozuvlari `kassa_id` siz. FRONTEND-UCHUN §22.15. Sinov: `test-balans` C bo'limi (80 tekshiruv jami).
 - **Sinov (lokal):** `test-xarajat` (87 tekshiruv), `test-balans` (61: har oqim — balansdan oshsa 400, ichida 200/201, `kassa_id` siz — avvalgidek; 11 juft parallel chiqim — faqat bittasi o'tadi; tahrir; o'chirish taqiqi).
+
+## 5k. Buyumlar — sotilmaydigan jihozlar (2026-11-28)
+
+Batafsil — `FRONTEND-UCHUN.md` §23, validatsiya — `API-VALIDATSIYA.md` §3.27. Migratsiya `20261128000001-buyumlar.js`.
+
+- **Model:** `buyum` (katalog), `buyum_harakat` (o'zgarmas jurnal, `BH-000001`, `mobil_id`/`sorov_id` UNIQUE), `buyum_harakat_qator` (butun `dona > 0`). Qoldiq jadvali yo'q — kompaniya/agent/mijoz qoldig'i jurnaldan SQL bilan.
+- **Qarorlar (egasi + koordinator):** faqat soni; narx/holat/hisobdan chiqarish yo'q; harakat tahrirlanmaydi/bekor qilinmaydi (teskari harakat); qoldiq manfiy bo'lmaydi (buyum qatorlari `FOR UPDATE`); mijozga — faqat ruxsatli mijozga (`shared.sotuvMijozRuxsat`, saveSell bilan bir xil); mijozdan — mijozda bo'lsa (kim bergani muhim emas); ruxsatlar — yozish `avtolavka.create|ombor.edit`, o'qish `avtolavka.view|create, ombor.view|edit`, katalog `ombor.edit`.
+- **Shu ish doirasidagi qarorlar:** `agentga` oluvchisi ham faol bo'lishi shart; faol emas buyum mobil `mijozdan` bilan ham qaytarilishi mumkin; faol emas mijozga berib bo'lmaydi; mobil `mobilId` majburiy; sinxron `katalog` ga `faol` maydoni qo'shildi; `agentSinxron` ham `buyumlar` oladi; javobdagi id'lar son.
+- **Sinov (lokal):** `test-buyum` (103 tekshiruv).
 
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |

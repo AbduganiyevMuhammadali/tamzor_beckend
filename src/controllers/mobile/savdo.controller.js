@@ -5,7 +5,7 @@ const KassaModel = require('../../models/kassa.model');
 const HttpException = require('../../utils/HttpException.utils');
 const { generateRaqam } = require('../../utils/arizaRaqam.utils');
 const { kreditTekshir } = require('../../utils/kreditLimit.utils');
-const { ok, requireRole, mobilVaqt, mobilKalit, takrorXato, summaOl, mijozRuxsat } = require('./shared');
+const { ok, requireRole, mobilVaqt, mobilKalit, takrorXato, summaOl, mijozRuxsat, sotuvMijozRuxsat } = require('./shared');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { agentOmbori, ASOSIY_OMBOR } = require('../../utils/ombor.utils');
@@ -354,15 +354,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
   return sequelize.transaction(ish);
 }
 
-/* saveSell mijoz ruxsati: mijozRuxsat yoki (super agent) mijoz egasi — unga biriktirilgan agent */
-async function sotuvMijozRuxsat(req, mijoz) {
-  if (await mijozRuxsat(req, mijoz)) return true;
-  const a = req.currentAgent;
-  if (req.currentRole !== 'agent' || !a || !a.super_agent || mijoz.agent_id == null) return false;
-  const AgentModel = require('../../models/agent.model');
-  const egasi = await AgentModel.findByPk(mijoz.agent_id, { attributes: ['id', 'super_agent_id'] });
-  return !!egasi && Number(egasi.super_agent_id) === Number(a.id);
-}
+/* saveSell mijoz ruxsati — shared.sotuvMijozRuxsat (buyumHarakat ham shu qoidadan foydalanadi) */
 
 // Tahrirlanadigan (ombordan hali chiqmagan) zakaz holatlari — zaxira.utils OCHIQ_HOLAT bilan bir xil
 const TAHRIR_HOLAT = ['yangi', 'tasdiqlangan', 'yigilmoqda'];

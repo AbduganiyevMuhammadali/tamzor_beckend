@@ -36,6 +36,7 @@ const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { qulflabOl, tovarlarniQulfla } = require('../../utils/qulf.utils');
 const { tzOffset, kunKey } = require('../../utils/tahlil.utils');
 const { agentKochirishlari } = require('../../utils/agentKochirish.utils');
+const { mobilBuyumlar } = require('../../utils/buyum.utils');
 const { agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, topshiruvYarat, kassaTekshir, chekRasmOl } = require('../../utils/agentPul.utils');
 const {
   INCLUDE, EPS, bugun, sanaMi, n, lokalKun,
@@ -730,7 +731,10 @@ class MobileAvtolavkaController {
     ]);
 
     const tovarIds = mashina.qatorlar.map(q => Number(q.tovarId));
-    const narx = await narxSinxron(mijozlar, tovarIds, agent);
+    const [narx, buyumlar] = await Promise.all([
+      narxSinxron(mijozlar, tovarIds, agent),
+      mobilBuyumlar(agent, mijozlar.map(m => m.id)),   // 2026-11-28: buyumlar (sinxrondagi mijozlar to'plami)
+    ]);
     const ruyxatIds = new Set(narx.javob.ruyxatlar.map(r => r.id));
     const agentNomi = new Map((await AgentModel.findAll({ attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]));
 
@@ -750,6 +754,8 @@ class MobileAvtolavkaController {
       // Agentdan agentga ko'chirishlar: yonalish 'kirim' (boshqa agentdan keldi) | 'chiqim' (boshqa agentga ketdi).
       // ombor/mashina qoldig'i bularni allaqachon hisobga olgan.
       kochirishlar,
+      // 2026-11-28: sotilmaydigan buyumlar — katalog, qo'lda, mijozlarda, tarix (FRONTEND-UCHUN §23)
+      buyumlar,
       // 2026-11-22: plastik to'lov uchun kassalar (agent viloyatidagi faol plastik kassalar) va agent puli
       kassalar: kassalar.map(k => ({ id: k.id, nomi: k.nomi })),
       pul,
@@ -1024,7 +1030,10 @@ class MobileAvtolavkaController {
     const bor = new Set(mijozRows.map(m => m.id));
     const qoshimcha = rejalar.map(r => r.mijoz_id).filter(id => id && !bor.has(id));
     const mijozlar = qoshimcha.length ? mijozRows.concat(await MijozModel.findAll({ where: { id: qoshimcha }, raw: true })) : mijozRows;
-    const narx = await narxSinxron(mijozlar, sklad.qatorlar.map(q => Number(q.tovarId)), agent);
+    const [narx, buyumlar] = await Promise.all([
+      narxSinxron(mijozlar, sklad.qatorlar.map(q => Number(q.tovarId)), agent),
+      mobilBuyumlar(agent, mijozlar.map(m => m.id)),   // 2026-11-28: buyumlar
+    ]);
     const ruyxatIds = new Set(narx.javob.ruyxatlar.map(r => r.id));
     const agentNomi = new Map((await AgentModel.findAll({ attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]));
 
@@ -1078,6 +1087,7 @@ class MobileAvtolavkaController {
       })),
       narx: narx.javob,
       buyurtmalar,
+      buyumlar,
       sabablar: SABABLAR.filter(x => x.tip === 'Причина').map(x => ({ id: x.id, name: x.name, neytral: !!x.neytral })),
       reytingQoida: await reytingQoidalari(),
     });
