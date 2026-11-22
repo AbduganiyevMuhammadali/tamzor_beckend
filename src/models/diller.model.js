@@ -33,9 +33,22 @@ DillerHujjatQatorModel.init({
   dona:       { type: DataTypes.DECIMAL(18, 3), allowNull: false, get() { return parseFloat(this.getDataValue('dona') || 0); } },
   narx:       pul('narx'),
   summa:      pul('summa'),
+  brak:       { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },   // 2026-11-30: qaytarish brak omboridan
 }, { sequelize, modelName: 'DillerHujjatQatorModel', tableName: 'diller_hujjat_qator', timestamps: false });
 
 DillerHujjatModel.hasMany(DillerHujjatQatorModel, { foreignKey: 'hujjat_id', as: 'qatorlar' });
+
+/* 2026-11-30: dillerdan qaytarish qaysi berish arizasi qatorini qancha kamaytirgani (migrations/20261130000001) */
+class DillerQaytarishSotuvModel extends Model {}
+DillerQaytarishSotuvModel.init({
+  id:             { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  hujjat_id:      { type: DataTypes.INTEGER, allowNull: false },
+  ariza_id:       { type: DataTypes.INTEGER, allowNull: false },
+  ariza_qator_id: { type: DataTypes.INTEGER, allowNull: false },
+  tovar_id:       { type: DataTypes.INTEGER, allowNull: false },
+  dona:           { type: DataTypes.DECIMAL(18, 3), allowNull: false, get() { return parseFloat(this.getDataValue('dona') || 0); } },
+  summa:          pul('summa'),
+}, { sequelize, modelName: 'DillerQaytarishSotuvModel', tableName: 'diller_qaytarish_sotuv', timestamps: false });
 
 class DillerNarxModel extends Model {}
 DillerNarxModel.init({
@@ -64,4 +77,4 @@ DillerPulModel.init({
   sana:         { type: DataTypes.DATE, allowNull: false },
 }, { sequelize, modelName: 'DillerPulModel', tableName: 'diller_pul', timestamps: true });
 
-module.exports = { DillerHujjatModel, DillerHujjatQatorModel, DillerNarxModel, DillerPulModel };
+module.exports = { DillerHujjatModel, DillerHujjatQatorModel, DillerQaytarishSotuvModel, DillerNarxModel, DillerPulModel };

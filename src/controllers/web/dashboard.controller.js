@@ -1,7 +1,7 @@
 const { Op, fn, col } = require('sequelize');
 const sequelize          = require('../../db/db-sequelize');
 const { sotuvTahlil, tannarxXaritasi, BRAK_OMBOR } = require('../../utils/tahlil.utils');
-const { DILLER_MIJOZ_EMAS, dillerMijozEmasWhere } = require('../../utils/diller.utils');
+const { DILLER_MIJOZ_EMAS, dillerMijozEmasWhere, dillerQarzdorlar } = require('../../utils/diller.utils');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const { PrixodModel }    = require('../../models/prixod.model');
 const { MijozModel } = require('../../models/mijoz.model');
@@ -308,6 +308,12 @@ class DashboardController {
       ) r ON r.mijoz_id = m.id
       WHERE m.deletedAt IS NULL AND m.balans < 0 AND ${DILLER_MIJOZ_EMAS('m')}
     `, { type: sequelize.QueryTypes.SELECT });
+    // 2026-11-30 (qaror 29): dillerlar qarzi ham kompaniya debitorligi ("Diller: <ism>"; muddat — berish + 30 kun, FIFO)
+    const dillerQarzlar = await dillerQarzdorlar();
+    const dillerQarzJami = dillerQarzlar.reduce((s2, d) => s2 + d.qarz, 0);
+    const dillerMuddatiOtgan = dillerQarzlar.reduce((s2, d) => s2 + d.muddati_otgan, 0);
+    const mijozQarzJami = Number(debitorRow?.jami_qarz || 0), mijozMuddatiOtgan = Number(muddatRow?.muddati_otgan || 0);
+    const jamiMuddatiOtgan = Math.round((mijozMuddatiOtgan + dillerMuddatiOtgan) * 100) / 100;
 
     // ── SOTUV (buyurtmalar) — bekor qilinganlardan tashqari barcha sotish arizalari ──
     const SOTUV_SQL = `
@@ -657,7 +663,7 @@ class DashboardController {
       muddati_yaqin: muddatiYaqin.map(r => ({
         tovar_nomi: r.tovar_nomi, muddat: r.yaroqlilik_muddati, qolgan_kun: Number(r.qolgan_kun || 0),
       })),
-      muddati_otgan_qarz: Number(muddatRow?.muddati_otgan || 0),
+      muddati_otgan_qarz: jamiMuddatiOtgan,   // mijozlar + dillerlar
     };
 
     // ── SPARKLINES: har bir KPI kartasi uchun so'nggi 14 kunlik kunlik qator ──
@@ -855,10 +861,11 @@ class DashboardController {
       FROM mijoz WHERE balans < 0 AND deletedAt IS NULL AND (agent_id IS NULL OR agent_id NOT IN (SELECT id FROM agent WHERE diller = 1))
       ORDER BY balans ASC LIMIT 5
     `, { type: sequelize.QueryTypes.SELECT });
-    const top_qarzdorlar = qarzRows.map(r => ({
-      id: r.id, nomi: r.nomi, telefon: r.telefon || '',
-      qarz: Number(r.qarz || 0),
-    }));
+    // Mijozlar (tur 'mijoz') va dillerlar (tur 'diller', id null, diller_id, nomi "Diller: <ism>") birga — eng kattasi 5 ta
+    const top_qarzdorlar = [
+      ...qarzRows.map(r => ({ id: r.id, tur: 'mijoz', nomi: r.nomi, telefon: r.telefon || '', qarz: Number(r.qarz || 0) })),
+      ...dillerQarzlar.map(d => ({ id: null, tur: 'diller', diller_id: d.id, nomi: d.nomi, telefon: d.telefon || '', qarz: d.qarz })),
+    ].sort((a, b) => b.qarz - a.qarz).slice(0, 5);
 
     res.send({
       // KPI kartochkalar
@@ -917,10 +924,17 @@ class DashboardController {
       })),
 
       // Debitorlik (qarzdorlik)
+      // 2026-11-30: jami = mijozlar + dillerlar (diller mijozlarining qarzi kirmaydi); guruhlar alohida
       debitorlik: {
-        jami_qarz:      Number(debitorRow?.jami_qarz || 0),
-        qarzdor_soni:   Number(debitorRow?.qarzdor_soni || 0),
-        muddati_otgan:  Number(muddatRow?.muddati_otgan || 0),
+        jami_qarz:      Math.round((mijozQarzJami + dillerQarzJami) * 100) / 100,
+        qarzdor_soni:   Number(debitorRow?.qarzdor_soni || 0) + dillerQarzlar.length,
+        muddati_otgan:  jamiMuddatiOtgan,
+        mijoz_qarz:     mijozQarzJami,
+        mijoz_soni:     Number(debitorRow?.qarzdor_soni || 0),
+        mijoz_muddati_otgan: mijozMuddatiOtgan,
+        diller_qarz:    Math.round(dillerQarzJami * 100) / 100,
+        diller_soni:    dillerQarzlar.length,
+        diller_muddati_otgan: Math.round(dillerMuddatiOtgan * 100) / 100,
       },
 
       // Savdo rejasi KPI

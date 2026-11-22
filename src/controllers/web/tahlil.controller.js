@@ -23,7 +23,7 @@ const { xarajatTurlari } = require('../../utils/xarajat.utils');
 const { n, yax, miq, foiz, sotuvTahlil } = U;
 const { kunHisobla } = require('../../utils/avtolavka.utils');
 const { agentOmbori, XOM_ASHYO_OMBOR } = require('../../utils/ombor.utils');
-const { DILLER_MIJOZ_EMAS } = require('../../utils/diller.utils');
+const { DILLER_MIJOZ_EMAS, dillerQarzdorlar, DILLER_MUDDAT_KUN } = require('../../utils/diller.utils');
 const { SOTUV_RADIUS_M } = require('../../utils/geo.utils');
 const { sababNomi } = require('../mobile/shared');
 const { qarzQismlari } = require('../../utils/qarz.utils');
@@ -110,31 +110,37 @@ const BOSQICH = [
   { k: 'b60', nom: '31–60 kun',    max: 60 },
   { k: 'b61', nom: '60 kundan ko\'p', max: Infinity },
 ];
-async function qarzTahlil({ agent_id = null } = {}) {
+/* 2026-11-30 (qaror 29): agent filtri bo'lmasa — dillerlar qarzi ham kompaniya debitorligi: qatorlar "Diller: <ism>",
+   tur='diller', id=null, diller_id. Mijoz qatorlari tur='mijoz'. Diller mijozlarining qarzi kirmaydi. */
+async function qarzTahlil({ agent_id = null, diller = !agent_id } = {}) {
   const mijozlar = await Q(`
     SELECT m.id, m.nomi, m.telefon, m.sinf, m.balans, m.kredit_limit, m.tolov_muddati_kun, m.agent_id,
            ag.fullname AS agent
     FROM mijoz m LEFT JOIN agent ag ON ag.id = m.agent_id
     WHERE m.deletedAt IS NULL AND m.balans < 0 AND ${DILLER_MIJOZ_EMAS('m')} ${agent_id ? 'AND m.agent_id = :agent_id' : ''}`, { agent_id });
   const ids = mijozlar.map(m => m.id);
-  const [qismlar, tolovlar] = await Promise.all([
+  const [qismlar, tolovlar, dillerlar] = await Promise.all([
     qarzQismlari(mijozlar),
     ids.length ? Q(`SELECT k.mijoz_id, k.sana, k.summa FROM kassa k
        JOIN (SELECT mijoz_id, MAX(sana) s FROM kassa WHERE tur = 'kirim' AND mijoz_id IN (:ids) GROUP BY mijoz_id) x
          ON x.mijoz_id = k.mijoz_id AND x.s = k.sana
        WHERE k.tur = 'kirim'`, { ids }) : [],
+    diller ? dillerQarzdorlar() : [],
   ]);
+  const dTolov = dillerlar.length ? await Q(`SELECT h.diller_id, h.sana, h.jami summa FROM diller_hujjat h
+       JOIN (SELECT diller_id, MAX(sana) s FROM diller_hujjat WHERE tur = 'tolov' AND diller_id IN (:ids) GROUP BY diller_id) x
+         ON x.diller_id = h.diller_id AND x.s = h.sana WHERE h.tur = 'tolov'`, { ids: dillerlar.map(d => d.id) }) : [];
+  const dTolovMap = {};
+  dTolov.forEach(t => { dTolovMap[t.diller_id] = t; });
   const tolovMap = {};
   tolovlar.forEach(t => { tolovMap[t.mijoz_id] = t; });
 
   const bugun = Date.now();
   const yaqin = [];                       // 7 kun ichida to'lanishi kerak bo'lgan qismlar
-  const rows = mijozlar.map(m => {
-    const qarz = -n(m.balans);
-    const muddat = n(m.tolov_muddati_kun) || 30;
+  const qator = (m, { qarz, muddat, qs, t, yaqinQosh, extra }) => {
     const b = { b7: 0, b30: 0, b60: 0, b61: 0 };
     let eskiKun = 0, otgan = 0, kechikkan = 0, keyingi = null;
-    for (const q of qismlar.get(m.id) || []) {
+    for (const q of qs) {
       const kun = q.yosh_kun === null ? 61 : q.yosh_kun;
       b[BOSQICH.find(x => kun <= x.max).k] += q.summa;
       eskiKun = Math.max(eskiKun, kun);
@@ -145,11 +151,11 @@ async function qarzTahlil({ agent_id = null } = {}) {
         else if (q.tolov_sana === keyingi.sana) keyingi.summa += q.summa;
         const qoldi = Math.round((new Date(`${q.tolov_sana}T00:00:00`) - new Date(new Date().setHours(0, 0, 0, 0))) / 86400000);
         if (qoldi <= 7) yaqin.push({ mijoz_id: m.id, nomi: m.nomi, telefon: m.telefon, agent: m.agent || '—', raqam: q.raqam, ariza_id: q.ariza_id,
-          tolov_sana: q.tolov_sana, belgilangan: q.belgilangan, summa: q.summa, qoldi_kun: qoldi });
+          tolov_sana: q.tolov_sana, belgilangan: q.belgilangan, summa: q.summa, qoldi_kun: qoldi, ...yaqinQosh });
       }
     }
-    const t = tolovMap[m.id];
     return {
+      ...extra.bosh,
       id: m.id, nomi: m.nomi, telefon: m.telefon, sinf: m.sinf, agent_id: m.agent_id, agent: m.agent || '—',
       qarz: yax(qarz), limit: yax(m.kredit_limit), limit_oshgan: n(m.kredit_limit) > 0 && qarz > n(m.kredit_limit),
       muddat_kun: muddat, eng_eski_kun: eskiKun, muddati_otgan: yax(otgan), kechikkan_kun: kechikkan,
@@ -157,8 +163,16 @@ async function qarzTahlil({ agent_id = null } = {}) {
       b7: yax(b.b7), b30: yax(b.b30), b60: yax(b.b60), b61: yax(b.b61),
       oxirgi_tolov_sana: t?.sana || null, oxirgi_tolov: t ? yax(t.summa) : 0,
       tolovsiz_kun: t ? Math.floor((bugun - new Date(t.sana).getTime()) / 86400000) : null,
+      ...extra.oxir,
     };
-  }).sort((a, b) => b.qarz - a.qarz);
+  };
+  const rows = [
+    ...mijozlar.map(m => qator(m, { qarz: -n(m.balans), muddat: n(m.tolov_muddati_kun) || 30, qs: qismlar.get(m.id) || [], t: tolovMap[m.id],
+      yaqinQosh: { tur: 'mijoz' }, extra: { bosh: { tur: 'mijoz' }, oxir: {} } })),
+    ...dillerlar.map(d => qator({ id: null, nomi: d.nomi, telefon: d.telefon, sinf: null, kredit_limit: 0, agent_id: null, agent: 'Diller' },
+      { qarz: d.qarz, muddat: DILLER_MUDDAT_KUN, qs: d.qismlar, t: dTolovMap[d.id], yaqinQosh: { tur: 'diller', diller_id: d.id, mijoz_id: null },
+        extra: { bosh: { tur: 'diller' }, oxir: { diller_id: d.id } } })),
+  ].sort((a, b) => b.qarz - a.qarz);
 
   const jami = rows.reduce((s, r) => {
     s.qarz += r.qarz; s.muddati_otgan += r.muddati_otgan;
@@ -168,6 +182,12 @@ async function qarzTahlil({ agent_id = null } = {}) {
     BOSQICH.forEach(x => { s[x.k] += r[x.k]; });
     return s;
   }, { qarz: 0, muddati_otgan: 0, muddati_otgan_soni: 0, limit_oshgan_soni: 0, vaznli_kun: 0, b7: 0, b30: 0, b60: 0, b61: 0 });
+  // Guruhlar: mijozlar va dillerlar alohida (frontend ajratib ko'rsatadi)
+  const guruh = tur => {
+    const g = rows.filter(r => r.tur === tur);
+    return { qarz: yax(g.reduce((a, r) => a + r.qarz, 0)), soni: g.length, muddati_otgan: yax(g.reduce((a, r) => a + r.muddati_otgan, 0)) };
+  };
+  jami.guruhlar = { mijoz: guruh('mijoz'), diller: guruh('diller') };
 
   yaqin.sort((a, b) => a.tolov_sana.localeCompare(b.tolov_sana) || b.summa - a.summa);
   return { rows, jami, yaqin, bosqichlar: BOSQICH.map(x => ({ k: x.k, nom: x.nom, summa: jami[x.k], soni: rows.filter(r => r[x.k] > 0).length })) };
@@ -220,7 +240,9 @@ class TahlilController {
         zaxira_kun: sotuvTannarxKunlik > 0 ? Math.round(omborQiymat / sotuvTannarxKunlik) : null,
       },
       qarz: {
-        mijozlar: yax(qarz.jami.qarz), qarzdor: qarz.rows.length,
+        // jami = mijozlar + dillerlar (kompaniya debitorligi, 2026-11-30); mijozlar/dillerlar — alohida
+        jami: yax(qarz.jami.qarz), mijozlar: qarz.jami.guruhlar.mijoz.qarz, dillerlar: qarz.jami.guruhlar.diller.qarz,
+        diller_soni: qarz.jami.guruhlar.diller.soni, qarzdor: qarz.rows.length,
         muddati_otgan: yax(qarz.jami.muddati_otgan), muddati_otgan_soni: qarz.jami.muddati_otgan_soni,
       },
       yetkazuvchi: { qarzimiz: yax(yetk[0]?.qarzimiz), soni: n(yetk[0]?.soni) },
@@ -488,7 +510,11 @@ class TahlilController {
     ]);
     const ag = {};
     T.rows.forEach(r => {
-      const x = ag[r.agent_id || 0] = ag[r.agent_id || 0] || { id: r.agent_id, nomi: r.agent, qarz: 0, muddati_otgan: 0, soni: 0 };
+      // Dillerlar — alohida guruh ("Dillerlar"), agentsiz mijozlar bilan aralashmaydi
+      const kalit = r.tur === 'diller' ? 'diller' : (r.agent_id || 0);
+      const x = ag[kalit] = ag[kalit] || (r.tur === 'diller'
+        ? { id: null, nomi: 'Dillerlar', diller: true, qarz: 0, muddati_otgan: 0, soni: 0 }
+        : { id: r.agent_id, nomi: r.agent, diller: false, qarz: 0, muddati_otgan: 0, soni: 0 });
       x.qarz += r.qarz; x.muddati_otgan += r.muddati_otgan; x.soni++;
     });
     res.send({
@@ -497,6 +523,9 @@ class TahlilController {
         muddati_otgan_soni: T.jami.muddati_otgan_soni, limit_oshgan_soni: T.jami.limit_oshgan_soni,
         ortacha_kun: T.jami.qarz ? Math.round(T.jami.vaznli_kun / T.jami.qarz) : 0,
         muddati_otgan_ulush: foiz(T.jami.muddati_otgan, T.jami.qarz),
+        // 2026-11-30: qarz = mijozlar + dillerlar (kompaniya debitorligi); alohida guruhlar
+        mijoz_qarz: T.jami.guruhlar.mijoz.qarz, mijoz_soni: T.jami.guruhlar.mijoz.soni,
+        diller_qarz: T.jami.guruhlar.diller.qarz, diller_soni: T.jami.guruhlar.diller.soni, diller_muddati_otgan: T.jami.guruhlar.diller.muddati_otgan,
       },
       oqim30: { sotildi: yax(oqim[0]?.sotildi), tolandi: yax(oqim[0]?.tolandi), ozgarish: yax(n(oqim[0]?.sotildi) - n(oqim[0]?.tolandi)) },
       bosqichlar: T.bosqichlar.map(b => ({ ...b, summa: yax(b.summa), ulush: foiz(b.summa, T.jami.qarz) })),
@@ -1049,7 +1078,7 @@ class TahlilController {
     /* ── Balans (hozir) ── */
     const kassa = yax(kassaQoldiq[0]?.qoldiq);
     const ombor = yax(omborTur('asosiy')), mashina = yax(omborTur('mashina'));
-    const debitorka = yax(qarz.jami.qarz), kreditorka = yax(yetk[0]?.qarzimiz), avans = yax(yetk[0]?.avans);
+    const debitorka = yax(qarz.jami.qarz), mijozQarz = qarz.jami.guruhlar.mijoz.qarz, dillerQarz = qarz.jami.guruhlar.diller.qarz, kreditorka = yax(yetk[0]?.qarzimiz), avans = yax(yetk[0]?.avans);
     const berilganQarz = yax(uchinchi[0]?.berilgan), olinganQarz = yax(uchinchi[0]?.olingan);
     const aktiv = kassa + ombor + mashina + debitorka + avans + berilganQarz;
     const majburiyat = yax(kreditorka + olinganQarz);
@@ -1058,7 +1087,9 @@ class TahlilController {
         { k: 'kassa', nom: 'Kassadagi pul', summa: kassa, izoh: n(agentNaqd[0]?.summa) > 0 ? `shundan ${Math.round(n(agentNaqd[0].summa)).toLocaleString('ru-RU')} so'm hali ${n(agentNaqd[0].agent)} ta agent qo'lida` : 'kassaga kirgan − chiqqan, butun davr' },
         { k: 'ombor', nom: 'Ombordagi tovar', summa: ombor, izoh: 'tannarx bo\'yicha' },
         { k: 'mashina', nom: 'Won Sell mashinalarida', summa: mashina, izoh: 'agentlar qo\'lidagi tovar' },
-        { k: 'debitorka', nom: 'Mijozlar qarzi', summa: debitorka, izoh: qarz.jami.muddati_otgan > 0 ? `shundan ${Math.round(qarz.jami.muddati_otgan).toLocaleString('ru-RU')} so'm muddati o'tgan` : 'muddati o\'tgani yo\'q' },
+        { k: 'debitorka', nom: 'Mijozlar qarzi', summa: mijozQarz, izoh: qarz.jami.guruhlar.mijoz.muddati_otgan > 0 ? `shundan ${Math.round(qarz.jami.guruhlar.mijoz.muddati_otgan).toLocaleString('ru-RU')} so'm muddati o'tgan` : 'muddati o\'tgani yo\'q' },
+        // 2026-11-30: dillerlar qarzi ham debitorlik (diller mijozlarining qarzi — dillerning o'z hisobi, kirmaydi)
+        ...(dillerQarz ? [{ k: 'diller_qarz', nom: 'Dillerlar qarzi', summa: dillerQarz, izoh: `${qarz.jami.guruhlar.diller.soni} ta diller` + (qarz.jami.guruhlar.diller.muddati_otgan > 0 ? `, shundan ${Math.round(qarz.jami.guruhlar.diller.muddati_otgan).toLocaleString('ru-RU')} so'm muddati o'tgan` : '') }] : []),
         ...(avans ? [{ k: 'avans', nom: 'Yetkazuvchilardagi avans', summa: avans, izoh: 'oldindan to\'langan' }] : []),
         ...(berilganQarz ? [{ k: 'berilgan_qarz', nom: 'Berilgan qarzlar', summa: berilganQarz, izoh: `${n(uchinchi[0]?.berilgan_soni)} ta shaxs bizga qarzdor` }] : []),
       ],

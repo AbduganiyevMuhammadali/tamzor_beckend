@@ -15,6 +15,8 @@ const AGENT_PREFIKS = 'Agent: ';
 /* Xom ashyo savdo tovarlaridan alohida turadi: kirimda shu yerga tushadi,
    ishlab chiqarishga shu yerdan beriladi; tayyor mahsulot esa asosiy skladga kiradi. */
 const XOM_ASHYO_OMBOR = 'Xom ashyo ombori';
+/* Kompaniyaning umumiy brak ombori (yetkazishdagi brak, dillerdan qaytgan brak) — sotiladigan qoldiq emas */
+const BRAK_OMBORI = 'Brak ombori';
 
 /** Tovar turi bo'yicha uning ombori: xom ashyo → Xom ashyo ombori, savdo tovari → asosiy sklad */
 function turOmbori(turi) {
@@ -45,7 +47,7 @@ function agentBrakOmbori(agentNomi) {
 /** Brak ombori (umumiy "Brak ombori" yoki agentning "(brak)" ombori) — sotiladigan qoldiq emas */
 function brakOmboriMi(ombor) {
   const s = String(ombor || '');
-  return s === 'Brak ombori' || s.endsWith(BRAK_SUFFIKS);
+  return s === BRAK_OMBORI || s.endsWith(BRAK_SUFFIKS);
 }
 
 /** Berilgan ombor agentnikimi */
@@ -83,6 +85,6 @@ function brakOmbori(agent) {
 
 module.exports = {
   DILLER_PREFIKS, dillerOmbori, dillerBrakOmbori, dillerOmboriMi, sotuvOmbori, brakOmbori,
-  ASOSIY_OMBOR, XOM_ASHYO_OMBOR, AGENT_PREFIKS, BRAK_SUFFIKS, turOmbori, omborNomi, agentOmbori, agentBrakOmbori,
+  ASOSIY_OMBOR, XOM_ASHYO_OMBOR, BRAK_OMBORI, AGENT_PREFIKS, BRAK_SUFFIKS, turOmbori, omborNomi, agentOmbori, agentBrakOmbori,
   brakOmboriMi, agentOmboriMi, agentNomi,
 };

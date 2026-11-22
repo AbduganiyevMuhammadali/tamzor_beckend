@@ -7,6 +7,7 @@
  * so'raladi, shuning uchun faqat arzon COUNT so'rovlari.
  */
 const sequelize = require('../../db/db-sequelize');
+const { DILLER_MIJOZ_EMAS } = require('../../utils/diller.utils');
 
 const bir = async (sql, replacements = {}) =>
   (await sequelize.query(sql, { replacements, type: sequelize.QueryTypes.SELECT }))[0] || {};
@@ -29,7 +30,7 @@ class NavbatController {
              LEFT JOIN tovar_register r ON r.tovar_id = t.id AND r.ombor = 'Основной склад'
              WHERE t.faol = 1 AND t.deletedAt IS NULL GROUP BY t.id HAVING q < 20) x`),
       bir(`SELECT COUNT(*) qarzdor, COALESCE(-SUM(balans), 0) summa FROM mijoz
-           WHERE deletedAt IS NULL AND balans < 0`),
+           WHERE deletedAt IS NULL AND balans < 0 AND ${DILLER_MIJOZ_EMAS('mijoz')}`),   // diller mijozlari — dillerning o'z hisobi
       bir(`SELECT
              (SELECT COUNT(*) FROM agent WHERE faol = 1 AND deletedAt IS NULL AND avtolavka = 1 AND diller = 0) jami,
              (SELECT COUNT(DISTINCT agent_id) FROM avtolavka_hujjat

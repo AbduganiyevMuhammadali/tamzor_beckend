@@ -7,7 +7,13 @@
  *    hisobotlar uchun ariza yaratiladi (turi='sotish', kanal='diller', mijoz_id NULL, mijoz_nomi "Diller: <ism>"),
  *    diller omboriga kiradi ('diller_berish'). To'langan qismi — kompaniya kassasiga kirim (kategoriya 'diller_tolov').
  *  • Diller qarzi = Σ berish (jami − tolangan) − Σ tolov − Σ qaytarish (diller_hujjat'dan). To'lov web'da, kassaga.
- *  • Dillerdan qaytarish: asosiy omborga 'qaytarma_kirim', qarz dillerning shu tovar bo'yicha OXIRGI berish narxida kamayadi.
+ *  • Dillerdan qaytarish: sog'lom tovar diller omboridan asosiy omborga, brak (qator brak:true) "Diller: <ism> (brak)" dan
+ *    kompaniyaning "Brak ombori"ga ('qaytarma_kirim'). Qiymati — dillerning shu tovar bo'yicha OXIRGI berish narxida
+ *    (sog'lom ham, brak ham). Qarz shu qiymatga kamayadi; qiymat joriy qarzdan oshsa — 400 (qarz hech qachon manfiy emas,
+ *    diller qatori qulflanadi). KOMPANIYA SOTUVI ham shu qiymatga kamayadi: berish arizalari qatorlari (shu tovar, eng
+ *    yangi berishdan boshlab) jami_dona/dona/summa va ariza.jami_summa kamaytiriladi — agent savdoQaytarish modeli kabi,
+ *    shuning uchun ariza'ga asoslangan barcha hisobotlar (tahlil, hisobot, dashboard) "berish − qaytarish" ni ko'rsatadi.
+ *    Iz: diller_qaytarish_sotuv. Kompaniya debitorligi: diller qarzi "Diller: <ism>" sifatida (dillerQarzdorlar).
  *  • Dillerning o'z sotuvi: ariza turi='diller_sotuv' (kompaniya hisobotlari turi='sotish' ni oladi), kassa/agent_register/
  *    plastik navbati/reyting YO'Q; puli diller_pul daftarida; mijozlari (mijoz.agent_id = diller) qarzi mijoz.balans'da,
  *    kompaniya debitorligidan DILLER_MIJOZ_EMAS bilan chiqariladi.
@@ -23,8 +29,8 @@ const TovarRegisterModel = require('../models/tovar_register.model');
 const KassaModel = require('../models/kassa.model');
 const { MijozModel } = require('../models/mijoz.model');
 const { ArizaModel, ArizaQatorModel } = require('../models/ariza.model');
-const { DillerHujjatModel, DillerHujjatQatorModel, DillerNarxModel, DillerPulModel } = require('../models/diller.model');
-const { ASOSIY_OMBOR, dillerOmbori, dillerBrakOmbori } = require('./ombor.utils');
+const { DillerHujjatModel, DillerHujjatQatorModel, DillerQaytarishSotuvModel, DillerNarxModel, DillerPulModel } = require('../models/diller.model');
+const { ASOSIY_OMBOR, BRAK_OMBORI, dillerOmbori, dillerBrakOmbori } = require('./ombor.utils');
 const { mavjudQoldiq } = require('./zaxira.utils');
 const { qulflabOl, tovarlarniQulfla, keyingiTartib, maksRaqam } = require('./qulf.utils');
 const { kunParam, kunBoshi, kunOxiri } = require('./sana.utils');
@@ -81,11 +87,12 @@ function sorovIdOl(v) {
   if (!/^[A-Za-z0-9_.:-]{8,64}$/.test(s)) throw new HttpException(400, "sorov_id noto'g'ri (8–64 belgi: harf, raqam, - _ . :)");
   return s;
 }
-/** qatorlar: [{ tovar_id, dona, narx? }] → [{ tovar_id, dona, narx|null }] (bir tovar bir narxda bir qatorga qo'shiladi) */
-function qatorlarOl(v, { narxBor = false } = {}) {
+/** qatorlar: [{ tovar_id, dona, narx?, brak? }] → [{ tovar_id, dona, narx|null, brak }]
+    (bir tovar bir narxda / bir xil brak belgisida bir qatorga qo'shiladi) */
+function qatorlarOl(v, { narxBor = false, brakBor = false } = {}) {
   if (!Array.isArray(v) || !v.length) throw new HttpException(400, 'qatorlar: kamida bitta tovar kerak');
   if (v.length > 500) throw new HttpException(400, "qatorlar: ko'pi bilan 500 ta");
-  const ruxsat = narxBor ? ['tovar_id', 'dona', 'narx'] : ['tovar_id', 'dona'];
+  const ruxsat = ['tovar_id', 'dona', ...(narxBor ? ['narx'] : []), ...(brakBor ? ['brak'] : [])];
   const map = new Map();
   v.forEach((q, i) => {
     if (!q || typeof q !== 'object' || Array.isArray(q)) throw new HttpException(400, `qatorlar[${i}] obyekt bo'lishi kerak`);
@@ -95,8 +102,10 @@ function qatorlarOl(v, { narxBor = false } = {}) {
     const dona = r3(sonOl(q.dona, `qatorlar[${i}].dona`, { max: 1e9 }));
     if (dona <= 0) throw new HttpException(400, `qatorlar[${i}].dona noldan katta bo'lishi kerak`);
     const narx = narxBor && q.narx !== undefined && q.narx !== null && q.narx !== '' ? r2(sonOl(q.narx, `qatorlar[${i}].narx`)) : null;
-    const kalit = `${id}|${narx === null ? '' : narx}`;
-    const x = map.get(kalit) || { tovar_id: id, dona: 0, narx };
+    if (brakBor && q.brak !== undefined && q.brak !== null && typeof q.brak !== 'boolean') throw new HttpException(400, `qatorlar[${i}].brak true yoki false bo'lishi kerak`);
+    const brak = brakBor && q.brak === true;
+    const kalit = `${id}|${narx === null ? '' : narx}|${brak ? 1 : 0}`;
+    const x = map.get(kalit) || { tovar_id: id, dona: 0, narx, brak };
     x.dona = r3(x.dona + dona);
     map.set(kalit, x);
   });
@@ -146,13 +155,59 @@ async function oxirgiNarxlar(dillerId, transaction = null) {
   return m;
 }
 
-async function dillerOmbor(diller, transaction = null) {
-  const [q, narx] = await Promise.all([omborQoldiq(dillerOmbori(diller.fullname), transaction), oxirgiNarxlar(diller.id, transaction)]);
+/** Diller ombori (brak: true — "Diller: <ism> (brak)") qoldig'i: [{ tovar_id, nomi, dona, narx }] (narx — oxirgi berish narxi) */
+async function dillerOmbor(diller, transaction = null, { brak = false } = {}) {
+  const ombor = brak ? dillerBrakOmbori(diller.fullname) : dillerOmbori(diller.fullname);
+  const [q, narx] = await Promise.all([omborQoldiq(ombor, transaction), oxirgiNarxlar(diller.id, transaction)]);
   const ids = [...q.entries()].filter(([, x]) => x.dona > EPS).map(([id]) => id);
   const tovarlar = ids.length ? await TovarModel.findAll({ where: { id: ids }, attributes: ['id', 'nomi'], raw: true, paranoid: false }) : [];
   const nom = new Map(tovarlar.map(t => [Number(t.id), t.nomi]));
   return ids.map(id => ({ tovar_id: id, nomi: nom.get(id) || q.get(id).nomi, dona: q.get(id).dona, narx: narx.get(id) || 0 }))
     .sort((a, b) => String(a.nomi).localeCompare(String(b.nomi)));
+}
+
+/* ── Kompaniya debitorligi: dillerlar qarzi (qaror 29) ── */
+const DILLER_MUDDAT_KUN = 30;   // diller qarzi to'lov muddati: berish sanasi + 30 kun (mijozdagi standart muddat bilan bir xil)
+const kunB = (d = new Date()) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+const isoK = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/**
+ * Qarzi bor dillerlar (o'chirilganlari ham — qarz haqiqiy): [{ id, fullname, nomi: "Diller: <ism>", telefon, qarz, muddati_otgan, qismlar }]
+ * qismlar — mijoz qarzi qismlari (qarz.utils) shaklida: qarz eng YANGI berishlarga tegishli (FIFO), har berishning
+ * qarzga ketgan qismi = ariza.jami_summa (qaytarishdan keyin) − tolangan; to'lov sanasi = berish + 30 kun.
+ * Diller mijozlarining qarzi bu yerda YO'Q (dillerning o'z hisobi).
+ */
+async function dillerQarzdorlar({ transaction = null } = {}) {
+  const dillerlar = await sequelize.query('SELECT id, fullname, telefon FROM agent WHERE diller = 1', { type: SELECT, transaction });
+  if (!dillerlar.length) return [];
+  const qarzlar = await dillerQarzlari(dillerlar.map(d => d.id), transaction);
+  const qarzdor = dillerlar.filter(d => (qarzlar.get(Number(d.id)) || 0) > 0.5);
+  if (!qarzdor.length) return [];
+  const berishlar = await sequelize.query(`
+    SELECT h.id, h.raqam, h.diller_id, h.sana, h.ariza_id, COALESCE(a.jami_summa, h.jami) jami, COALESCE(a.tolangan_summa, h.tolangan) tolangan
+    FROM diller_hujjat h LEFT JOIN ariza a ON a.id = h.ariza_id
+    WHERE h.tur = 'berish' AND h.diller_id IN (:ids) ORDER BY h.sana DESC, h.id DESC`,
+  { replacements: { ids: qarzdor.map(d => d.id) }, type: SELECT, transaction });
+  const bugun = kunB();
+  return qarzdor.map(d => {
+    const qarz = qarzlar.get(Number(d.id));
+    let qoldi = qarz;
+    const band = new Map();
+    const ss = berishlar.filter(h => Number(h.diller_id) === Number(d.id));
+    for (const h of ss) { if (qoldi <= 0.5) break; const k = Math.max(0, n(h.jami) - n(h.tolangan)); if (k > 0.5) { const x = Math.min(qoldi, k); band.set(h.id, x); qoldi -= x; } }
+    for (const h of ss) { if (qoldi <= 0.5) break; const k = n(h.jami) - (band.get(h.id) || 0); if (k > 0.5) { const x = Math.min(qoldi, k); band.set(h.id, (band.get(h.id) || 0) + x); qoldi -= x; } }
+    const qismlar = [];
+    for (const h of ss) {
+      const summa = band.get(h.id);
+      if (!summa) continue;
+      const sana = kunB(new Date(h.sana));
+      const tolov = new Date(sana); tolov.setDate(tolov.getDate() + DILLER_MUDDAT_KUN);
+      qismlar.push({ ariza_id: h.ariza_id, hujjat_id: h.id, raqam: h.raqam, sana: h.sana, summa: Math.round(summa), tolov_sana: isoK(tolov), belgilangan: false,
+        yosh_kun: Math.max(0, Math.floor((bugun - sana) / 86400000)), kechikkan_kun: Math.max(0, Math.floor((bugun - tolov) / 86400000)) });
+    }
+    if (qoldi > 0.5) qismlar.push({ ariza_id: null, hujjat_id: null, raqam: null, sana: null, summa: Math.round(qoldi), tolov_sana: null, belgilangan: false, yosh_kun: null, kechikkan_kun: null });
+    const muddatiOtgan = qismlar.filter(x => x.tolov_sana === null || x.kechikkan_kun > 0).reduce((s2, x) => s2 + x.summa, 0);
+    return { id: Number(d.id), fullname: d.fullname, nomi: `Diller: ${d.fullname}`, telefon: d.telefon || null, qarz: r2(qarz), muddati_otgan: r2(Math.min(qarz, muddatiOtgan)), qismlar };
+  }).sort((a, b) => b.qarz - a.qarz);
 }
 
 /* ── Agent bayrog'i qoidalari (agent.controller) ──────── */
@@ -221,8 +276,16 @@ async function hujjatBitta(hid) {
   return {
     ...hujjatJson(h, kn.get(Number(h.kassa_id)) || null),
     qatorlar: (h.qatorlar || []).sort((a, b) => a.id - b.id)
-      .map(q => ({ id: q.id, tovar_id: q.tovar_id, tovar_nomi: q.tovar_nomi, dona: r3(q.dona), narx: r2(q.narx), summa: r2(q.summa) })),
+      .map(q => ({ id: q.id, tovar_id: q.tovar_id, tovar_nomi: q.tovar_nomi, dona: r3(q.dona), narx: r2(q.narx), summa: r2(q.summa), brak: !!q.brak })),
+    ...(h.tur === 'qaytarish' ? { sotuv_kamaydi: await sotuvKamaydi(h.id) } : {}),
   };
+}
+/** Qaytarish qaysi berish arizalarini (kompaniya sotuvi) qancha kamaytirgani */
+async function sotuvKamaydi(hujjatId) {
+  const rows = await sequelize.query(`SELECT s.ariza_id, a.raqam, s.tovar_id, SUM(s.dona) dona, SUM(s.summa) summa
+      FROM diller_qaytarish_sotuv s LEFT JOIN ariza a ON a.id = s.ariza_id WHERE s.hujjat_id = :h
+      GROUP BY s.ariza_id, a.raqam, s.tovar_id ORDER BY s.ariza_id DESC, s.tovar_id`, { replacements: { h: hujjatId }, type: SELECT });
+  return rows.map(r => ({ ariza_id: r.ariza_id, ariza_raqam: r.raqam || null, tovar_id: r.tovar_id, dona: r3(r.dona), summa: r2(r.summa) }));
 }
 
 async function raqamOl(t) {
@@ -237,17 +300,19 @@ async function takrorTekshir(sorovId, { dillerId, tur, imzo }) {
   if (Number(bor.diller_id) !== Number(dillerId) || bor.tur !== tur || !imzo(bor)) throw new HttpException(409, 'Bu sorov_id boshqa hujjatga tegishli');
   return { ...(await hujjatBitta(bor.id)), takror: true };
 }
-const qatorImzo = (list) => list.map(q => `${q.tovar_id}:${r3(q.dona)}`).sort().join(',');
-const borQatorlari = (h) => {
-  const m = new Map();
-  (h.qatorlar || []).forEach(q => m.set(Number(q.tovar_id), r3((m.get(Number(q.tovar_id)) || 0) + n(q.dona))));
-  return [...m].map(([tovar_id, dona]) => ({ tovar_id, dona }));
-};
+const qatorImzo = (list) => list.map(q => `${q.tovar_id}:${q.brak ? 'b' : ''}:${r3(q.dona)}`).sort().join(',');
+/** tovar + brak bo'yicha yig'ish: [{ tovar_id, brak, dona }] */
 const yigQator = (list) => {
   const m = new Map();
-  list.forEach(q => m.set(q.tovar_id, r3((m.get(q.tovar_id) || 0) + q.dona)));
-  return [...m].map(([tovar_id, dona]) => ({ tovar_id, dona }));
+  list.forEach(q => {
+    const tid = Number(q.tovar_id), brak = !!q.brak, k = `${tid}|${brak ? 1 : 0}`;
+    const x = m.get(k) || { tovar_id: tid, brak, dona: 0 };
+    x.dona = r3(x.dona + n(q.dona));
+    m.set(k, x);
+  });
+  return [...m.values()];
 };
+const borQatorlari = (h) => yigQator(h.qatorlar || []);
 const unikXato = e => !!e && (e.name === 'SequelizeUniqueConstraintError' || (e.parent && e.parent.code === 'ER_DUP_ENTRY'));
 
 async function idempotent(sorovId, meta, ish) {
@@ -381,44 +446,126 @@ async function tolov(dillerIdRaw, b, user) {
 }
 
 /* ── POST /dillerlar/:id/qaytarish ────────────────────── */
+/**
+ * Kompaniya sotuvini (berish arizalari) qaytarish qiymatiga kamaytiradi. Har tovar uchun eng YANGI berish qatoridan
+ * boshlab dona yechiladi (oxirgi berish narxi qoidasi bilan mos: eng yangi qator — shu narx). Qator summasi
+ * dona × qaytarish narxida kamayadi; tovarning oxirgi bo'lagi qolgan qiymatni oladi, shuning uchun Σ kamayish =
+ * qaytarish jamisi (= qarz kamayishi). Eski qator arzonroq bo'lsa va summasi yetmasa — qoldiq shu tovarning boshqa
+ * berish qatorlari summasidan (dona o'zgarmaydi), keyin dillerning boshqa berish qatorlaridan olinadi.
+ * Eski qator qimmatroq bo'lsa — qatorda dona 0, summa > 0 qoladi: bu kompaniyaning haqiqiy daromadi
+ * (diller qimmat olgan, arzon (oxirgi narxda) qaytargan).
+ */
+async function sotuvniKamaytir({ diller, hujjat, tayyor, t }) {
+  const tovarIds = [...new Set(tayyor.map(x => x.tovar_id))];
+  const satrlar = async (ids) => sequelize.query(`
+    SELECT q.id, q.ariza_id, q.tovar_id, q.jami_dona, q.dona, q.summa FROM ariza_qator q
+    JOIN diller_hujjat h ON h.ariza_id = q.ariza_id AND h.tur = 'berish' AND h.diller_id = :d
+    ${ids ? 'WHERE q.tovar_id IN (:ids)' : ''}
+    ORDER BY h.sana DESC, h.id DESC, q.id DESC FOR UPDATE`, { replacements: { d: diller.id, ids }, type: SELECT, transaction: t });
+  const holat = new Map();   // qator id → { ...qator, jami_dona, dona, summa } (xotirada kamaytiriladi)
+  const ol = rows => rows.map(r => {
+    if (!holat.has(r.id)) holat.set(r.id, { id: r.id, ariza_id: r.ariza_id, tovar_id: Number(r.tovar_id), jami_dona: r3(r.jami_dona), dona: r3(r.dona), summa: r2(r.summa), asl: { jami_dona: r3(r.jami_dona), summa: r2(r.summa) } });
+    return holat.get(r.id);
+  });
+  const qatorlar = ol(await satrlar(tovarIds));
+  const bog = new Map();     // qator id → { dona, summa }
+  const yoz = (q, dona, summa) => { const x = bog.get(q.id) || { dona: 0, summa: 0 }; x.dona = r3(x.dona + dona); x.summa = r2(x.summa + summa); bog.set(q.id, x); };
+  let qoldiqQiymat = 0;
+  for (const tid of tovarIds) {
+    const mos = qatorlar.filter(q => q.tovar_id === tid);
+    let kerak = r3(tayyor.filter(x => x.tovar_id === tid).reduce((s2, x) => s2 + x.dona, 0));
+    let qiymat = r2(tayyor.filter(x => x.tovar_id === tid).reduce((s2, x) => s2 + x.summa, 0));
+    const narx = kerak > 0 ? qiymat / kerak : 0;
+    for (const q of mos) {
+      if (kerak <= EPS) break;
+      if (q.jami_dona <= EPS) continue;
+      const dona = r3(Math.min(kerak, q.jami_dona));
+      const oxirgi = kerak - dona <= EPS;
+      const istak = oxirgi ? qiymat : Math.min(qiymat, r2(dona * narx));
+      const summa = r2(Math.max(0, Math.min(q.summa, istak)));
+      q.jami_dona = r3(q.jami_dona - dona); q.dona = Math.max(0, r3(q.dona - dona)); q.summa = r2(q.summa - summa);
+      yoz(q, dona, summa);
+      kerak = r3(kerak - dona); qiymat = r2(qiymat - summa);
+    }
+    // kerak > 0 qolishi faqat eski/buzuq ma'lumotda (diller qoldig'i berishlardan oshgan) — dona kamayishi shu yerda to'xtaydi
+    // Qiymat qoldig'i (arzon eski qatorlar) — shu tovarning boshqa qatorlari summasidan
+    for (const q of mos) {
+      if (qiymat <= 0.005) break;
+      const summa = r2(Math.min(q.summa, qiymat));
+      if (summa <= 0) continue;
+      q.summa = r2(q.summa - summa); yoz(q, 0, summa); qiymat = r2(qiymat - summa);
+    }
+    qoldiqQiymat = r2(qoldiqQiymat + qiymat);
+  }
+  if (qoldiqQiymat > 0.005) {
+    for (const q of ol(await satrlar(null))) {
+      if (qoldiqQiymat <= 0.005) break;
+      const summa = r2(Math.min(q.summa, qoldiqQiymat));
+      if (summa <= 0) continue;
+      q.summa = r2(q.summa - summa); yoz(q, 0, summa); qoldiqQiymat = r2(qoldiqQiymat - summa);
+    }
+  }
+  // Yozish: qatorlar, arizalar, iz
+  const arizaKam = new Map();
+  for (const q of holat.values()) {
+    if (!bog.has(q.id)) continue;
+    await ArizaQatorModel.update({ jami_dona: q.jami_dona, dona: q.dona, summa: q.summa }, { where: { id: q.id }, transaction: t });
+    arizaKam.set(q.ariza_id, r2((arizaKam.get(q.ariza_id) || 0) + bog.get(q.id).summa));
+  }
+  for (const [aid, kam] of arizaKam) {
+    const a = await ArizaModel.findByPk(aid, { transaction: t, lock: t.LOCK.UPDATE });
+    const jami = Math.max(0, r2(n(a.jami_summa) - kam));
+    await a.update({ jami_summa: jami, ...(n(a.tolangan_summa) > jami ? { tolangan_summa: jami } : {}) }, { transaction: t });
+  }
+  await DillerQaytarishSotuvModel.bulkCreate([...bog].map(([qid, x]) => {
+    const q = holat.get(qid);
+    return { hujjat_id: hujjat.id, ariza_id: q.ariza_id, ariza_qator_id: qid, tovar_id: q.tovar_id, dona: x.dona, summa: x.summa };
+  }), { transaction: t });
+}
+
 async function qaytarish(dillerIdRaw, b, user) {
   maydonTekshir(b, ['qatorlar', 'izoh', 'sorov_id']);
   const sorovId = sorovIdOl(b.sorov_id);
   const dillerId = idOl(dillerIdRaw, 'id');
-  const qatorlar = yigQator(qatorlarOl(b.qatorlar));
+  const qatorlar = yigQator(qatorlarOl(b.qatorlar, { brakBor: true }));   // [{ tovar_id, brak, dona }]
   const izoh = matnOl(b.izoh, 'izoh');
   const imzo = h => qatorImzo(borQatorlari(h)) === qatorImzo(qatorlar);
   return idempotent(sorovId, { dillerId, tur: 'qaytarish', imzo }, async () => {
     await dillerOl(dillerId, { paranoid: false });
-    const ids = qatorlar.map(q => q.tovar_id);
+    const ids = [...new Set(qatorlar.map(q => q.tovar_id))];
     const tovarBy = await tovarlarOl(ids);
     return sequelize.transaction(async (t) => {
+      // Diller qatori qulfi — parallel qaytarish/to'lovlar qarzdan oshib ketmasin (qaror 30)
       const diller = await dillerOl(dillerId, { transaction: t, lock: true, paranoid: false });
       await tovarlarniQulfla(ids, t);
-      const dOmbor = dillerOmbori(diller.fullname);
-      const [q, narx] = await Promise.all([omborQoldiq(dOmbor, t, ids), oxirgiNarxlar(diller.id, t)]);
+      const dOmbor = dillerOmbori(diller.fullname), dBrak = dillerBrakOmbori(diller.fullname);
+      const [q, qb, narx] = await Promise.all([omborQoldiq(dOmbor, t, ids), omborQoldiq(dBrak, t, ids), oxirgiNarxlar(diller.id, t)]);
       for (const x of qatorlar) {
-        const bor = (q.get(x.tovar_id) || { dona: 0 }).dona;
-        if (x.dona > bor + EPS) throw new HttpException(400, `"${tovarBy.get(x.tovar_id).nomi}": diller omborida yetarli emas (mavjud ${r3(bor)})`);
+        const bor = ((x.brak ? qb : q).get(x.tovar_id) || { dona: 0 }).dona;
+        if (x.dona > bor + EPS) throw new HttpException(400, `"${tovarBy.get(x.tovar_id).nomi}": diller ${x.brak ? 'brak omborida' : 'omborida'} yetarli emas (mavjud ${r3(bor)})`);
       }
+      // Qiymat — oxirgi berish narxida (sog'lom ham, brak ham)
       const tayyor = qatorlar.map(x => {
         const tv = tovarBy.get(x.tovar_id), nx = narx.get(x.tovar_id) || 0;
-        return { tovar_id: x.tovar_id, tovar_nomi: tv.nomi, turkum: tv.turkum || null, dona: x.dona, narx: nx, summa: r2(x.dona * nx) };
+        return { tovar_id: x.tovar_id, tovar_nomi: tv.nomi, turkum: tv.turkum || null, brak: x.brak, dona: x.dona, narx: nx, summa: r2(x.dona * nx) };
       });
       const jami = r2(tayyor.reduce((s, x) => s + x.summa, 0));
+      const qarz = await dillerQarz(diller.id, t);
+      if (jami > qarz + 0.005) throw new HttpException(400, `Qaytarish summasi (${jami}) diller qarzidan (${qarz}) oshadi`);
       const sana = new Date();
       const hujjat = await DillerHujjatModel.create({
         raqam: await raqamOl(t), diller_id: diller.id, diller_nomi: diller.fullname, tur: 'qaytarish', sana, jami, tolangan: 0,
         izoh, sorov_id: sorovId, user_id: user ? user.id || null : null, user_nomi: userNomi(user),
       }, { transaction: t });
-      await DillerHujjatQatorModel.bulkCreate(tayyor.map(x => ({ hujjat_id: hujjat.id, tovar_id: x.tovar_id, tovar_nomi: x.tovar_nomi, dona: x.dona, narx: x.narx, summa: x.summa })), { transaction: t });
+      await DillerHujjatQatorModel.bulkCreate(tayyor.map(x => ({ hujjat_id: hujjat.id, tovar_id: x.tovar_id, tovar_nomi: x.tovar_nomi, dona: x.dona, narx: x.narx, summa: x.summa, brak: x.brak })), { transaction: t });
       const reg = [];
       for (const x of tayyor) {
         const asos = { tovar_id: x.tovar_id, tovar_nomi: x.tovar_nomi, turkum: x.turkum, bloklarda: 0, qutilarda: 0, hajm: 0, kirim_narx: 0, sotuv_narx: x.narx, manba_tur: 'diller_qaytarish', manba_id: hujjat.id, sana };
-        reg.push({ ...asos, ombor: dOmbor, tur: 'chiqim', donada: -x.dona, summa: -x.summa });
-        reg.push({ ...asos, ombor: ASOSIY_OMBOR, tur: 'qaytarma_kirim', donada: x.dona, summa: x.summa });
+        reg.push({ ...asos, ombor: x.brak ? dBrak : dOmbor, tur: 'chiqim', donada: -x.dona, summa: -x.summa });
+        reg.push({ ...asos, ombor: x.brak ? BRAK_OMBORI : ASOSIY_OMBOR, tur: 'qaytarma_kirim', donada: x.dona, summa: x.summa });
       }
       await TovarRegisterModel.bulkCreate(reg, { transaction: t });
+      await sotuvniKamaytir({ diller, hujjat, tayyor, t });
       return hujjat.id;
     });
   });
@@ -488,8 +635,8 @@ const dillerJson = d => ({
 async function karta(idRaw) {
   const d = await AgentModel.findByPk(idOl(idRaw, 'id'), { include: [{ model: TerritoriyaModel, as: 'territoriya', attributes: ['id', 'nomi'] }] });
   if (!d || !d.diller) throw new HttpException(404, 'Diller topilmadi');
-  const [qarz, ombor, h] = await Promise.all([dillerQarz(d.id), dillerOmbor(d), hujjatlarRoyxat(d.id, { limit: 50 })]);
-  return { diller: dillerJson(d), qarz, ombor, hujjatlar: h.data };
+  const [qarz, ombor, brakOmbor, h] = await Promise.all([dillerQarz(d.id), dillerOmbor(d), dillerOmbor(d, null, { brak: true }), hujjatlarRoyxat(d.id, { limit: 50 })]);
+  return { diller: dillerJson(d), qarz, ombor, brak_ombor: brakOmbor, hujjatlar: h.data };
 }
 
 async function sotuvlar(idRaw, q = {}) {
@@ -571,7 +718,7 @@ async function mobilBlok(diller) {
     qarz,
     tarix: rows.map(h => ({
       id: h.id, raqam: h.raqam, tur: h.tur, sana: h.sana, jami: r2(h.jami), tolangan: r2(h.tolangan),
-      qatorlar: (h.qatorlar || []).sort((a, b) => a.id - b.id).map(q => ({ tovarId: String(q.tovar_id), nomi: q.tovar_nomi, dona: r3(q.dona), narx: r2(q.narx) })),
+      qatorlar: (h.qatorlar || []).sort((a, b) => a.id - b.id).map(q => ({ tovarId: String(q.tovar_id), nomi: q.tovar_nomi, dona: r3(q.dona), narx: r2(q.narx), brak: !!q.brak })),
       izoh: h.izoh || null,
     })),
     narxlar,
@@ -707,7 +854,7 @@ async function mobilHolat(diller, sana, mashina, { lokalKun, tzOffset }) {
 
 module.exports = {
   DILLER_OMBOR_EMAS, DILLER_MIJOZ_EMAS, dillerMijozEmasWhere,
-  dillerOl, dillerQarz, dillerQarzlari, dillerOmbor, dillerOmborJami, oxirgiNarxlar, omborQoldiq, bayroqTekshir,
+  dillerOl, dillerQarz, dillerQarzlari, dillerQarzdorlar, DILLER_MUDDAT_KUN, dillerOmbor, dillerOmborJami, oxirgiNarxlar, omborQoldiq, bayroqTekshir,
   berish, tolov, qaytarish, royxat, karta, hujjatlarRoyxat, hujjatBitta, sotuvlar, mijozlar,
   narxlarOl, narxlarSaqla, mobilBlok, mobilSotuv, mobilTolov, mobilHolat,
 };
