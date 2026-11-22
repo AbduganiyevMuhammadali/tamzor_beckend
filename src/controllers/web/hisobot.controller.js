@@ -14,7 +14,15 @@ const { dostavchiTopshir } = require('../../utils/dostavchiInkassatsiya.utils');
 const { Op, fn, col, literal } = require('sequelize');
 const sequelize = require('../../db/db-sequelize');
 const { tannarxXaritasi } = require('../../utils/tahlil.utils');
-const { tzOffset, kunKey } = require('../../utils/tahlil.utils');
+const { tzOffset, kunKey, KOCHIRISH_MANBA } = require('../../utils/tahlil.utils');
+
+/* Ichki ko'chirishlar (avtolavka yuklash/qabul, tur o'zgarishi, agentdan agentga — tahlil.utils
+   KOCHIRISH_MANBA, yagona manba) kompaniya bo'yicha kirim/chiqim AYLANMASI emas: tovar bir ombordan
+   chiqib boshqasiga kiradi. Umumiy (ombor filtrisiz) kirim/chiqim jamlari shu sharti bilan olinadi.
+   Bitta ombor QOLDIG'I (kirim − chiqim) esa ichki harakatlarni hisobga oladi — ular bu yerda qo'llanmaydi.
+   manba_tur NOT NULL — NOT IN NULL qatorlarni yo'qotmaydi. */
+const ICHKI_EMAS = { manba_tur: { [Op.notIn]: KOCHIRISH_MANBA } };
+const ICHKI_HA   = { manba_tur: { [Op.in]: KOCHIRISH_MANBA } };
 
 // ── Sana yordamchilari ────────────────────────────────────────────────
 // Bazada vaqt UTC saqlanadi; "bugun" va kunlarga ajratish mahalliy (Toshkent,
@@ -287,7 +295,9 @@ class HisobotController {
 
     // 1) Kirim (prixod + qaytarma/brak) — tannarx va joriy qoldiq manbai
     const kirimRows = await TovarRegisterModel.findAll({
-      where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, tovar_id: { [Op.in]: Object.keys(tovarMap).map(Number) } },
+      // ichki ko'chirish kirimi emas: har ichki harakat tovar bo'yicha 0 ga teng (chiqim = kirim),
+      // qoldiqqa ta'sir qilmaydi, lekin AVG(kirim_narx) va oxirgi_kirim_sana'ni buzardi
+      where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, tovar_id: { [Op.in]: Object.keys(tovarMap).map(Number) }, ...ICHKI_EMAS },
       attributes: [
         'tovar_id',
         [fn('SUM', col('donada')),     'kirim_dona'],
@@ -300,9 +310,10 @@ class HisobotController {
       raw: true,
     });
 
-    // 2) Umumiy chiqim (sotuv + qaytarma-chiqim) — joriy qoldiqni hisoblash uchun
+    // 2) Umumiy chiqim (sotuv + qaytarma-chiqim) — joriy qoldiqni hisoblash uchun (ichki ko'chirishsiz,
+    //    kirim bilan bir xil sharti — tovar bo'yicha qoldiq o'zgarmaydi)
     const chiqimRows = await TovarRegisterModel.findAll({
-      where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] } },
+      where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...ICHKI_EMAS },
       attributes: [
         'tovar_id',
         [fn('SUM', col('donada')), 'chiqim_dona'],
@@ -457,14 +468,15 @@ class HisobotController {
     const davrW = davrSharti(davrOraliq(req.query));
     if (davrW) dateWhere.sana = davrW;
 
-    const [kirimDavr, chiqimDavr, kirimJami, chiqimJami] = await Promise.all([
+    const [kirimDavr, chiqimDavr, kirimJami, chiqimJami, ichkiDavr] = await Promise.all([
       TovarRegisterModel.findAll({
         where: { tur: 'kirim', manba_tur: 'prixod', ...dateWhere },
         attributes: ['ombor', [fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona'], [fn('COUNT', col('id')), 'son']],
         group: ['ombor'], raw: true,
       }),
+      // davr chiqimi — haqiqiy chiqim (sotuv, hisobdan chiqarish, qaytarma); ichki ko'chirish alohida (ichkiDavr)
       TovarRegisterModel.findAll({
-        where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere },
+        where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere, ...ICHKI_EMAS },
         attributes: ['ombor', [fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona'], [fn('COUNT', col('id')), 'son']],
         group: ['ombor'], raw: true,
       }),
@@ -481,7 +493,19 @@ class HisobotController {
         attributes: ['ombor', [fn('SUM', col('donada')), 'dona']],
         group: ['ombor'], raw: true,
       }),
+      // davr ichidagi ichki ko'chirishlar (omborga kirgan/chiqqan) — ma'lumot uchun, qoldiq jami'dan
+      TovarRegisterModel.findAll({
+        where: { ...ICHKI_HA, ...dateWhere },
+        attributes: ['ombor', 'tur', [fn('SUM', col('donada')), 'dona']],
+        group: ['ombor', 'tur'], raw: true,
+      }),
     ]);
+    const ichkiMap = {};
+    ichkiDavr.forEach(r => {
+      const o = r.ombor || 'Nomaʼlum';
+      ichkiMap[o] = ichkiMap[o] || { kirim: 0, chiqim: 0 };
+      ichkiMap[o][r.tur === 'kirim' ? 'kirim' : 'chiqim'] += Math.abs(Number(r.dona || 0));
+    });
 
     const mk = rows => { const m = {}; rows.forEach(r => { m[r.ombor || 'Nomaʼlum'] = r; }); return m; };
     const chiqimMap = mk(chiqimDavr);
@@ -506,6 +530,8 @@ class HisobotController {
         chiqim_summa: Math.abs(Number(c.summa || 0)),
         chiqim_dona:  Math.abs(Number(c.dona  || 0)),
         chiqim_son:   Number(c.son || 0),
+        ichki_kirim_dona:  ichkiMap[ombor]?.kirim  || 0,
+        ichki_chiqim_dona: ichkiMap[ombor]?.chiqim || 0,
         qoldiq_dona:  qoldiqDona,
         qoldiq_summa: +qoldiqSumma.toFixed(0),
         foiz: totalSumma ? +((Number(k.summa || 0) / totalSumma * 100).toFixed(1)) : 0,
@@ -525,8 +551,9 @@ class HisobotController {
       // Asosiy Qoldiqlar hisoboti bilan bir xil FIFO mantig'i — ikkala
       // hisobotdagi "jami qoldiq qiymati" har doim mos kelishi uchun.
       fifoQoldiqlarHisobla(),
-      TovarRegisterModel.findOne({ where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, ...dateWhere }, attributes: [[fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona']], raw: true }),
-      TovarRegisterModel.findOne({ where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere }, attributes: [[fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona']], raw: true }),
+      // davr kirim/chiqim — kompaniya aylanmasi, ichki ko'chirishsiz (qoldiq FIFO'da ular hisobga olinadi)
+      TovarRegisterModel.findOne({ where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, ...dateWhere, ...ICHKI_EMAS }, attributes: [[fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona']], raw: true }),
+      TovarRegisterModel.findOne({ where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere, ...ICHKI_EMAS }, attributes: [[fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona']], raw: true }),
       TovarRegisterModel.count({ distinct: true, col: 'tovar_id', where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] } } }),
     ]);
 
@@ -537,8 +564,9 @@ class HisobotController {
     const aylanishFoiz = kirimDavrDona > 0 ? Math.min(100, +((chiqimDavrDona / kirimDavrDona) * 100).toFixed(1)) : 0;
 
     // Harakatsiz tovarlar: kirimi bor, lekin tanlangan davrda hech qanday chiqimi yo'q
+    // (ombordan agentga yuklash/ko'chirish "harakat" emas — tovar sotilmagan)
     const chiqimBorTovarlar = await TovarRegisterModel.findAll({
-      where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere },
+      where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere, ...ICHKI_EMAS },
       attributes: [[fn('DISTINCT', col('tovar_id')), 'tovar_id']],
       raw: true,
     });
@@ -578,12 +606,12 @@ class HisobotController {
     const kunIfoda = literal(`DATE(CONVERT_TZ(sana, '+00:00', ${sequelize.escape(tz)}))`);
     const [kirimRows, chiqimRows] = await Promise.all([
       TovarRegisterModel.findAll({
-        where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, sana: { [Op.gte]: from, [Op.lte]: to } },
+        where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, sana: { [Op.gte]: from, [Op.lte]: to }, ...ICHKI_EMAS },
         attributes: [[kunIfoda, 'kun'], [fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona']],
         group: [kunIfoda], raw: true,
       }),
       TovarRegisterModel.findAll({
-        where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, sana: { [Op.gte]: from, [Op.lte]: to } },
+        where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, sana: { [Op.gte]: from, [Op.lte]: to }, ...ICHKI_EMAS },
         attributes: [[kunIfoda, 'kun'], [fn('SUM', col('summa')), 'summa'], [fn('SUM', col('donada')), 'dona']],
         group: [kunIfoda], raw: true,
       }),
@@ -616,8 +644,9 @@ class HisobotController {
     const tovarMap = {}; tovarlar.forEach(t => { tovarMap[t.id] = t; });
 
     const [chiqimRows, kirimJami, chiqimJami] = await Promise.all([
+      // davr chiqimi — ichki ko'chirishsiz (yuklash "sotuv" emas); jami qoldiq (keyingi ikkisi) — barcha harakat
       TovarRegisterModel.findAll({
-        where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere },
+        where: { tur: { [Op.in]: ['chiqim', 'qaytarma_chiqim'] }, ...dateWhere, ...ICHKI_EMAS },
         attributes: ['tovar_id', [fn('SUM', col('donada')), 'chiqim_dona'], [fn('SUM', col('summa')), 'chiqim_summa'], [fn('MAX', col('sana')), 'oxirgi_sotuv']],
         group: ['tovar_id'], raw: true,
       }),
@@ -789,14 +818,25 @@ class HisobotController {
     const davrW = davrSharti(davrOraliq(req.query));
     if (davrW) where.sana = davrW;
 
+    // Ichki ko'chirishlar alohida guruhlanadi. Ombor filtrisiz (kompaniya bo'yicha) ular kirim/chiqim
+    // jamlariga QO'SHILMAYDI — tovar bir ombordan ikkinchisiga o'tadi, aylanma emas. Bitta ombor
+    // tanlansa — qo'shiladi: o'sha ombor uchun kirim − chiqim = qoldiq o'zgarishi bo'lib qoladi.
+    const ichkiHisobda = !!ombor;
+    const ichkiIfoda = literal(`CASE WHEN manba_tur IN (${KOCHIRISH_MANBA.map(m => sequelize.escape(m)).join(', ')}) THEN 1 ELSE 0 END`);
     const rows = await TovarRegisterModel.findAll({
       where,
-      attributes: ['tur', [fn('SUM', col('donada')), 'dona'], [fn('SUM', col('summa')), 'summa'], [fn('COUNT', col('id')), 'son']],
-      group: ['tur'], raw: true,
+      attributes: ['tur', [ichkiIfoda, 'ichki'], [fn('SUM', col('donada')), 'dona'], [fn('SUM', col('summa')), 'summa'], [fn('COUNT', col('id')), 'son']],
+      group: ['tur', ichkiIfoda], raw: true,
     });
 
     const map = {};
-    rows.forEach(r => { map[r.tur] = { dona: Math.abs(Number(r.dona || 0)), summa: Math.abs(Number(r.summa || 0)), son: Number(r.son || 0) }; });
+    const ichki = { kirim: { dona: 0, summa: 0, son: 0 }, chiqim: { dona: 0, summa: 0, son: 0 } };
+    const qosh = (a, r) => { a.dona += Math.abs(Number(r.dona || 0)); a.summa += Math.abs(Number(r.summa || 0)); a.son += Number(r.son || 0); };
+    rows.forEach(r => {
+      if (Number(r.ichki)) qosh(ichki[r.tur === 'kirim' ? 'kirim' : 'chiqim'], r);
+      if (Number(r.ichki) && !ichkiHisobda) return;
+      qosh(map[r.tur] = map[r.tur] || { dona: 0, summa: 0, son: 0 }, r);
+    });
 
     const kirim  = map.kirim  || { dona: 0, summa: 0, son: 0 };
     const chiqim = map.chiqim || { dona: 0, summa: 0, son: 0 };
@@ -808,6 +848,8 @@ class HisobotController {
       jami_yozuv: kirim.son + chiqim.son + qaytarmaKirim.son + qaytarmaChiqim.son,
       jami_kirim_dona:  kirim.dona + qaytarmaKirim.dona,
       jami_chiqim_dona: chiqim.dona + qaytarmaChiqim.dona,
+      ichki,                          // davr ichidagi ichki ko'chirishlar (doim alohida ko'rsatiladi)
+      ichki_hisobda: ichkiHisobda,    // true — ombor tanlangan, ichki harakatlar kirim/chiqim ichida
     });
   };
 
@@ -970,6 +1012,21 @@ class HisobotController {
     });
     const chiqimQoldiq = {};
     chiqimRows.forEach(r => { chiqimQoldiq[tovarOmborKalit(r)] = Math.abs(Number(r.chiqim_dona || 0)); });
+    // Ichki ko'chirish bilan omborga QAYTGAN tovar (masalan avtolavka qabul: agent → asosiy sklad) partiya
+    // emas, lekin shu ombor qoldig'ini tiklaydi: uning yuklash chiqimi yuqorida hisoblangan. Shu sabab ichki
+    // kirim chiqimdan ayriladi — aks holda qaytgan tovar partiya qoldig'idan yo'qolib qolardi.
+    const ichkiKirimWhere = { tur: 'kirim', ...ICHKI_HA };
+    if (ombor)  ichkiKirimWhere.ombor  = ombor;
+    if (turkum) ichkiKirimWhere.turkum = turkum;
+    if (search) ichkiKirimWhere.tovar_nomi = { [Op.like]: `%${search}%` };
+    (await TovarRegisterModel.findAll({
+      where: ichkiKirimWhere,
+      attributes: ['tovar_id', 'ombor', [fn('SUM', col('donada')), 'dona']],
+      group: ['tovar_id', 'ombor'], raw: true,
+    })).forEach(r => {
+      const k = tovarOmborKalit(r);
+      chiqimQoldiq[k] = Math.max(0, (chiqimQoldiq[k] || 0) - Math.abs(Number(r.dona || 0)));
+    });
 
     const partiyalar = kirimRows
       .map(r => {
@@ -1810,7 +1867,7 @@ class HisobotController {
       const tovarIds = [...new Set(qatorlar.map(q => q.tovar_id).filter(Boolean))];
       const kirimRows = tovarIds.length
         ? await TovarRegisterModel.findAll({
-            where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, tovar_id: { [Op.in]: tovarIds } },
+            where: { tur: { [Op.in]: ['kirim', 'qaytarma_kirim'] }, tovar_id: { [Op.in]: tovarIds }, ...ICHKI_EMAS },
             attributes: ['tovar_id', [fn('AVG', col('kirim_narx')), 'kirim_narx']],
             group: ['tovar_id'], raw: true,
           })

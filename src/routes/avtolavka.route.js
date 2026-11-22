@@ -7,11 +7,11 @@ const ruxsat = require('../middleware/ruxsat.middleware');
 const uploadKassa = require('../middleware/uploadKassa.middleware');
 const kc = require('../controllers/web/agentKochirish.controller');
 
-/* Agentdan agentga ko'chirish (2026-11-26): yozish — avtolavka 'create' YOKI ombor 'edit';
-   o'qish — avtolavka 'view' YOKI ombor 'view'; forma qoldig'i — o'qish yoki yozish ruxsatlaridan biri */
+/* Agentdan agentga ko'chirish (2026-11-26): yozish — avtolavka 'create' YOKI ombor 'edit'.
+   O'qish (ro'yxat, bitta hujjat, agent-qoldiq) — yozish ruxsati o'qishni ham beradi (2026-11-27):
+   avtolavka 'view'|'create' YOKI ombor 'view'|'edit' */
 const KOCHIRISH_YOZISH = ruxsat.biri([['avtolavka', 'create'], ['ombor', 'edit']]);
-const KOCHIRISH_OQISH = ruxsat.biri([['avtolavka', 'view'], ['ombor', 'view']]);
-const KOCHIRISH_FORMA = ruxsat.biri([['avtolavka', ['view', 'create']], ['ombor', ['view', 'edit']]]);
+const KOCHIRISH_OQISH = ruxsat.biri([['avtolavka', ['view', 'create']], ['ombor', ['view', 'edit']]]);
 
 router.get('/doska',          auth(), h(c.doska));
 router.get('/kalendar',       auth(), h(c.kalendar));
@@ -47,7 +47,7 @@ router.post('/sotuv',                  auth(), uploadKassa.single('chek'), h(c.s
 // Takror/xato chekni bekor qilish — faqat Admin (ombor, kassa, mijoz qarzi, bonus teskari yoziladi)
 router.post('/sotuv/:id/bekor',        auth('Admin', 'Programmer'), h(c.sotuvBekor));
 
-router.get('/agent-qoldiq',            auth(), KOCHIRISH_FORMA, h(kc.agentQoldiq));
+router.get('/agent-qoldiq',            auth(), KOCHIRISH_OQISH, h(kc.agentQoldiq));
 router.get('/kochirish',               auth(), KOCHIRISH_OQISH, h(kc.royxat));
 router.post('/kochirish',              auth(), KOCHIRISH_YOZISH, h(kc.yarat));
 router.get('/kochirish/:id',           auth(), KOCHIRISH_OQISH, h(kc.bitta));
