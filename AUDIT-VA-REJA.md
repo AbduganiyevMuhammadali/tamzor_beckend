@@ -294,6 +294,16 @@ Batafsil — `FRONTEND-UCHUN.md` §21, validatsiya — `API-VALIDATSIYA.md` §3.
 - ✅ **`hisobot/*` va ichki harakatlar (2026-11-27, egasi qarori A):** kompaniya bo'yicha kirim/chiqim aylanmasi endi `KOCHIRISH_MANBA` (yuklash, qabul, kochirish, agent_kochirish — tahlil.utils, yagona manba) yozuvlarisiz: `ombor-kpi` (davr kirim/chiqim, aylanish, harakatsiz), `ombor-trend`, `ombor` (davr chiqimi; yangi `ichki_kirim_dona/ichki_chiqim_dona`), `ombor-aylanish` (tez sotiladigan/harakatsiz), `register-kpi` (ombor filtrisiz; `ombor` berilsa ichki qo'shiladi — ombor balansi; yangi `ichki`, `ichki_hisobda`), `tovar-hisobot` va `sotuv-hisobot` (o'rtacha kirim narxi). Ombor qoldiqlari (`qoldiqlar`, `ombor.qoldiq_*`, `ombor-kpi.qoldiq_*`, FIFO) — barcha harakat bilan, o'zgarmagan. `partiya-qoldiqlar` — ichki kirim (masalan qabul) shu ombor chiqimidan ayriladi (avval qaytgan tovar partiya qoldig'idan tushib qolardi). O'zgarmagan: `umumiy`/`oylik-trend`/`turkum`/`top-tovarlar` (faqat prixod), `register`, `ombor-jurnal`, `qoldiqlar/:id/detail` (ro'yxatlar). Batafsil — `FRONTEND-UCHUN.md` §11.
 - **Sinov (lokal):** `test-kochirish` (149 tekshiruv: ruxsat B, hisobot A — yuklash+ko'chirish+qabul kompaniya kirim/chiqimini o'zgartirmaydi, prixod/sotuv o'zgartiradi, ombor balanslari register bilan mos).
 
+## 5j. Xarajat limiti (2026-11-27)
+
+Batafsil — `FRONTEND-UCHUN.md` §22, validatsiya — `API-VALIDATSIYA.md` §3.26. Migratsiya `20261127000001-xarajat-limit.js`.
+
+- **Model:** `user.xarajat_limit` (NULL — cheksiz, 0 — hammasi tasdiqqa; faqat role `User`); jadval `xarajat_sorov` (kutilmoqda → tasdiqlangan | rad_etildi | bekor, `kassa_yozuv_id`, `sorov_id` UNIQUE). Audit — `pul_audit`.
+- **Qoida:** bitta xarajat summasi limiti, toifa/usuldan qat'i nazar. Oshsa — so'rov (jurnalga yozilmaydi). Har yangi xarajat `kassa_id` bilan (faol), balansdan oshmasin (yaratishda ham, tasdiqda hal qiluvchi). Tasdiqlovchi — Admin/Programmer yoki `moliya.approve`; User o'zinikini tasdiqlay olmaydi. Limitni faqat Admin qo'yadi (Programmer — role/perms kabi, yo'q). Kassa sahifasidagi qo'lda chiqim ham limit bilan cheklangan.
+- **Eski ma'lumot:** kassa_id siz eski xarajatlar o'zgarishsiz ishlaydi (tahrirda kassa majburiy emas).
+- **Ochiq savollar:** (1) tasdiqlangan so'rovning jurnal yozuvini `DELETE /xarajatlar/:id` o'chirsa, so'rov `tasdiqlangan` qoladi (`kassa_yozuv_id` endi yo'q yozuvga ishora qiladi; chek fayli saqlanadi). (2) Boshqa chiqim oqimlari (yetkazuvchi to'lovi, qarz oldi-berdi) kassa balansini tekshirmaydi. (3) Limitli kassir boshqalarning xarajatlarini ham tahrirlay/o'chira oladi (avvalgidek, egalik tekshirilmaydi).
+- **Sinov (lokal):** `test-xarajat` (87 tekshiruv).
+
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |
 |---|---|

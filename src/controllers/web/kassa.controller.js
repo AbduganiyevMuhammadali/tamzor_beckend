@@ -199,6 +199,12 @@ class KassaController extends BaseController {
     }
     if (izoh != null && String(izoh).length > 255) throw new HttpException(400, 'Izoh 255 belgidan oshmasin');
     const sanaQiymat = sanaOl(sana, 'sana');
+    // 2026-11-27: limitli kassir (role 'User', xarajat_limit) Kassa sahifasi orqali limitni chetlab o'tmasin
+    const cu = req.currentUser;
+    if (tur === 'chiqim' && cu && cu.role === 'User' && cu.xarajat_limit !== null && cu.xarajat_limit !== undefined
+        && Number(summa) > Number(cu.xarajat_limit) + 0.005) {
+      throw new HttpException(400, `Summa limitingizdan (${Number(cu.xarajat_limit)}) oshadi — Xarajatlar bo'limidan tasdiqqa yuboring`);
+    }
     // 2026-11-22: ixtiyoriy kassa_id — yozuv shu kassaga (kassa balansi). tolov_usul kassa turidan olinadi.
     let kassaId = null;
     if (req.body.kassa_id !== undefined && req.body.kassa_id !== null && req.body.kassa_id !== '') {

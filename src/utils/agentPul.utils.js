@@ -206,6 +206,16 @@ async function kassaBalanslari() {
   return { kassalar: m, jurnalJami: r2(n(umumiy && umumiy.jami)), taqsimlanmagan: r2(n(umumiy && umumiy.taqsimlanmagan)) };
 }
 
+/* Bitta kassa balansi (kassaBalanslari bilan bir xil formula). Tranzaksiyada chaqirilsa — avval kassalar
+   qatorini qulflang (xarajat oqimi: kassa → balans → chiqim), parallel chiqimlar balansni minusga tushirmasin. */
+async function kassaBalans(kassaId, transaction = null) {
+  const [[j], [tp]] = await Promise.all([
+    Q(`SELECT COALESCE(SUM(CASE WHEN tur = 'kirim' THEN summa ELSE -summa END), 0) s FROM kassa WHERE kassa_id = :id`, { id: kassaId }, transaction),
+    Q(`SELECT COALESCE(SUM(summa), 0) s FROM pul_topshiruv WHERE holat = 'tasdiqlangan' AND kassa_id = :id`, { id: kassaId }, transaction),
+  ]);
+  return r2(n(j && j.s) + n(tp && tp.s));
+}
+
 /* ── Plastik to'lov amallari (web) ─────────────────────────────────── */
 const plastikShakli = (p) => ({
   holat: p.holat, summa: n(p.summa), kassa_id: p.kassa_id,
@@ -383,7 +393,7 @@ async function topshiruvRad(id, user, sababRaw) {
 }
 
 module.exports = {
-  kassaTekshir, chekRasmOl, agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, kassaBalanslari,
+  kassaTekshir, chekRasmOl, agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, kassaBalanslari, kassaBalans,
   plastikTasdiqla, plastikRad, plastikTahrir, sotuvPlastikRad,
   topshiruvYarat, topshiruvTasdiqla, topshiruvRad, auditYoz, auditRoyxat, sababOl, userNomi, Op,
 };

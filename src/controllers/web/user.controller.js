@@ -69,7 +69,8 @@ class UserController extends BaseController {
             fullname,
             password,
             role,
-            perms
+            perms,
+            xarajat_limit
         } = req.body;
         await this.#loginBandmi(username);
 
@@ -78,7 +79,8 @@ class UserController extends BaseController {
             fullname,
             password,
             role,
-            perms: perms || null
+            perms: perms || null,
+            xarajat_limit: xarajat_limit === undefined || xarajat_limit === '' ? null : xarajat_limit
         });
 
         if (!model) {
@@ -97,7 +99,8 @@ class UserController extends BaseController {
             fullname,
             password,
             role,
-            perms
+            perms,
+            xarajat_limit
         } = req.body;
 
         const joriy = req.currentUser;
@@ -113,14 +116,15 @@ class UserController extends BaseController {
         }
 
         if (username !== undefined && username !== model.username) await this.#loginBandmi(username, model.id);
-        model.username = username;
-        model.fullname = fullname;
+        if (username !== undefined) model.username = username;
+        if (fullname !== undefined) model.fullname = fullname;
         if (password) model.password = password;
         if (adminmi) {
-            // Rol va ruxsatlarni faqat Admin o'zgartiradi
-            model.role = role;
+            // Rol, ruxsatlar va xarajat limitini faqat Admin o'zgartiradi (Programmer — boshqalar kabi)
+            if (role !== undefined) model.role = role;
             model.perms = perms !== undefined ? perms : model.perms;
-        } else if ((role && role !== model.role) || perms !== undefined) {
+            if (xarajat_limit !== undefined) model.xarajat_limit = xarajat_limit === '' ? null : xarajat_limit;
+        } else if ((role && role !== model.role) || perms !== undefined || xarajat_limit !== undefined) {
             throw new HttpException(403, req.mf('Unauthorized'));
         }
         await model.save();

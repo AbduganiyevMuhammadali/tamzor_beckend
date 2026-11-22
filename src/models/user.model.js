@@ -42,6 +42,16 @@ UserModel.init({
             this.setDataValue('perms', val ? JSON.stringify(val) : null);
         }
     },
+    // 2026-11-27: bitta xarajatning eng katta summasi (faqat role 'User'); NULL — cheksiz. FRONTEND-UCHUN §22
+    xarajat_limit: {
+        type: DataTypes.DECIMAL(18, 2),
+        allowNull: true,
+        defaultValue: null,
+        get() {
+            const v = this.getDataValue('xarajat_limit');
+            return v === null || v === undefined ? null : parseFloat(v);
+        }
+    },
     token: {
         type: DataTypes.VIRTUAL,
     },
