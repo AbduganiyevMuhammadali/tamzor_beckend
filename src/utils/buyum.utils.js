@@ -573,7 +573,7 @@ async function hisobotAgentlar(q = {}) {
   const agentWhere = {};
   if (!bosmi(q.agent_id)) agentWhere.id = idOl(q.agent_id, 'agent_id');
   if (!bosmi(q.territoriya_id)) agentWhere.territoriya_id = idOl(q.territoriya_id, 'territoriya_id');
-  const agentlar = await AgentModel.findAll({ where: agentWhere, attributes: ['id', 'fullname', 'territoriya_id', 'faol'], raw: true, paranoid: false });
+  const agentlar = await AgentModel.findAll({ where: agentWhere, attributes: ['id', 'fullname', 'territoriya_id', 'faol', 'deletedAt'], raw: true, paranoid: false });
   if (!agentlar.length) return [];
   const aIds = agentlar.map(a => Number(a.id));
   const filtr = Object.keys(agentWhere).length > 0;
@@ -598,7 +598,8 @@ async function hisobotAgentlar(q = {}) {
   for (const a of agentlar) {
     const qol = qolMap.get(Number(a.id)) || new Map(), mij = agMij.get(Number(a.id)) || new Map();
     const bIds = new Set([...qol.keys(), ...mij.keys()]);
-    if (!bIds.size && !agentWhere.id) continue;
+    // Egasi qarori (2026-11-22): buyumsiz agentlar ham ko'rinadi. O'chirilgan/faolsiz agent — faqat buyumi qolgan bo'lsa
+    if (!bIds.size && !agentWhere.id && (a.deletedAt || !a.faol)) continue;
     const t = a.territoriya_id ? ter.get(a.territoriya_id) : null;
     natija.push({
       agent: { id: a.id, nomi: a.fullname },
