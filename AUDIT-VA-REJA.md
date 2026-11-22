@@ -318,6 +318,19 @@ Batafsil — `FRONTEND-UCHUN.md` §23, validatsiya — `API-VALIDATSIYA.md` §3.
 - **Shu ish doirasidagi qarorlar:** `agentga` oluvchisi ham faol bo'lishi shart; faol emas buyum mobil `mijozdan` bilan ham qaytarilishi mumkin; faol emas mijozga berib bo'lmaydi; mobil `mobilId` majburiy; sinxron `katalog` ga `faol` maydoni qo'shildi; `agentSinxron` ham `buyumlar` oladi; javobdagi id'lar son.
 - **Sinov (lokal):** `test-buyum` (103 tekshiruv).
 
+## 5l. Dillerlar (2026-11-29)
+
+Batafsil — `FRONTEND-UCHUN.md` §24, validatsiya — `API-VALIDATSIYA.md` §3.28. Migratsiya `20261129000001-diller.js` (idempotent).
+
+- **Model:** diller = agent (`agent.diller`). Ombori `"Diller: <ism>"` (+ `" (brak)"`) — `ombor.utils.sotuvOmbori/brakOmbori`. `diller_hujjat` (DL-000001: berish | tolov | qaytarish, tahrirlanmaydi), `diller_hujjat_qator`, `diller_narx` (mobil narx ro'yxati), `diller_pul` (dillerning o'z pul daftari — kontraktga qo'shimcha jadval). Qarz = Σ berish(jami − tolangan) − Σ tolov − Σ qaytarish.
+- **Kompaniya zaxirasidan chiqarish:** `TovarRegisterModel` **defaultScope** (`ombor NOT LIKE 'Diller: %'`, `whereMergeStrategy: 'and'`) — barcha Sequelize so'rovlari; xom SQL'da qo'lda (tahlil ombor/sotuv/jurnal, dashboard qoldiq/ogohlantirish/sparkline, ariza spravochnik qoldig'i, mobil `getProductSell` umumiy qoldig'i). Diller kodi xom SQL / `unscoped()` (`avtolavka.utils.omborQoldiq` endi unscoped).
+- **Berish = kompaniya sotuvi:** ariza `turi='sotish'`, `kanal='diller'`, mijozsiz/agentsiz (`mijoz_nomi "Diller: <ism>"`), asosiy ombordan register `sotuv` (manba_id = ariza). Diller omboriga `diller_berish`. To'lov — kassa kirimi `diller_tolov` (tizim kategoriyasi). Bekor qilish taqiqlangan (`sotuvBekor.utils`).
+- **Diller sotuvi:** ariza `turi='diller_sotuv'` — kompaniya hisobotlari `turi='sotish'` bo'yicha bo'lgani uchun avtomatik chiqadi; `arizaYetkazildiEffektlari` chaqirilmaydi (kassa/agent_register yo'q), reyting/plastik navbati yo'q, lat/lng yozilmaydi. Mijoz qarzi `mijoz.balans`; kompaniya debitorligidan `DILLER_MIJOZ_EMAS` bilan chiqarilgan.
+- **Chiqarilgan joylar:** dashboard (debitorlik, muddati o'tgan, top qarzdorlar, mijozlar soni/yangi/holat/qayta jalb, faol agentlar, reja, top agentlar, ombor qoldig'i/salomatlik/kam qoldiq/sparkline), tahlil (ombor qoldig'i, zaxira kuni, tovarlar qoldig'i, ombor harakati, jurnal va omborlar ro'yxati, qarzlar, reyting, xodim/sotuv/qarzlar agent ro'yxatlari), hisobot (register asosidagi hammasi — scope; agent-savdo, agentlar, agent-online, agent-marshrut, monitoring), `agents/statistika`, `kassalar/agentlar`, navbat agent soni, arizalar ro'yxati/statistikasi, Won Sell agentlar/doska/kalendar, `mijozlar?qarzdor=1`, `mijozlar/reyting/xulosa`.
+- **Qarorlar (koordinator/egasi):** to'lov qarzdan oshmaydi (diller qatori qulfi bilan); qaytarish narxi — oxirgi berish qatori narxi; berish qator narxini operator tahrirlay oladi; bayroq yoqish/olish uchun izlar tozalangan bo'lishi kerak; diller faqat o'z mijozi bilan ishlaydi, boshqa agent diller mijozi bilan ishlamaydi.
+- **Ochiq:** dillerdan qaytarish kompaniya sotuv hisobotidagi berish summasini kamaytirmaydi; diller qarzi kompaniya debitorligiga qo'shilmagan; diller brak omboridagi tovarni kompaniyaga qaytarish oqimi yo'q. Ochiq hisobli mijozni kompaniya ↔ diller o'rtasida o'tkazish (`PATCH /mijozlar/:id agent_id`) → 400 (shu ish doirasidagi qaror).
+- **Sinov (lokal):** `test-diller` (164 tekshiruv), qolgan barcha skriptlar yashil.
+
 ## 6. Ataylab qoldirilganlar
 | Masala | Sabab |
 |---|---|
