@@ -607,11 +607,12 @@ class AvtolavkaController {
     const ombor = sklad ? ASOSIY_OMBOR : agentOmbori(agent.fullname);
     const mijozId = parseInt(req.query.mijoz_id, 10) || null;
 
-    const [map, kun, mijoz, plastikKassalar] = await Promise.all([
+    const [map, kun, mijoz, plastikKassalar, naqdKassalar] = await Promise.all([
       sklad ? skladQoldigi() : omborQoldiq(ombor),   // sklad: band qilinganidan tashqari MAVJUD qoldiq
       sklad ? null : kunHisobla(agent, sana),
       mijozId ? MijozModel.findByPk(mijozId) : null,
       sklad ? [] : agentPlastikKassalar(agent),        // 2026-11-24: plastik to'lov uchun kassa tanlovi
+      sklad ? naqdKassalarRuyxat() : [],               // 2026-11-24: skladdan sotuv — naqd qaysi kassaga
     ]);
     if (mijozId && !mijoz) throw new HttpException(404, 'Mijoz topilmadi');
     const ids = Object.keys(map).filter(id => map[id].qoldiq > EPS).map(Number);
@@ -654,6 +655,8 @@ class AvtolavkaController {
       viloyat_qoida: !!narx.viloyat,
       // Agent viloyatidagi faol plastik kassalar [{ id, nomi }] — tolov_usuli 'plastik' uchun (sklad: [])
       plastik_kassalar: plastikKassalar.map(k => ({ id: k.id, nomi: k.nomi })),
+      // Skladdan (xodimsiz) sotuv: faol naqd kassalar [{ id, nomi }] — naqd qism tanlangan kassaga (kassa_id). Agent: []
+      naqd_kassalar: naqdKassalar,
       mijoz: mijozJson,
       tovarlar: ids.map(id => {
         const t = tovarBy.get(id) || {}, x = narxBy.get(id) || { narx: 0, manba: 'yoq' };
@@ -708,6 +711,7 @@ class AvtolavkaController {
         summa, naqd, qarz: +(summa - tolandi).toFixed(2), tolov_sana: bor.tolov_sana || null,
         tolov_usuli: pl ? 'plastik' : 'naqd', plastik: pl,
         sklad: !bor.agent_id, agent: a ? { id: a.id, fullname: a.fullname } : null,
+        kassa: bor.agent_id ? null : await sotuvKassasi(bor.id),
         mijoz: m ? { id: m.id, nomi: m.nomi, balans: n(m.balans) } : null,
         tovar_soni: qatorlar.length, dona: +qatorlar.reduce((s, q) => s + n(q.jami_dona), 0).toFixed(3),
         takror: true,
@@ -773,6 +777,19 @@ class AvtolavkaController {
       throw new HttpException(400, `Qisman to'lovda naqd summa 0 dan katta va ${itog.toLocaleString('ru-RU')} dan kichik bo'lishi kerak`);
     }
     const qarz = itog - naqd;
+    /* 2026-11-24: skladdan sotuvda naqd qism tanlangan naqd kassaga tushadi (kassa_id). Berilmasa:
+       faol naqd kassa bitta bo'lsa — o'sha kassa (eski forma ham ishlayveradi), bir nechta bo'lsa — 400. */
+    let skladKassaId = null;
+    if (sklad && naqd > 0) {
+      const k = b.kassa_id ?? b.kassaId;
+      if (k === undefined || k === null || k === '') {
+        const naqdlar = await naqdKassalarRuyxat();
+        if (naqdlar.length !== 1) {
+          throw new HttpException(400, naqdlar.length ? 'Naqd pul tushadigan kassani tanlang (kassa_id)' : "Faol naqd kassa yo'q — avval Moliya → Kassalar'da naqd kassa yarating");
+        }
+        skladKassaId = naqdlar[0].id;
+      } else skladKassaId = k;
+    }
     let tolovSana = null;
     if (qarz > 0.5) {
       tolovSana = String(b.tolov_sana || '');
@@ -800,6 +817,7 @@ class AvtolavkaController {
       body.chekRasm = req.file ? `/uploads/kassa/${req.file.filename}` : (b.chek_rasm ?? b.chekRasm);
       body.chekIzoh = b.chek_izoh ?? b.chekIzoh;
     }
+    if (skladKassaId !== null) body.skladKassaId = skladKassaId;
     const kim = req.currentUser ? (req.currentUser.fullname || req.currentUser.username) : null;
     if (sorovId) body.mobilId = sorovId;
     let ariza;
@@ -818,6 +836,8 @@ class AvtolavkaController {
       id: ariza.id, raqam: ariza.raqam, sana, summa: itog, naqd: pl ? 0 : naqd, qarz, tolov_sana: tolovSana,
       tolov_usuli: pl ? 'plastik' : 'naqd', plastik: pl,
       sklad, agent: agent ? { id: agent.id, fullname: agent.fullname } : null,
+      // Skladdan sotuv: naqd tushgan kassa { id, nomi } (naqd 0 bo'lsa null)
+      kassa: sklad ? await sotuvKassasi(ariza.id) : null,
       mijoz: { id: mijoz.id, nomi: mijoz.nomi, balans: n(mijoz.balans) },
       tovar_soni: qatorlar.length, dona: +qatorlar.reduce((s, q) => s + q.dona, 0).toFixed(3),
     });
@@ -892,6 +912,17 @@ AvtolavkaController.prototype.qaytarishBitta = async function (req, res) {
 };
 
 /* Sotuvning plastik to'lovi (bo'lsa) — javob uchun */
+/* Skladdan sotuv: faol naqd kassalar (forma tanlovi) va sotuv naqdi tushgan kassa */
+async function naqdKassalarRuyxat() {
+  return sequelize.query(`SELECT id, nomi FROM kassalar WHERE faol = 1 AND tur = 'naqd' ORDER BY nomi`, { type: sequelize.QueryTypes.SELECT });
+}
+async function sotuvKassasi(arizaId) {
+  const [k] = await sequelize.query(`SELECT ks.id, ks.nomi FROM kassa k JOIN kassalar ks ON ks.id = k.kassa_id
+      WHERE k.manba_tur = 'sklad' AND k.manba_id = :id AND k.kategoriya = 'sotuv' AND k.tur = 'kirim' LIMIT 1`,
+    { replacements: { id: arizaId }, type: sequelize.QueryTypes.SELECT });
+  return k ? { id: k.id, nomi: k.nomi } : null;
+}
+
 async function plastikJavob(ariza) {
   if (!ariza || ariza.tolov_turi !== 'plastik') return null;
   const [p] = await sequelize.query(`SELECT p.id, p.holat, p.summa, p.kassa_id, k.nomi kassa_nomi, p.chek_rasm FROM plastik_tolov p

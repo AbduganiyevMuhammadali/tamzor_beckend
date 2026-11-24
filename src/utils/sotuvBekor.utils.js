@@ -109,6 +109,13 @@ async function yetkazilganSotuvniBekorQil(ariza, { sabab, user, transaction = nu
       transaction: t,
     });
     const naqd = kassalar.reduce((s, k) => s + n(k.summa), 0);
+    // 2026-11-24: kassaga bog'langan naqd (skladdan sotuv) — o'chirish kassa balansini minusga tushirmasin
+    const kassaBoyicha = new Map();
+    kassalar.filter(k => k.kassa_id).forEach(k => kassaBoyicha.set(k.kassa_id, (kassaBoyicha.get(k.kassa_id) || 0) + n(k.summa)));
+    if (kassaBoyicha.size) {
+      const { kassaKirimKamayTekshir } = require('./agentPul.utils');
+      for (const [kid, sm] of [...kassaBoyicha.entries()].sort((a, b) => a[0] - b[0])) await kassaKirimKamayTekshir(kid, sm, t);
+    }
     if (kassalar.length) {
       await KassaModel.destroy({ where: { id: { [Op.in]: kassalar.map(k => k.id) } }, transaction: t });
     }

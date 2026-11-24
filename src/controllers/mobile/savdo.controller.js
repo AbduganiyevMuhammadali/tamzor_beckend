@@ -174,6 +174,10 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
   if (usulRaw === 'plastik' && !(darhol && agent)) throw new HttpException(400, "Plastik to'lov faqat agent sotuvida qabul qilinadi");
   const plastikSumma = usulRaw === 'plastik' ? +(tolangan !== null ? tolangan : itog).toFixed(2) : 0;
   const plastikMi = plastikSumma > 0.005;
+  /* 2026-11-24: SKLADDAN (xodimsiz) sotuv — naqd qism tanlangan NAQD kassaga yoziladi (kassa_id).
+     Berilmasa eski xatti-harakat (taqsimlanmagan); web sotuvCreate naqd > 0 da majburiy qiladi. */
+  const skladKassa = sklad && body.skladKassaId !== undefined && body.skladKassaId !== null && body.skladKassaId !== ''
+    ? await kassaTekshir(body.skladKassaId, { tur: 'naqd' }) : null;
   const plastikKassa = plastikMi ? await kassaTekshir(body.kassaId, { tur: 'plastik', agent, xabar: body.kassaId ? null : "Plastik to'lov uchun kassaId majburiy" }) : null;
   // 2026-11-23: plastik to'lov cheki (chekYuklash/ qaytargan yo'l) majburiy, chekIzoh ixtiyoriy
   const plastikChek = plastikMi ? chekRasmOl(body.chekRasm, { majburiy: true, xabar: "Plastik to'lov uchun chek rasmi majburiy (chekRasm)" }) : null;
@@ -352,6 +356,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
         transaction: t, userId: sklad ? webUserId : agent.id, kassaManbaTur: sklad ? 'sklad' : 'avtolavka',
         tolangan: plastikMi ? 0 : tolangan, sana: vaqt,
         agentId: sklad ? null : agent.id,   // naqd agent qo'lida — majburiyat (agentPul.utils)
+        kassaId: skladKassa ? skladKassa.id : null,
       });
       if (plastikMi) {
         const pt = await PlastikTolovModel.create({
