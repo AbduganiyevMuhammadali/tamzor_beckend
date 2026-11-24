@@ -17,7 +17,7 @@ const { TashrifModel } = require('../../models/marshrut.model');
 const { masofaMetr, koordinata, SOTUV_RADIUS_M } = require('../../utils/geo.utils');
 const { kunKey } = require('../../utils/tahlil.utils');   // lokal (server/biznes) kun — UTC emas
 const { PlastikTolovModel } = require('../../models/kassalar.model');
-const { kassaTekshir, auditYoz, chekRasmOl } = require('../../utils/agentPul.utils');
+const { kassaTekshir, auditYoz, chekRasmOl, tolovQarzTekshir } = require('../../utils/agentPul.utils');
 const AgentModel = require('../../models/agent.model');
 const Diller = require('../../utils/diller.utils');
 
@@ -622,20 +622,8 @@ class MobileSavdoController {
         const mijoz = await qulflabOl(MijozModel, klientId, t);
         if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
         const eskiBalans = parseFloat(mijoz.balans) || 0;
-        /* 2026-11-24: to'lov mijoz qarzidan oshmaydi. Qarz — manfiy balans; tasdiq kutayotgan plastik
-           to'lovlar (qarz to'lovi va plastik sotuv) tasdiqlanganda balansni oshiradi — ular ayiriladi.
-           Mijoz qatori qulf ostida — parallel ikki to'lov birgalikda ham qarzdan oshmaydi. */
-        const [[kut]] = await sequelize.query(
-          `SELECT COALESCE(SUM(summa), 0) s FROM plastik_tolov WHERE mijoz_id = :m AND holat = 'kutilmoqda'`,
-          { replacements: { m: mijoz.id }, transaction: t });
-        const kutilmoqda = Math.round((parseFloat(kut.s) || 0) * 100) / 100;
-        const ruxsat = Math.max(0, Math.round((Math.max(0, -eskiBalans) - kutilmoqda) * 100) / 100);
-        if (jami > ruxsat + 0.5) {
-          const f = (x) => Math.round(x).toLocaleString('ru-RU');
-          throw new HttpException(400, ruxsat <= 0.5
-            ? (kutilmoqda > 0 ? `Mijozning to'lanmagan qarzi yo'q (${f(kutilmoqda)} so'm plastik to'lov tasdiq kutmoqda)` : "Mijozning qarzi yo'q — to'lov olib bo'lmaydi")
-            : `To'lov mijoz qarzidan oshmasligi kerak: ko'pi bilan ${f(ruxsat)} so'm${kutilmoqda > 0 ? ` (qarz ${f(-eskiBalans)}, shundan ${f(kutilmoqda)} plastik tasdiq kutmoqda)` : ''}`);
-        }
+        // 2026-11-24: to'lov mijoz qarzidan oshmaydi (qarz − tasdiq kutayotgan plastik), mijoz qulfi ostida
+        await tolovQarzTekshir(mijoz, jami, t);
 
         if (naqd > 0) {
           const yozuv = await KassaModel.create({

@@ -802,6 +802,8 @@ async function mobilTolov({ diller, klientId, naqd, plastik, komment, mobilId, v
     await sequelize.transaction(async (t) => {
       const mijoz = await qulflabOl(MijozModel, klientId, t);
       if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
+      // 2026-11-24: diller ham mijoz qarzidan ko'p to'lov olmaydi
+      await require('./agentPul.utils').tolovQarzTekshir(mijoz, r2(naqd + plastik), t);
       const yoz = (usul, summa, kalit) => DillerPulModel.create({
         diller_id: diller.id, tur: 'kirim', kategoriya: 'mijoz_tolov', usul, summa, mijoz_id: mijoz.id, mijoz_nomi: mijoz.nomi,
         mobil_id: kalit, izoh: komment ? String(komment).slice(0, 255) : null, chek_rasm: usul === 'plastik' ? chekRasm : null, sana: vaqt,

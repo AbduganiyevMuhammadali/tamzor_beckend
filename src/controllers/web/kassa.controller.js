@@ -6,7 +6,7 @@ const { MijozModel } = require('../../models/mijoz.model');
 const HttpException = require('../../utils/HttpException.utils');
 const BaseController = require('../BaseController');
 const { xarajatTurlari, tasdiqlanganSorovYozuvimi, TASDIQLI_OCHIRISH_XATO } = require('../../utils/xarajat.utils');
-const { ixtiyoriyKassa, kassaKirimKamayTekshir } = require('../../utils/agentPul.utils');
+const { ixtiyoriyKassa, kassaKirimKamayTekshir, tolovQarzTekshir } = require('../../utils/agentPul.utils');
 
 // Kategoriya yorliqlari (frontda ko'rsatish uchun)
 const KATEGORIYA = {
@@ -245,6 +245,8 @@ class KassaController extends BaseController {
         if (!m) throw new HttpException(404, 'Mijoz topilmadi');
         mijoz_nomi = m.nomi;
         eskiBalans = parseFloat(m.balans) || 0;
+        // 2026-11-24: mijoz to'lovi qarzidan oshmaydi (qarz − tasdiq kutayotgan plastik)
+        if (tur === 'kirim') await tolovQarzTekshir(m, Number(summa), t);
         await m.increment('balans', { by: Number(summa), transaction: t });
       }
 

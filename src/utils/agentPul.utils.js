@@ -254,6 +254,25 @@ async function kassaKirimKamayTekshir(kassaId, summa, t) {
   if (n(summa) > b + 0.005) throw new HttpException(400, `Kassa balansi manfiy bo'lib qoladi (balans ${b}, o'chiriladigan ${r2(n(summa))})`);
   return b;
 }
+/* 2026-11-24: mijoz to'lovi qarzidan oshmaydi (mobil agent/diller, web mijoz to'lovi).
+   mijoz — tranzaksiyada QULFLANGAN qator. Ruxsat = qarz (manfiy balans) − tasdiq kutayotgan plastik
+   to'lovlar (tasdiqlanganda balansni oshiradi). Oshsa 400. Qaytaradi ruxsat etilgan summa. */
+async function tolovQarzTekshir(mijoz, summa, t) {
+  const balans = n(mijoz.balans);
+  const [[kut]] = await sequelize.query(
+    `SELECT COALESCE(SUM(summa), 0) s FROM plastik_tolov WHERE mijoz_id = :m AND holat = 'kutilmoqda'`,
+    { replacements: { m: mijoz.id }, transaction: t });
+  const kutilmoqda = r2(n(kut.s));
+  const ruxsat = Math.max(0, r2(Math.max(0, -balans) - kutilmoqda));
+  if (n(summa) > ruxsat + 0.5) {
+    const f = (x) => Math.round(x).toLocaleString('ru-RU');
+    throw new HttpException(400, ruxsat <= 0.5
+      ? (kutilmoqda > 0 ? `Mijozning to'lanmagan qarzi yo'q (${f(kutilmoqda)} so'm plastik to'lov tasdiq kutmoqda)` : "Mijozning qarzi yo'q — to'lov olib bo'lmaydi")
+      : `To'lov mijoz qarzidan oshmasligi kerak: ko'pi bilan ${f(ruxsat)} so'm${kutilmoqda > 0 ? ` (qarz ${f(-balans)}, shundan ${f(kutilmoqda)} plastik tasdiq kutmoqda)` : ''}`);
+  }
+  return ruxsat;
+}
+
 /* Ixtiyoriy kassa_id li pul harakati (POST /kassa bilan bir xil qoida):
    kassa_id bo'sh → null (eski xatti-harakat, tekshiruv yo'q). Aks holda: faol kassa qulflanadi,
    tolov_usul kassa turiga mos (naqd → naqt; plastik → karta yoki bank), tur 'chiqim' bo'lsa balans tekshiriladi.
@@ -447,7 +466,7 @@ async function topshiruvRad(id, user, sababRaw) {
 
 module.exports = {
   kassaTekshir, chekRasmOl, agentPlastikKassalar, majburiyat, majburiyatlar, agentPulTarix, kassaBalanslari, kassaBalans,
-  kassaUsul, kassaQulfla, kassaBalansTekshir, ixtiyoriyKassa, kassaKirimKamayTekshir,
+  kassaUsul, kassaQulfla, kassaBalansTekshir, ixtiyoriyKassa, kassaKirimKamayTekshir, tolovQarzTekshir,
   plastikTasdiqla, plastikRad, plastikTahrir, sotuvPlastikRad,
   topshiruvYarat, topshiruvTasdiqla, topshiruvRad, auditYoz, auditRoyxat, sababOl, userNomi, Op,
 };
