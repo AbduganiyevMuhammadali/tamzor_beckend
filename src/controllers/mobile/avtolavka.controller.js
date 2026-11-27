@@ -288,6 +288,8 @@ async function narxSinxron(mijozlar, tovarIds, agent = null) {
       viloyat: vil,
       viloyatId: viloyatId || null,
       viloyatQoida: !!viloyatId,
+      // 2026-11-27: mijoz skidkalari { klientId: { tovarId: {tur: 'foiz'|'summa', qiymat, dan, gacha} } } — dillerda yo'q
+      skidkalar: agent && agent.diller ? {} : await require('../../utils/skidka.utils').sinxronSkidkalar(mijozlar.map(m => m.id)),
     },
   };
 }
@@ -714,7 +716,7 @@ class MobileAvtolavkaController {
       : await narxXaritasi({ mijozId: klientId, tovarIds: tovarlar.map(t => t.id) });
     ok(res, {
       ruyxat: r.ruyxat,
-      narxlar: r.narxlar.map(x => ({ tovarId: String(x.tovar_id), narx: x.narx, manba: x.manba })),
+      narxlar: r.narxlar.map(x => ({ tovarId: String(x.tovar_id), narx: x.narx, manba: x.manba, ...(x.skidka ? { aslNarx: x.asl_narx, skidka: x.skidka } : {}) })),
     });
   };
 
@@ -799,7 +801,7 @@ class MobileAvtolavkaController {
         natija: t.natija || null, arizaId: t.ariza_id ? String(t.ariza_id) : null,
       })),
       // Diller: narx erkin — viloyat qoidasi yo'q
-      narx: agent.diller ? { ...narx.javob, viloyat: {}, viloyatQoida: false } : narx.javob,
+      narx: agent.diller ? { ...narx.javob, viloyat: {}, viloyatQoida: false, skidkalar: {} } : narx.javob,
       // Oflayn yuklash so'rovi va Mashina ekrani uchun
       ombor, tavsiya: agent.diller ? null : tavsiya, yuklashlar,
       sabablar: SABABLAR.filter(x => x.tip === 'Причина').map(x => ({ id: x.id, name: x.name, neytral: !!x.neytral })),

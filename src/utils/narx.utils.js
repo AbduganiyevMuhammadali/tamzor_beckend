@@ -15,12 +15,15 @@
  *   2. tovar_viloyat_narx: agent viloyatidagi narx, mijoz narx_turi bo'yicha (chakana | optom)
  *   3. aks holda tovar shu agent tomonidan SOTILMAYDI (standart ro'yxat / eski narxga tushmaydi)
  * Viloyati yo'q agent va sklad (agentsiz) sotuvi — yuqoridagi eski qoida (narxXaritasi).
+ *
+ * SKIDKA (2026-11-27): topilgan narxga mijozning shu tovar skidkasi qo'llanadi (skidka.utils).
  */
 const { NarxRuyxatModel, NarxRuyxatQatorModel } = require('../models/narxRuyxat.model');
 const { MijozModel, MijozKategoriyaModel } = require('../models/mijoz.model');
 const { narxMap } = require('./avtolavka.utils');
 const TovarViloyatNarxModel = require('../models/tovarViloyatNarx.model');
 const TerritoriyaModel = require('../models/territoriya.model');
+const { xaritagaQoll } = require('./skidka.utils');
 
 async function standartRuyxat(tur) {
   return NarxRuyxatModel.findOne({ where: { tur, standart: true, faol: true } });
@@ -44,7 +47,7 @@ async function mijozRuyxati(mijoz) {
  *   manba: 'ruyxat' (toifa/asosiy ro'yxat) | 'standart' (turdagi standart ro'yxat)
  *          | 'eski' (tovar_register) | 'yoq' (narx yo'q)
  */
-async function narxXaritasi({ mijozId = null, tovarIds }) {
+async function narxXaritasi({ mijozId = null, tovarIds, skidkasiz = false }) {
   const ids = [...new Set((tovarIds || []).map(Number))].filter(Boolean);
 
   let mijoz = null, asosiy;
@@ -86,7 +89,8 @@ async function narxXaritasi({ mijozId = null, tovarIds }) {
 
   return {
     ruyxat: asosiy ? { id: asosiy.id, nomi: asosiy.nomi, tur: asosiy.tur } : null,
-    narxlar,
+    // 2026-11-27: mijozning tovar skidkasi (skidka.utils) — narx skidkali, asl_narx/skidka qo'shiladi
+    narxlar: mijoz && !skidkasiz ? await xaritagaQoll(mijoz.id, narxlar) : narxlar,
   };
 }
 
@@ -119,9 +123,9 @@ async function toifaRuyxati(mijoz) {
  * @returns {{ ruyxat, narxlar: [{ tovar_id, narx, manba }], viloyat: {id,nomi}|null }}
  *   manba (viloyat rejimida): 'ruyxat' (toifa ro'yxati) | 'viloyat' | 'yoq' (sotilmaydi)
  */
-async function agentNarxXaritasi({ agent, mijozId = null, tovarIds }) {
+async function agentNarxXaritasi({ agent, mijozId = null, tovarIds, skidkasiz = false }) {
   if (!agent || !agent.territoriya_id) {
-    const r = await narxXaritasi({ mijozId, tovarIds });
+    const r = await narxXaritasi({ mijozId, tovarIds, skidkasiz: skidkasiz || !!(agent && agent.diller) });
     return { ...r, viloyat: null };
   }
   const ids = [...new Set((tovarIds || []).map(Number))].filter(Boolean);
@@ -142,7 +146,8 @@ async function agentNarxXaritasi({ agent, mijozId = null, tovarIds }) {
   });
   return {
     ruyxat: toifa ? { id: toifa.id, nomi: toifa.nomi, tur: toifa.tur } : null,
-    narxlar,
+    // 2026-11-27: mijoz skidkasi (dillerda — yo'q, narx erkin)
+    narxlar: mijoz && !agent.diller && !skidkasiz ? await xaritagaQoll(mijoz.id, narxlar) : narxlar,
     viloyat: viloyat ? { id: viloyat.id, nomi: viloyat.nomi } : null,
   };
 }

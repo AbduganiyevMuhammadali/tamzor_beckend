@@ -30,6 +30,12 @@ router.get('/:id/reyting',   auth(), ahf(c.reyting));
 router.post('/:id/reyting',  auth('Admin', 'Programmer'), ahf(c.reytingTuzat));
 
 /* Mijoz CRUD */
+/* 2026-11-27: mijozga tovar bo'yicha skidka */
+const sk = require('../controllers/web/skidka.controller');
+router.get('/:id/skidkalar',              auth(), ahf(sk.royxat));
+router.put('/:id/skidkalar',              auth(), ahf(sk.saqla));
+router.delete('/:id/skidkalar/:tovar_id', auth(), ahf(sk.ochir));
+
 router.get('/',     auth(), ahf(c.getAll));
 router.get('/:id',  auth(), ahf(c.getById));
 router.post('/',    auth(), joiMW(mijozSchemas.create), ahf(c.create));
