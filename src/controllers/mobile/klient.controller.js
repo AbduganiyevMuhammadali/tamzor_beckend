@@ -71,6 +71,11 @@ const mapKlientBody = (q) => {
   return data;
 };
 
+/* 2026-11-27: mijozni tahrirlash ruxsati. Agent — faqat web'da agent.mijoz_tahrir yoqilgan bo'lsa
+   (diller — doim). Boshqa rollar (dostavchik) — avvalgidek. */
+const tahrirRuxsati = (req) => req.currentRole !== 'agent' || !!(req.currentAgent && (req.currentAgent.mijoz_tahrir || req.currentAgent.diller));
+const TAHRIR_RAD = "Mijozni tahrirlashga ruxsatingiz yo'q — ofisga murojaat qiling";
+
 // Javob hujjat 4.1 kontrakti bo'yicha: { code, clients }
 //   code = keyingi sahifa kursori (shu sahifadagi oxirgi mijozning klientcode/id)
 //   so'rovda kelgan `code` dan KATTA id'li mijozlar qaytariladi (kursor paginatsiya)
@@ -160,6 +165,15 @@ class MobileKlientController {
     if (!data.nomi) throw new HttpException(400, req.mf('Validation faild'));
     if (req.currentRole === 'agent') data.agent_id = req.currentAgent.id;
     const mobilId = mobilKalit(q.mobilId);
+    // Oflayn navbat takrori — lokatsiya tekshiruvidan oldin (eski yozuv qayta kelsa ham bir xil javob)
+    if (mobilId) {
+      const bor0 = await MijozModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'] });
+      if (bor0) return ok(res, { klientId: String(bor0.id), takror: true }, 'Mijoz allaqachon saqlangan');
+    }
+    // 2026-11-27: agent yangi mijoz qo'shganda lokatsiya majburiy (diller — GPS'siz ishlaydi, majburiy emas)
+    if (req.currentRole === 'agent' && !req.currentAgent.diller && (data.lat === undefined || data.lng === undefined)) {
+      throw new HttpException(400, "Yangi mijoz uchun lokatsiya majburiy — GPS'ni yoqib, do'kon oldida qayta saqlang");
+    }
     const borini = async () => (mobilId ? MijozModel.findOne({ where: { mobil_id: mobilId }, attributes: ['id'] }) : null);
     const takrorJavob = (bor) => ok(res, { klientId: String(bor.id), takror: true }, 'Mijoz allaqachon saqlangan');
     if (mobilId) {
@@ -180,10 +194,17 @@ class MobileKlientController {
 
   // 4.6 updateClient/ → data: { klientId }
   updateClient = async (req, res, next) => {
-    const klient = await MijozModel.findByPk(req.query.klientId);
+    const klient = await MijozModel.findByPk(req.query.klientId ?? (req.body && req.body.klientId));
     if (!klient) throw new HttpException(404, req.mf('Not found'));
     if (!await mijozRuxsat(req, klient)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
-    await klient.update(mapKlientBody(req.query));
+    if (!tahrirRuxsati(req)) throw new HttpException(403, TAHRIR_RAD);
+    const q = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
+    const data = mapKlientBody(q);
+    // Agent faqat telefon, manzil va lokatsiyani o'zgartiradi (nomi, hudud — ofisda)
+    if (req.currentRole === 'agent') { delete data.nomi; delete data.yuridik_nomi; delete data.territoriya_id; }
+    if (data.telefon !== undefined) data.telefon = String(data.telefon).trim().slice(0, 20);
+    if (data.manzil !== undefined) data.manzil = String(data.manzil).trim().slice(0, 255);
+    await klient.update(data);
     ok(res, { klientId: String(klient.id) }, 'Yangilandi');
   };
 
@@ -196,6 +217,7 @@ class MobileKlientController {
       const klient = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id'] });
       if (!klient) throw new HttpException(404, req.mf('Not found'));
       if (!await mijozRuxsat(req, klient)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
+      if (!tahrirRuxsati(req)) throw new HttpException(403, TAHRIR_RAD);
       await MijozModel.update({ lat: nuqta.lat, lng: nuqta.lng }, { where: { id: klient.id } });
     }
     ok(res, { klientId: String(klientId || '') });

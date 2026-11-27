@@ -183,6 +183,13 @@ AgentModel.init({
     defaultValue: false,
     allowNull: false,
   },
+  // 2026-11-27: mobil ilovada mijozning telefoni, manzili, lokatsiyasini tahrirlash ruxsati (login → editClient).
+  // Ruxsatsiz agent mijozni umuman tahrirlay olmaydi. Diller — doim ruxsat (o'z mijozlari).
+  mijoz_tahrir: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false,
+  },
   // 2026-11-29: DILLER — hamkor, o'zi uchun ishlaydi (ombori "Diller: <ism>", narx erkin, kassa/GPS yo'q).
   // Faqat web'da belgilanadi (agent.controller dillerTekshir). utils/diller.utils.js
   diller: {

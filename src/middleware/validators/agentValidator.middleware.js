@@ -34,6 +34,8 @@ const asos = Joi.object({
   super_agent_id:    Joi.number().integer().positive().allow(null).optional(),
   // Mobil ilovada narxni o'zgartirish ruxsati (login → editPrice)
   narx_ozgartirish:  Joi.boolean().optional(),
+  // 2026-11-27: mobil ilovada mijoz telefon/manzil/lokatsiyasini tahrirlash ruxsati (login → editClient)
+  mijoz_tahrir:      Joi.boolean().optional(),
   // 2026-11-29: diller (hamkor) bayrog'i — qoidalar utils/diller.utils bayroqTekshir
   diller:            Joi.boolean().optional(),
   // Mobil ilova kirishi (login bo'sh — agent ilovaga kirmaydi; parol bo'sh — o'zgarmaydi)

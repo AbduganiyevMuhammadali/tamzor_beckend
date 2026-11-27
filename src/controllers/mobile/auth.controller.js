@@ -42,7 +42,9 @@ async function buildUserData(user, token, rol = 'agent') {
     transport: user.transport || '',
     isAudit: false,
     isConfirmation: isAgent && rollar.includes('tasdiq'),
-    editLocation: isAgent,
+    // 2026-11-27: mijozni tahrirlash (telefon, manzil, lokatsiya) — web'dagi agent.mijoz_tahrir; diller — doim
+    editLocation: isAgent && (!!user.mijoz_tahrir || !!user.diller),
+    editClient: isAgent && (!!user.mijoz_tahrir || !!user.diller),
     add_client: isAgent,
     location: !(isAgent && user.diller),
     // Ish vaqti — shu oraliqda ilova marshrutni (GPS) yozadi. .env: GPS_BOSH=08:00, GPS_OXIR=20:00

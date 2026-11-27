@@ -488,6 +488,8 @@ async function mobilHarakat(agent, b, { ruxsatFn, mobilKalit, mobilVaqt }) {
   const kerak = qatorlarOl(b.qatorlar, { idKey: 'buyumId' });
   const izoh = matnOl(b.izoh, 'izoh');
   const rasm = rasmOl(b.rasm);
+  // 2026-11-27: mijozga berishda rasm majburiy (mijozdan qaytarishda — ixtiyoriy)
+  if (b.tur === 'mijozga' && !rasm) throw new HttpException(400, "Buyumni mijozga berishda rasm majburiy — rasmga olib qayta yuboring");
   const mijoz = await MijozModel.findByPk(mijozId);
   if (!mijoz) throw new HttpException(404, 'Mijoz topilmadi');
   if (!await ruxsatFn(mijoz)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
