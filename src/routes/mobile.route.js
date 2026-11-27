@@ -104,6 +104,7 @@ router.get('/mijozCheklar',        mobileAuth(), h(c.mijozCheklar));   // 20.1 m
 /* ── 13. Reports ───────────────────────────────────────────────────────── */
 router.get('/getSellsReport',      mobileAuth(), h(c.getSellsReport));
 router.get('/getSellsReportMonth', mobileAuth(), h(c.getSellsReportMonth));
+router.get('/agentKpi',            mobileAuth(), h(c.agentKpi));   // 2026-11-27: agentning oylik KPI'si
 router.get('/getBranches',         mobileAuth(), h(c.getBranches));
 router.get('/getCircleReports',    mobileAuth(), h(c.getCircleReports));
 router.get('/getLinearReports',    mobileAuth(), h(c.getLinearReports));

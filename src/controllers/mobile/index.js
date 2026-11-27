@@ -108,6 +108,7 @@ module.exports = {
   // 13. Reports
   getSellsReport: hisobot.getSellsReport,
   getSellsReportMonth: hisobot.getSellsReportMonth,
+  agentKpi: hisobot.agentKpi,   // 2026-11-27
   getBranches: hisobot.getBranches,
   getCircleReports: hisobot.getCircleReports,
   getLinearReports: hisobot.getLinearReports,

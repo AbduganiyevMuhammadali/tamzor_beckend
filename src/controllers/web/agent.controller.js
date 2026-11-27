@@ -443,6 +443,13 @@ class AgentController {
     res.send({ id: agent.id, faol: agent.faol });
   };
 
+  /* ── GET /agents/:id/kpi?oy=YYYY-MM — agentning oylik KPI'si (mobil agentKpi bilan bir xil, 2026-11-27) ── */
+  kpi = async (req, res) => {
+    const agent = await AgentModel.findByPk(req.params.id);
+    if (!agent) throw new HttpException(404, 'Agent topilmadi');
+    res.send(await require('../../utils/agentKpi.utils').agentKpi(agent, req.query.oy));
+  };
+
   /* ── GET /agents/:id/register — savdo harakatlari tarixi ── */
   register = async (req, res) => {
     const agent = await AgentModel.findByPk(req.params.id, { include: INCLUDE });

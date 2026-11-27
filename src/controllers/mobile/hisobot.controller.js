@@ -2,6 +2,7 @@ const { Op, fn, col } = require('sequelize');
 const { ArizaModel } = require('../../models/ariza.model');
 const TerritoriyaModel = require('../../models/territoriya.model');
 const { ok, requireRole } = require('./shared');
+const { agentKpi } = require('../../utils/agentKpi.utils');
 
 const parseDate = (s) => (s ? new Date(String(s).replace(/\./g, '-')) : null);
 
@@ -40,6 +41,13 @@ class MobileHisobotController {
   // 12.4 getLinearReports → [{ title, values:[{title, points:[]}] }]
   getLinearReports = async (req, res, next) => {
     ok(res, []);
+  };
+
+  // 2026-11-27: GET agentKpi?oy=YYYY-MM — agentning O'Z oylik KPI'si (savdo/reja, bonus, yangi mijozlar,
+  // tashrif, marshrut, yig'ilgan qarz, dona, kunlik grafik). Super agent kuzatuvda — kuzatilayotgan agentniki.
+  agentKpi = async (req, res, next) => {
+    if (!requireRole(req, res, 'agent')) return;
+    ok(res, await agentKpi(req.currentAgent, req.query.oy));
   };
 
   // 12.5 getSellsReport → data MASSIV (ilova birinchi elementni oladi)

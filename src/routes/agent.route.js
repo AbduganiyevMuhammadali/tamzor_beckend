@@ -21,6 +21,7 @@ router.delete('/:id', auth(), ahf(c.delete));
 /* Qo'shimcha */
 router.get('/:id/mijozlar',  auth(), ahf(c.getMijozlar));
 router.get('/:id/register',  auth(), ahf(c.register));
+router.get('/:id/kpi',       auth(), ahf(c.kpi));        // 2026-11-27: oylik KPI
 router.get('/:id/pul',       auth(), ruxsat('moliya', 'view'), ahf(c.pul));   // 2026-11-22: agent pul daftari (2026-11-24: moliya view)
 router.patch('/:id/faol',    auth(), ahf(c.toggleFaol));
 
