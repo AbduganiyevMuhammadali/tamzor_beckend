@@ -52,6 +52,12 @@ AvtolavkaHujjatModel.init({
   tasdiqlagan_sana: { type: DataTypes.DATE, allowNull: true },
   // Agent yuklangan tovarni mobilda "qabul qildim" deb tasdiqlagan vaqt
   agent_qabul_vaqt: { type: DataTypes.DATE, allowNull: true },
+  // 2026-11-27: yuk dalolatnomasi — agent imzosi (utils/yukImzo.utils.js)
+  imzo_holat:       { type: DataTypes.ENUM('kutilmoqda', 'imzolangan', 'rad_etildi'), allowNull: true, defaultValue: null },
+  agent_imzo:       { type: DataTypes.STRING(255), allowNull: true },
+  imzo_vaqt:        { type: DataTypes.DATE, allowNull: true },
+  agent_rad_sababi: { type: DataTypes.STRING(255), allowNull: true },
+  imzo_mobil_id:    { type: DataTypes.STRING(64), allowNull: true },
 }, {
   sequelize, modelName: 'AvtolavkaHujjatModel', tableName: 'avtolavka_hujjat',
   timestamps: true, paranoid: false,

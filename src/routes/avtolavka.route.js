@@ -34,6 +34,8 @@ router.post('/yuklash',                auth(), h(c.yuklashCreate));
 router.patch('/yuklash/:id',           auth(), h(c.yuklashUpdate));
 router.patch('/yuklash/:id/tasdiqla',  auth(), h(c.yuklashTasdiqla));
 router.patch('/yuklash/:id/rad',       auth(), h(c.yuklashRad));
+router.patch('/yuklash/:id/tuzat',     auth(), h(c.yuklashTuzat));    // 2026-11-27: agent rad etgan dalolatnomani tuzatish
+router.get('/yuklash/:id/dalolatnoma', auth(), h(c.dalolatnoma));     // 2026-11-27: yuk dalolatnomasi
 router.delete('/yuklash/:id',          auth(), h(c.yuklashDelete));
 
 router.post('/qabul',                  auth(), h(c.qabulCreate));

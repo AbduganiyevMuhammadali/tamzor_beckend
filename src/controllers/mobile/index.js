@@ -138,6 +138,8 @@ module.exports = {
   yuklashlar: avtolavka.yuklashlar,
   yuklashQabul: avtolavka.yuklashQabul,
   yuklashBekor: avtolavka.yuklashBekor,
+  yuklashImzo: avtolavka.yuklashImzo,   // 2026-11-27
+  yuklashRad: avtolavka.yuklashRad,
   kunYakuni: avtolavka.kunYakuni,
   kunniYopish: avtolavka.kunniYopish,
 

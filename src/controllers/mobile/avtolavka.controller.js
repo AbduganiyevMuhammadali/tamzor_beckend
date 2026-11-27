@@ -93,6 +93,11 @@ const hujjatShakli = (h) => ({
   vaqt: h.createdAt,
   tasdiqVaqt: h.tasdiqlagan_sana,
   agentQabulVaqt: h.agent_qabul_vaqt,
+  // 2026-11-27: yuk dalolatnomasi — imzoHolat: null (talab yo'q) | kutilmoqda | imzolangan | rad_etildi
+  imzoHolat: h.imzo_holat || null,
+  imzo: h.agent_imzo || null,
+  imzoVaqt: h.imzo_vaqt || null,
+  agentRadSababi: h.agent_rad_sababi || '',
   radSababi: h.rad_sababi || '',
   izoh: h.izoh || '',
   dona: n(h.jami_dona),
@@ -596,6 +601,25 @@ class MobileAvtolavkaController {
     ok(res, hujjatShakli(h), 'Yuklash qabul qilindi');
   };
 
+  // 2026-11-27: POST yuklashImzo/ { docId, imzo (chekYuklash/ qaytargan rasm yo'li), mobilId } — dalolatnomani imzolash
+  yuklashImzo = async (req, res) => {
+    const agent = dillerEmas(req, res); if (!agent) return;
+    const Y = require('../../utils/yukImzo.utils');
+    const imzo = chekRasmOl(req.body.imzo, { majburiy: true, xabar: 'Imzo rasmi majburiy (imzo)' });
+    if (!/\.(png|jpe?g|webp)$/i.test(imzo)) throw new HttpException(400, "Imzo rasm bo'lishi kerak (png/jpg)");
+    const r = await Y.imzola(agent, { docId: req.body.docId, imzo, mobilId: mobilKalit(req.body.mobilId) });
+    const h = await AvtolavkaHujjatModel.findByPk(r.hujjat.id, { include: INCLUDE });
+    ok(res, { ...hujjatShakli(h), takror: r.takror }, r.takror ? 'Allaqachon imzolangan' : 'Dalolatnoma imzolandi');
+  };
+
+  // 2026-11-27: POST yuklashRad/ { docId, sabab } — soni mos emas: omborchi tuzatadi
+  yuklashRad = async (req, res) => {
+    const agent = dillerEmas(req, res); if (!agent) return;
+    const r = await require('../../utils/yukImzo.utils').radEt(agent, { docId: req.body.docId, sabab: req.body.sabab });
+    const h = await AvtolavkaHujjatModel.findByPk(r.hujjat.id, { include: INCLUDE });
+    ok(res, { ...hujjatShakli(h), takror: r.takror }, 'Rad etildi — omborchi tuzatadi');
+  };
+
   // POST yuklashBekor/ { docId } — agent o'z so'rovini qaytarib oladi (faqat tasdiqlanmagan)
   yuklashBekor = async (req, res) => {
     const agent = dillerEmas(req, res); if (!agent) return;
@@ -727,7 +751,7 @@ class MobileAvtolavkaController {
     const agent = avtoAgent(req, res); if (!agent) return;
     const sana = bugun();
     const mashina = await mashinaTovarlari(agent);
-    const [holat, mijozlar, rejalar, tashriflar, ombor, tavsiya, yuklashlar, brak, savdolar, viloyat, kassalar, pul, kochirishlar] = await Promise.all([
+    const [holat, mijozlar, rejalar, tashriflar, ombor, tavsiya, yuklashlar, imzosizlar, brak, savdolar, viloyat, kassalar, pul, kochirishlar] = await Promise.all([
       holatHisobla(agent, sana, mashina),
       // 2026-11-21: faqat agentga biriktirilgan mijozlar (o'zi yaratganlari ham — saveKlient agent_id yozadi)
       MijozModel.findAll({ where: { faol: true, agent_id: agent.id }, order: [['nomi', 'ASC']], raw: true }),
@@ -736,6 +760,7 @@ class MobileAvtolavkaController {
       omborTovarlari(agent),
       agent.diller ? null : tavsiyaShakli(agent).catch(() => null),
       agent.diller ? [] : bugungiYuklashlar(agent, sana),
+      agent.diller ? [] : require('../../utils/yukImzo.utils').imzolanmaganlar(agent.id, null, { include: true }),
       brakTovarlari(agent),
       agentSavdolari(agent),
       agent.territoriya_id ? TerritoriyaModel.findByPk(agent.territoriya_id, { attributes: ['id', 'nomi'], raw: true }) : null,
@@ -804,6 +829,8 @@ class MobileAvtolavkaController {
       narx: agent.diller ? { ...narx.javob, viloyat: {}, viloyatQoida: false, skidkalar: {} } : narx.javob,
       // Oflayn yuklash so'rovi va Mashina ekrani uchun
       ombor, tavsiya: agent.diller ? null : tavsiya, yuklashlar,
+      // 2026-11-27: imzolanishi kerak bo'lgan yuk dalolatnomalari (kutilmoqda | rad_etildi) — bor ekan sotuv bloklangan
+      dalolatnomalar: imzosizlar.map(hujjatShakli),
       sabablar: SABABLAR.filter(x => x.tip === 'Причина').map(x => ({ id: x.id, name: x.name, neytral: !!x.neytral })),
       reytingQoida: await reytingQoidalari(),
     });

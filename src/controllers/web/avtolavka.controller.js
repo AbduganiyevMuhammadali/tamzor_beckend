@@ -174,6 +174,23 @@ class AvtolavkaController {
     res.send(await AvtolavkaHujjatModel.findByPk(hujjat.id, { include: INCLUDE }));
   };
 
+  // 2026-11-27: PATCH /avtolavka/yuklash/:id/tuzat { qatorlar:[{tovar_id, dona}] } — agent rad etgan (yoki imzo
+  // kutayotgan) yuklash sonlarini tuzatish: farq asosiy ombor ↔ agent ombori ko'chadi, agent qayta imzolaydi
+  yuklashTuzat = async (req, res) => {
+    const Y = require('../../utils/yukImzo.utils');
+    const h = await Y.tuzat(req.params.id, req.body && req.body.qatorlar, req.currentUser);
+    res.send(Y.dalolatnoma(await AvtolavkaHujjatModel.findByPk(h.id, { include: INCLUDE })));
+  };
+
+  // 2026-11-27: GET /avtolavka/yuklash/:id/dalolatnoma — yuk dalolatnomasi (ko'rish / chop etish / PDF)
+  dalolatnoma = async (req, res) => {
+    const h = await AvtolavkaHujjatModel.findByPk(req.params.id, { include: INCLUDE });
+    if (!h || h.tur !== 'yuklash') throw new HttpException(404, 'Yuklash hujjati topilmadi');
+    const S = require('../../models/sozlama.model');
+    const chek = Object.fromEntries((await S.findAll({ where: { kalit: ['chek_nomi', 'chek_telefon', 'chek_manzil'] }, raw: true })).map(x => [x.kalit.replace('chek_', ''), x.qiymat]));
+    res.send(require('../../utils/yukImzo.utils').dalolatnoma(h, { firma: chek }));
+  };
+
   // PATCH /avtolavka/yuklash/:id/tasdiqla — tovar agent omboriga o'tadi
   yuklashTasdiqla = async (req, res) => {
     const id = req.params.id;
@@ -730,6 +747,8 @@ class AvtolavkaController {
     if (sorovId && await takrorJavob()) return;
     const agent = sklad ? null : await avtolavkaAgent(b.agent_id);
     if (agent && !agent.faol) throw new HttpException(400, `${agent.fullname} faol emas`);
+    // 2026-11-27: agent yuk dalolatnomasini imzolamaguncha uning nomidan ham sotilmaydi
+    if (agent) await require('../../utils/yukImzo.utils').sotuvBlokTekshir(agent);
     const mijoz = await MijozModel.findByPk(parseInt(b.mijoz_id, 10) || 0);
     if (!mijoz) throw new HttpException(400, 'Mijozni tanlang');
     if (!mijoz.faol) throw new HttpException(400, `"${mijoz.nomi}" faol emas`);

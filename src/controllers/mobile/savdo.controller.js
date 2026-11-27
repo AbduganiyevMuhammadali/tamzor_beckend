@@ -416,6 +416,8 @@ class MobileSavdoController {
     const mijozTek = req.body && req.body.klientId ? await MijozModel.findByPk(req.body.klientId, { attributes: ['id', 'agent_id'] }) : null;
     if (mijozTek) await dillerMijozTekshir(req, mijozTek);
     if (mijozTek && !await sotuvMijozRuxsat(req, mijozTek)) throw new HttpException(403, 'Bu mijoz sizga biriktirilmagan');
+    // 2026-11-27: yuk dalolatnomasi imzolanmaguncha sotuv yo'q (sozlama yuk_imzo_majburiy; takror yuqorida qaytgan)
+    await require('../../utils/yukImzo.utils').sotuvBlokTekshir(req.currentAgent);
     let ariza;
     try {
       ariza = req.currentAgent.diller

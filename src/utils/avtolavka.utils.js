@@ -194,6 +194,8 @@ async function yuklashniTasdiqla(hujjatYokiId, userId, t) {
   }
   await TovarRegisterModel.bulkCreate(yozuvlar, { transaction: t });
   await hujjat.update({ holat: 'tasdiqlangan', tasdiqlagan_id: userId || null, tasdiqlagan_sana: sana }, { transaction: t });
+  // 2026-11-27: sozlama yoqilgan bo'lsa agent dalolatnomani imzolashi kutiladi (yukImzo.utils)
+  await require('./yukImzo.utils').tasdiqdaBelgila(hujjat, t);
   return hujjat;
 }
 

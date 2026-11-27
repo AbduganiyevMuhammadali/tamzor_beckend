@@ -140,6 +140,8 @@ router.post('/yuklashSorov',       mobileAuth(), h(c.yuklashSorov));
 router.get('/yuklashlar',          mobileAuth(), h(c.yuklashlar));
 router.post('/yuklashQabul',       mobileAuth(), h(c.yuklashQabul));
 router.post('/yuklashBekor',       mobileAuth(), h(c.yuklashBekor));
+router.post('/yuklashImzo',        mobileAuth(), h(c.yuklashImzo));   // 2026-11-27: yuk dalolatnomasini imzolash
+router.post('/yuklashRad',         mobileAuth(), h(c.yuklashRad));    // 2026-11-27: soni mos emas
 router.get('/kunYakuni',           mobileAuth(), h(c.kunYakuni));
 router.post('/kunniYopish',        mobileAuth(), h(c.kunniYopish));
 
