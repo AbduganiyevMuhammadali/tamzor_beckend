@@ -28,6 +28,7 @@ router.get('/agentlar',    auth(), awaitHandlerFactory(hisobotController.agentla
 router.get('/audit',       auth(), awaitHandlerFactory(hisobotController.auditRuyxat));
 router.get('/sotmaslik',   auth(), awaitHandlerFactory(hisobotController.sotmaslikRuyxat));
 router.get('/agent-savdo', auth(), awaitHandlerFactory(hisobotController.agentSavdo));
+router.get('/mijoz-faollik', auth(), awaitHandlerFactory(hisobotController.mijozFaollik));   // 2026-11-27: oy bo'yicha mijoz reytingi
 router.get('/marshrut',    auth(), awaitHandlerFactory(hisobotController.agentMarshrut));
 
 /* ── Inkassatsiya ── */

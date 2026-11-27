@@ -1124,6 +1124,57 @@ class HisobotController {
     res.send(rows);
   };
 
+  /* GET /hisobot/mijoz-faollik?oy=YYYY-MM&min_zakaz=1&agent_id=&holat=faol|nofaol&search=&page=  (2026-11-27)
+     Oy bo'yicha mijozlar reytingi. Zakaz — mijozga bekor qilinmagan sotuv (ariza turi 'sotish' yoki
+     'diller_sotuv'), oy — zakaz yaratilgan mahalliy oy. Faol: shu oyda kamida min_zakaz ta zakaz bergan
+     (summa bo'yicha reyting, o'rin). Nofaol: faol mijoz kartasi, lekin zakazi min_zakaz'dan kam (0 ham).
+     agent_id — mijozning agenti (diller ham bo'lishi mumkin). */
+  mijozFaollik = async (req, res) => {
+    const hozir = new Date();
+    const oy = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(req.query.oy || '')) ? String(req.query.oy)
+      : `${hozir.getFullYear()}-${String(hozir.getMonth() + 1).padStart(2, '0')}`;
+    const minZ = req.query.min_zakaz === undefined || req.query.min_zakaz === '' ? 1 : Number(req.query.min_zakaz);
+    if (!Number.isInteger(minZ) || minZ < 1 || minZ > 1000) throw new HttpException(400, "min_zakaz 1 dan 1000 gacha butun son bo'lsin");
+    const holat = req.query.holat === 'nofaol' ? 'nofaol' : 'faol';
+    const LIMIT = 100;
+    const sahifa = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const [y, m] = oy.split('-').map(Number);
+    const dan = new Date(y, m - 1, 1, 0, 0, 0, 0), gacha = new Date(y, m, 1, 0, 0, 0, 0);
+    const R = { dan, gacha, minZ, lim: LIMIT, off: (sahifa - 1) * LIMIT };
+    const w = ['m.deletedAt IS NULL'];
+    if (req.query.agent_id) { w.push('m.agent_id = :agent'); R.agent = parseInt(req.query.agent_id, 10) || 0; }
+    const search = String(req.query.search || '').trim();
+    if (search) { w.push('(m.nomi LIKE :s OR m.telefon LIKE :s)'); R.s = `%${search}%`; }
+    if (holat === 'nofaol') w.push('m.faol = 1');
+    const ZAKAZ = `SELECT mijoz_id, COUNT(*) soni, SUM(jami_summa) summa, MAX(createdAt) oxirgi
+      FROM ariza WHERE turi IN ('sotish', 'diller_sotuv') AND deletedAt IS NULL AND holat <> 'bekor' AND mijoz_id IS NOT NULL
+        AND createdAt >= :dan AND createdAt < :gacha GROUP BY mijoz_id`;
+    const asos = `FROM mijoz m LEFT JOIN (${ZAKAZ}) z ON z.mijoz_id = m.id LEFT JOIN agent ag ON ag.id = m.agent_id
+      WHERE ${w.join(' AND ')} AND ${holat === 'faol' ? 'COALESCE(z.soni, 0) >= :minZ' : 'COALESCE(z.soni, 0) < :minZ'}`;
+    const Q = (sql) => sequelize.query(sql, { replacements: R, type: sequelize.QueryTypes.SELECT });
+    const [rows, [jami], [faolJ], [nofaolJ]] = await Promise.all([
+      Q(`SELECT m.id, m.nomi, m.telefon, m.manzil, m.agent_id, ag.fullname agent_nomi, ag.diller,
+           COALESCE(z.soni, 0) zakaz_soni, COALESCE(z.summa, 0) summa, z.oxirgi oxirgi_zakaz,
+           (SELECT MAX(a2.createdAt) FROM ariza a2 WHERE a2.mijoz_id = m.id AND a2.turi IN ('sotish', 'diller_sotuv') AND a2.deletedAt IS NULL AND a2.holat <> 'bekor') oxirgi_zakaz_umuman
+         ${asos} ORDER BY ${holat === 'faol' ? 'summa DESC, zakaz_soni DESC, m.id' : 'zakaz_soni DESC, oxirgi_zakaz_umuman DESC, m.id'} LIMIT :lim OFFSET :off`),
+      Q(`SELECT COUNT(*) soni, COALESCE(SUM(z.summa), 0) summa, COALESCE(SUM(z.soni), 0) zakaz ${asos}`),
+      Q(`SELECT COUNT(*) soni FROM mijoz m LEFT JOIN (${ZAKAZ}) z ON z.mijoz_id = m.id WHERE ${w.filter(x => x !== 'm.faol = 1').join(' AND ')} AND COALESCE(z.soni, 0) >= :minZ`),
+      Q(`SELECT COUNT(*) soni FROM mijoz m LEFT JOIN (${ZAKAZ}) z ON z.mijoz_id = m.id WHERE ${[...w.filter(x => x !== 'm.faol = 1'), 'm.faol = 1'].join(' AND ')} AND COALESCE(z.soni, 0) < :minZ`),
+    ]);
+    res.send({
+      oy, min_zakaz: minZ, holat, sahifa, limit: LIMIT,
+      jami: { soni: Number(jami.soni), summa: Number(jami.summa), zakaz: Number(jami.zakaz) },
+      faol_soni: Number(faolJ.soni), nofaol_soni: Number(nofaolJ.soni),
+      rows: rows.map((r, i) => ({
+        orin: holat === 'faol' ? R.off + i + 1 : null,
+        id: r.id, nomi: r.nomi, telefon: r.telefon, manzil: r.manzil,
+        agent_id: r.agent_id, agent_nomi: r.agent_nomi || null, diller: !!r.diller,
+        zakaz_soni: Number(r.zakaz_soni), summa: Number(r.summa), oxirgi_zakaz: r.oxirgi_zakaz || null,
+        oxirgi_zakaz_umuman: r.oxirgi_zakaz_umuman || null,
+      })),
+    });
+  };
+
   // Agent savdo hisoboti (agentlar bo'yicha savdo statistikasi)
   agentSavdo = async (req, res) => {
     // Mahalliy kun chegaralari Date sifatida (createdAt UTC saqlanadi)
