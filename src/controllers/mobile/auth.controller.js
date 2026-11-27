@@ -69,6 +69,8 @@ async function buildUserData(user, token, rol = 'agent') {
     asosiyRol: asosiyRol(user, rol),
     rollar,
     superAgent: isAgent && !!user.super_agent && rollar.includes('super_agent'),
+    // 2026-11-27: super agent kuzatuvda ko'radigan bo'limlar (admin belgilaydi) — { bugun, mijozlar, qarz, sklad, kassa, cheklar, kpi }
+    superKuzatuv: isAgent && user.super_agent ? require('../../utils/superKuzatuv.utils').ruxsatlar(user) : null,
     viloyat: isAgent && filial && Number(filial.id) === Number(user.territoriya_id) ? { id: filial.id, nomi: filial.nomi } : null,
   };
 }

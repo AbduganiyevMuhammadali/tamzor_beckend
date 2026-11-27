@@ -47,6 +47,7 @@ class MobileHisobotController {
   // tashrif, marshrut, yig'ilgan qarz, dona, kunlik grafik). Super agent kuzatuvda — kuzatilayotgan agentniki.
   agentKpi = async (req, res, next) => {
     if (!requireRole(req, res, 'agent')) return;
+    require('../../utils/superKuzatuv.utils').tekshir(req, 'kpi');
     ok(res, await agentKpi(req.currentAgent, req.query.oy));
   };
 

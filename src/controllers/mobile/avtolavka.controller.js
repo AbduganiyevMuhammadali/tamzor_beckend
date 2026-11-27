@@ -778,7 +778,9 @@ class MobileAvtolavkaController {
     const ruyxatIds = new Set(narx.javob.ruyxatlar.map(r => r.id));
     const agentNomi = new Map((await AgentModel.findAll({ attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]));
 
-    ok(res, {
+    // 2026-11-27: kuzatuvda — super agent ruxsatlari bo'yicha qisqartiriladi (superKuzatuv.utils)
+    const okK = (r, d) => ok(r, req.kuzatuv ? require('../../utils/superKuzatuv.utils').sinxronFiltr(d, req.superAgent) : d);
+    okK(res, {
       serverVaqt: new Date(),
       sana,
       agent: {
@@ -848,7 +850,9 @@ class MobileAvtolavkaController {
     const natija = [];
     const pullar = await majburiyatlar(agentlar.map(a => a.id));
     for (const a of agentlar) natija.push(await agentQisqa(a, sana, viloyatlar, pullar.get(a.id)));   // ketma-ket: pool to'lmasin
-    ok(res, natija);
+    // 2026-11-27: admin yopgan bo'limlar ro'yxat kartasida ham ko'rinmaydi
+    const SK = require('../../utils/superKuzatuv.utils');
+    ok(res, natija.map(a => SK.qisqaFiltr(a, sup)));
   };
 
   // POST savdoQaytarish/ { savdoId, mobilId, vaqt, tolov:'qarz'|'naqd', izoh, qatorlar:[{ tovarId, dona, yaroqli, sabab }] }

@@ -22,7 +22,7 @@ const TAHRIR_MAYDONLAR = [
   'fullname', 'telefon', 'passport', 'tugilgan_sana', 'territoriya_id', 'plan_summa', 'bonus_foiz',
   'kredit_limit', 'max_chegirma', 'ish_boshlagan', 'tashrif_kunlari', 'boshlanish_manzil', 'transport',
   'mashina_raqam', 'radius_km', 'izoh', 'faol', 'login', 'parol', 'super_agent', 'super_agent_id',
-  'narx_ozgartirish', 'diller', 'mijoz_tahrir',
+  'narx_ozgartirish', 'diller', 'mijoz_tahrir', 'super_kuzatuv',
 ];
 // 'avtolavka' endi so'rovdan yozilmaydi: 2026-11-21 dan HAMMA agent o'z omboridan sotadi (model standarti true)
 
@@ -48,6 +48,8 @@ function sanitize(body) {
       out[k] = isNaN(n) ? null : n;
     }
   });
+  // 2026-11-27: super_kuzatuv obyekt → JSON matn (null — hammasi ochiq)
+  if (Object.prototype.hasOwnProperty.call(out, 'super_kuzatuv')) out.super_kuzatuv = require('../../utils/superKuzatuv.utils').kiritish(out.super_kuzatuv);
   // tashrif_kunlari: array → vergul bilan string
   if (Array.isArray(out.tashrif_kunlari)) {
     out.tashrif_kunlari = out.tashrif_kunlari.length ? out.tashrif_kunlari.join(',') : null;
@@ -69,6 +71,7 @@ const shakl = (a) => {
   j.super_agent_nomi = j.superAgent ? j.superAgent.fullname : null;
   j.narx_ozgartirish = !!j.narx_ozgartirish;
   j.mijoz_tahrir = !!j.mijoz_tahrir;
+  j.super_kuzatuv = require('../../utils/superKuzatuv.utils').ruxsatlar(j);
   j.diller = !!j.diller;
   j.territoriya = j.territoriya || null;
   return j;

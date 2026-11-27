@@ -61,6 +61,7 @@ class MobileHistoryController {
  * Bekor qilingan buyurtmalar kirmaydi. Sahifa — 20 ta yozuv.
  */
 async function mijozCheklar(req, res) {
+  require('../../utils/superKuzatuv.utils').tekshir(req, 'cheklar');   // 2026-11-27: super agent ruxsati
   const klientId = parseInt(req.query.klientId || req.query.clientId, 10);
   if (!klientId) throw new HttpException(400, 'klientId majburiy');
   const mijoz = await MijozModel.findByPk(klientId, { attributes: ['id', 'agent_id', 'nomi', 'balans', 'kredit_limit', 'tolov_muddati_kun'] });

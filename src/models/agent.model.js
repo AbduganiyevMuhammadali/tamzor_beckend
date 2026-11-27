@@ -190,6 +190,11 @@ AgentModel.init({
     defaultValue: false,
     allowNull: false,
   },
+  // 2026-11-27: super agent kuzatuvda qaysi bo'limlarni ko'radi — JSON { bolim: bool } (utils/superKuzatuv.utils.js)
+  super_kuzatuv: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+  },
   // 2026-11-29: DILLER — hamkor, o'zi uchun ishlaydi (ombori "Diller: <ism>", narx erkin, kassa/GPS yo'q).
   // Faqat web'da belgilanadi (agent.controller dillerTekshir). utils/diller.utils.js
   diller: {

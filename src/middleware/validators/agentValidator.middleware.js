@@ -36,6 +36,8 @@ const asos = Joi.object({
   narx_ozgartirish:  Joi.boolean().optional(),
   // 2026-11-27: mobil ilovada mijoz telefon/manzil/lokatsiyasini tahrirlash ruxsati (login → editClient)
   mijoz_tahrir:      Joi.boolean().optional(),
+  // 2026-11-27: super agent kuzatuv bo'limlari { bugun, mijozlar, qarz, sklad, kassa, cheklar, kpi: bool } | null
+  super_kuzatuv:     Joi.object().pattern(Joi.string().valid('bugun', 'mijozlar', 'qarz', 'sklad', 'kassa', 'cheklar', 'kpi'), Joi.boolean()).allow(null).optional(),
   // 2026-11-29: diller (hamkor) bayrog'i — qoidalar utils/diller.utils bayroqTekshir
   diller:            Joi.boolean().optional(),
   // Mobil ilova kirishi (login bo'sh — agent ilovaga kirmaydi; parol bo'sh — o'zgarmaydi)
