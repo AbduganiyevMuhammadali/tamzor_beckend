@@ -867,7 +867,21 @@ class DashboardController {
       ...dillerQarzlar.map(d => ({ id: null, tur: 'diller', diller_id: d.id, nomi: d.nomi, telefon: d.telefon || '', qarz: d.qarz })),
     ].sort((a, b) => b.qarz - a.qarz).slice(0, 5);
 
+    // 2026-11-27: sotuv kanallar kesimi — agent, sklad (xodimsiz), distributsiya, dillerga berish (kompaniya sotuvi)
+    //   va dillerning O'Z mijozlariga sotuvi (kompaniya daromadi emas — umumiy sotuv summasiga qo'shilmaydi)
+    const KANAL_SEG = `CASE WHEN turi = 'diller_sotuv' THEN 'diller_sotuv' WHEN kanal = 'avtolavka' THEN 'agent' WHEN kanal = 'sklad' THEN 'sklad'
+      WHEN kanal = 'diller' THEN 'dillerga_berish' ELSE 'distributsiya' END`;
+    const kanalRows = await sequelize.query(`
+      SELECT ${KANAL_SEG} seg, COALESCE(SUM(jami_summa), 0) summa, COUNT(*) son, COUNT(DISTINCT mijoz_id) mijozlar
+      FROM ariza WHERE turi IN ('sotish', 'diller_sotuv') AND deletedAt IS NULL AND holat <> 'bekor' AND createdAt BETWEEN :from AND :to
+      GROUP BY seg`, { replacements: { from, to }, type: Q });
+    const kanallar = ['agent', 'sklad', 'distributsiya', 'dillerga_berish', 'diller_sotuv'].map(k => {
+      const r = kanalRows.find(x => x.seg === k) || {};
+      return { kanal: k, summa: Number(r.summa || 0), son: Number(r.son || 0), mijozlar: Number(r.mijozlar || 0), kompaniya_sotuvi: k !== 'diller_sotuv' };
+    });
+
     res.send({
+      kanallar,
       // KPI kartochkalar
       kpi: {
         kirim_summa:     curSumma,

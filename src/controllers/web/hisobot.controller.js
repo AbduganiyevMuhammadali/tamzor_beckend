@@ -1843,6 +1843,14 @@ class HisobotController {
     if ((davrGacha - davrDan) / 86400000 > 366) throw new HttpException(400, "Davr 366 kundan oshmasligi kerak");
 
     const arizaWhere = { turi: 'sotish', deletedAt: null };
+    // 2026-11-27: kanal=agent|sklad|distributsiya|dillerga_berish|diller_sotuv (berilmasa — hamma kompaniya sotuvi)
+    const KANAL = { agent: 'avtolavka', sklad: 'sklad', distributsiya: 'distributsiya', dillerga_berish: 'diller' };
+    const kanal = req.query.kanal;
+    if (kanal !== undefined && kanal !== '' && !KANAL[kanal] && kanal !== 'diller_sotuv') {
+      throw new HttpException(400, "kanal noto'g'ri (agent, sklad, distributsiya, dillerga_berish, diller_sotuv)");
+    }
+    if (kanal === 'diller_sotuv') arizaWhere.turi = 'diller_sotuv';
+    else if (KANAL[kanal]) arizaWhere.kanal = KANAL[kanal];
     if (agent_id) arizaWhere.agent_id = agent_id;
     arizaWhere.createdAt = { [Op.gte]: davrDan, [Op.lte]: davrGacha };
 

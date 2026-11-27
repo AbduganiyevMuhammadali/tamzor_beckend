@@ -508,19 +508,25 @@ class AvtolavkaController {
   // takror — "takror chek ehtimoli": shu mijozga, shu mashinadan, aynan shu summaga 2 soat ichida yana
   //   yetkazilgan sotuv bor (xodim ikki marta bosgan). Admin tekshirib, ortiqchasini bekor qiladi.
   // holat=bekor — bekor qilingan cheklar (sabab bilan); odatda faqat yetkazilganlar.
+  // 2026-11-27: tur=agent|sklad|diller — agent va diller sotuvlari alohida sahifada (tur berilmasa — avvalgidek
+  //   agent + sklad). tur=diller: dillerning O'Z mijozlariga sotuvi (ariza.turi='diller_sotuv'), agent_id — diller.
+  //   Diller cheki bu yerdan bekor qilinmaydi (bekor_mumkin=false).
   sotuvlar = async (req, res) => {
     const D = davr(req.query, 1);
+    const tur = ['agent', 'sklad', 'diller'].includes(req.query.tur) ? req.query.tur : null;
     const LIMIT = 100;
     const sahifa = Math.max(1, parseInt(req.query.page, 10) || 1);
     const NAQD = `(CASE WHEN a.tolangan_summa > 0 THEN a.tolangan_summa WHEN a.tolov_turi IN ('naqt','naqd') THEN a.jami_summa ELSE 0 END)`;
     const QARZ = `GREATEST(0, a.jami_summa - ${NAQD})`;
-    const TAKROR = `EXISTS (SELECT 1 FROM ariza b WHERE b.id <> a.id AND b.deletedAt IS NULL AND b.turi = 'sotish' AND b.holat = 'yetkazildi'
+    const TAKROR = `EXISTS (SELECT 1 FROM ariza b WHERE b.id <> a.id AND b.deletedAt IS NULL AND b.turi = a.turi AND b.holat = 'yetkazildi'
          AND b.mijoz_id = a.mijoz_id AND COALESCE(b.agent_id, 0) = COALESCE(a.agent_id, 0) AND b.jami_summa = a.jami_summa
          AND ABS(TIMESTAMPDIFF(MINUTE, a.yetkazilgan_sana, b.yetkazilgan_sana)) <= 120)`;
     const bekorKorinish = req.query.holat === 'bekor';
 
     const r = { prefiks: `${AGENT_PREFIKS}%`, from: D.from, to: D.to, radius: SOTUV_RADIUS_M, lim: LIMIT, off: (sahifa - 1) * LIMIT };
-    const shart = [`a.deletedAt IS NULL`, `a.turi = 'sotish'`, `a.holat = '${bekorKorinish ? 'bekor' : 'yetkazildi'}'`, `a.kanal IN ('avtolavka','sklad')`, `a.yetkazilgan_sana BETWEEN :from AND :to`];
+    const kanalShart = tur === 'diller' ? `a.turi = 'diller_sotuv'`
+      : `a.turi = 'sotish' AND ${tur === 'agent' ? `a.kanal = 'avtolavka'` : tur === 'sklad' ? `a.kanal = 'sklad'` : `a.kanal IN ('avtolavka','sklad')`}`;
+    const shart = [`a.deletedAt IS NULL`, kanalShart, `a.holat = '${bekorKorinish ? 'bekor' : 'yetkazildi'}'`, `a.yetkazilgan_sana BETWEEN :from AND :to`];
     const search = String(req.query.search || '').trim();
     if (search) { shart.push(`(a.raqam LIKE :s OR a.mijoz_nomi LIKE :s)`); r.s = `%${search}%`; }
     if (req.query.tolov === 'qarz') shart.push(`${QARZ} > 0.5`);
@@ -535,6 +541,7 @@ class AvtolavkaController {
     const [rows, [jami], agentlar] = await Promise.all([
       q(`SELECT a.id, a.raqam, a.yetkazilgan_sana vaqt, a.agent_id, a.agent_nomi, a.mijoz_id, a.mijoz_nomi,
                 m.telefon mijoz_telefon, a.jami_summa summa, ${NAQD} naqd, ${QARZ} qarz, a.tolov_turi, a.tolov_sana,
+                (CASE WHEN a.turi = 'diller_sotuv' AND a.tolov_turi = 'plastik' THEN a.tolangan_summa ELSE 0 END) plastik,
                 a.masofa_m, a.oflayn, a.izoh, a.manba, a.kanal, a.holat, a.bekor_sababi, ${bekorKorinish ? '0' : TAKROR} takror,
                 (SELECT COUNT(*) FROM ariza_qator x WHERE x.ariza_id = a.id) tovar_soni,
                 (SELECT COALESCE(SUM(x.jami_dona),0) FROM ariza_qator x WHERE x.ariza_id = a.id) dona,
@@ -552,18 +559,20 @@ class AvtolavkaController {
     ]);
 
     res.send({
-      dan: D.dan, gacha: D.gacha, radius: SOTUV_RADIUS_M, sahifa, limit: LIMIT, holat: bekorKorinish ? 'bekor' : 'yetkazildi',
+      dan: D.dan, gacha: D.gacha, radius: SOTUV_RADIUS_M, sahifa, limit: LIMIT, holat: bekorKorinish ? 'bekor' : 'yetkazildi', tur,
       jami: {
         soni: n(jami.soni), summa: n(jami.summa), naqd: n(jami.naqd), qarz: n(jami.qarz), dona: n(jami.dona),
         uzoq: n(jami.uzoq), mijozlar: n(jami.mijozlar), mashinalar: n(jami.mashinalar), takror: n(jami.takror),
       },
       // Skladdan (xodimsiz) sotuvlar agent_id'siz — jurnal filtrida alohida "Sklad" tugmasi
-      agentlar: agentlar.map(a => a.id ? { id: a.id, fullname: a.fullname, soni: n(a.soni), summa: n(a.summa) }
+      agentlar: agentlar.map(a => a.id ? { id: a.id, fullname: a.fullname, soni: n(a.soni), summa: n(a.summa), diller: tur === 'diller' }
         : { id: 'sklad', fullname: 'Sklad · xodimsiz', soni: n(a.soni), summa: n(a.summa) }),
       rows: rows.map(a => ({
-        ...a, summa: n(a.summa), naqd: n(a.naqd), qarz: n(a.qarz), dona: n(a.dona), tovar_soni: n(a.tovar_soni),
+        ...a, summa: n(a.summa), naqd: n(a.naqd), qarz: n(a.qarz), plastik: n(a.plastik), dona: n(a.dona), tovar_soni: n(a.tovar_soni),
         masofa_m: a.masofa_m === null ? null : n(a.masofa_m), uzoq: a.masofa_m !== null && n(a.masofa_m) > SOTUV_RADIUS_M,
         oflayn: !!a.oflayn, takror: !!n(a.takror), tovarlar: a.tovarlar ? String(a.tovarlar).split('||') : [],
+        tur: a.kanal === 'diller' ? 'diller' : a.kanal === 'sklad' ? 'sklad' : 'agent',
+        bekor_mumkin: a.kanal !== 'diller' && a.holat === 'yetkazildi',
       })),
     });
   };
