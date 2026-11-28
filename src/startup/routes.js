@@ -90,6 +90,7 @@ module.exports = async function(app){
         app.use(`/api/v1/yetkazuvchilar`, yetkazuvchiRouter);
         app.use(`/api/v1/uchinchi-shaxslar`, uchinchiShaxsRouter);   // Moliya → Qarz oldi-berdi
         app.use(`/api/v1/xarajatlar`, xarajatRouter);                 // Moliya → Kunlik xarajatlar
+        app.use(`/api/v1/telegram`, require('../routes/telegram.route'));   // 2026-11-28: Telegram mijoz boti
         app.use(`/api/v1/mijozlar`,       mijozRouter);
         app.use(`/api/v1/narx-ruyxatlar`, narxRuyxatRouter);
         app.use(`/api/v1/bildirishnoma`,  bildirishnomaRouter);

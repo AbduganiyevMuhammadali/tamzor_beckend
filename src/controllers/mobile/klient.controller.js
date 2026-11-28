@@ -282,10 +282,20 @@ class MobileKlientController {
     if (!mijoz) return fail(res, 'Mijoz topilmadi', 404);
     let r;
     try {
-      r = await reytingYoz(mijoz.id, {
-        tur: 'tolov_surildi', sabab: "To'lov vaqti surildi", izoh: izoh ? String(izoh).slice(0, 200) : null,
-        summa: Math.max(0, -(parseFloat(mijoz.balans) || 0)), vada_sana: yangiSana,
-        manba_tur: 'mobil', xodim: xodimOl(req), mobil_id: mobilId, sana: mobilVaqt(req.body.vaqt),
+      // 2026-11-28: reyting yozuvi va Telegram xabari bitta tranzaksiyada (xabar yetmasa va'da saqlanmaydi)
+      r = await sequelize.transaction(async (t) => {
+        const x = await reytingYoz(mijoz.id, {
+          tur: 'tolov_surildi', sabab: "To'lov vaqti surildi", izoh: izoh ? String(izoh).slice(0, 200) : null,
+          summa: Math.max(0, -(parseFloat(mijoz.balans) || 0)), vada_sana: yangiSana,
+          manba_tur: 'mobil', xodim: xodimOl(req), mobil_id: mobilId, sana: mobilVaqt(req.body.vaqt),
+        }, t);
+        if (x && !x.takror) {
+          const TG = require('../../utils/telegram.utils');
+          const xodim = req.currentAgent ? req.currentAgent.fullname : null;
+          await TG.xabar(mijoz.id, 'vada', () => TG.vadaMatni({ yangiSana, balans: mijoz.balans, xodim, izoh: izoh ? String(izoh).slice(0, 200) : null }),
+            { t, mijozNomi: mijoz.nomi, kim: xodim });
+        }
+        return x;
       });
     } catch (e) {
       // Parallel takror — mijoz_reyting.mobil_id UNIQUE: borini qaytaramiz (500 emas)

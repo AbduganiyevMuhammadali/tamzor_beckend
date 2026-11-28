@@ -610,6 +610,11 @@ class AvtolavkaController {
       const natija = await yetkazilganSotuvniBekorQil(a, { sabab: req.body.sabab, user: req.currentUser, transaction: t });
       return { ariza: (natija && natija.ariza) || a, r: natija };
     });
+    // 2026-11-28: Telegram — mijozga bekor xabari (yumshoq: yetmasa ham bekor qilish qoladi)
+    if (ariza.mijoz_id) {
+      const TG = require('../../utils/telegram.utils');
+      await TG.xabarYumshoq(ariza.mijoz_id, 'bekor', () => TG.bekorMatni({ raqam: ariza.raqam, sabab: ariza.bekor_sababi, balans: r.mijoz_balans }));
+    }
     res.send({
       ok: true, id: ariza.id, raqam: ariza.raqam, holat: 'bekor', bekor_sababi: ariza.bekor_sababi,
       tovar: r.tovar, naqd: r.naqd, qarz: r.qarz, bonus: r.bonus, mijoz_balans: r.mijoz_balans, ogohlantirishlar: r.ogohlantirishlar,

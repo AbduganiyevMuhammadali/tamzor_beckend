@@ -785,6 +785,13 @@ async function mobilSotuv({ body, diller, mapQator, jamiHisobla, mobilVaqt, mobi
         chek_rasm: chek, sana: vaqt,
       }, { transaction: t });
     }
+    // 2026-11-28: TELEGRAM — diller mijoziga ham xarid xabari (qat'iy: yetmasa sotuv saqlanmaydi)
+    const TG = require('./telegram.utils');
+    await TG.xabar(mijoz.id, 'sotuv', async () => {
+      const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
+      return TG.sotuvMatni({ ariza, qatorlar: await TG.nomlarniToldir(qatorlar, t), balans: mb ? mb.balans : 0, xodim: diller.fullname,
+        naqd: usul === 'plastik' ? 0 : tolangan, plastik: 0 });
+    }, { t, mijozNomi: mijoz.nomi, kim: `Diller: ${diller.fullname}` });
     return ariza;
   });
 }
@@ -811,6 +818,12 @@ async function mobilTolov({ diller, klientId, naqd, plastik, komment, mobilId, v
       if (naqd > 0) await yoz('naqd', naqd, kalitlar[0] || null);
       if (plastik > 0) await yoz('plastik', plastik, naqd > 0 ? (kalitlar[1] || null) : (kalitlar[0] || null));
       await MijozModel.increment('balans', { by: r2(naqd + plastik), where: { id: mijoz.id }, transaction: t });
+      // 2026-11-28: TELEGRAM — to'lov xabari (diller kartasi tekshiruvsiz — naqd sifatida ko'rsatiladi)
+      const TG = require('./telegram.utils');
+      await TG.xabar(mijoz.id, 'tolov', async () => {
+        const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
+        return TG.tolovMatni({ naqd: r2(naqd + plastik), balans: mb ? mb.balans : 0, xodim: diller.fullname, sana: vaqt });
+      }, { t, mijozNomi: mijoz.nomi, kim: `Diller: ${diller.fullname}` });
     });
   } catch (e) {
     if (unikXato(e) && await takror()) return { takror: true };

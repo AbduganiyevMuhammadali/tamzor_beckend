@@ -276,6 +276,16 @@ class KassaController extends BaseController {
         }, t);
       }
 
+      // 2026-11-28: TELEGRAM — mijoz to'lovi xabari (yoqilgan bo'lsa yetmasa to'lov saqlanmaydi)
+      if (kategoriya === 'mijoz_tolov' && mijozId && tur === 'kirim') {
+        const TG = require('../../utils/telegram.utils');
+        const u = req.currentUser || {};
+        await TG.xabar(mijozId, 'tolov', async () => {
+          const mb = await MijozModel.findByPk(mijozId, { attributes: ['balans'], transaction: t });
+          return TG.tolovMatni({ naqd: Number(summa), balans: mb ? mb.balans : 0, xodim: null, sana: rec.sana });
+        }, { t, mijozNomi: mijoz_nomi, kim: u.fullname || u.username || null });
+      }
+
       await t.commit();
       res.status(201).send(rec);
     } catch (e) {

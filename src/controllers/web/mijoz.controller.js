@@ -93,9 +93,14 @@ class MijozController {
     const order = tartib === 'reyting' ? [['reyting', 'ASC'], ['nomi', 'ASC']]
       : tartib === 'reyting_desc' ? [['reyting', 'DESC'], ['nomi', 'ASC']] : [['nomi', 'ASC']];
 
+    // 2026-11-28: har mijozga telegram holati: 'faol' | 'bloklangan' | null (ulanmagan)
+    const tgQosh = async (rows) => {
+      const h = await require('../../utils/telegram.utils').holatlar(rows.map(r => r.id));
+      return rows.map(r => ({ ...r.toJSON(), telegram: h.get(r.id) || null }));
+    };
     if (all === 'true') {
       const rows = await MijozModel.findAll({ where, include: INCLUDE, order, limit: MAKS_QATOR });
-      return res.send(rows);
+      return res.send(await tgQosh(rows));
     }
 
     // page/limit: NaN yoki haddan katta qiymatlar cheklanadi
@@ -109,7 +114,7 @@ class MijozController {
       offset,
     });
 
-    res.send({ count, rows, page: pg, pages: Math.ceil(count / lim) });
+    res.send({ count, rows: await tgQosh(rows), page: pg, pages: Math.ceil(count / lim) });
   };
 
   /* GET /mijozlar/reyting/xulosa — faol mijozlar darajalar bo'yicha (ro'yxat tepasidagi chiplar) */
@@ -169,7 +174,8 @@ class MijozController {
   getById = async (req, res) => {
     const m = await MijozModel.findByPk(req.params.id, { include: INCLUDE });
     if (!m) throw new HttpException(404, 'Mijoz topilmadi');
-    res.send(m);
+    const h = await require('../../utils/telegram.utils').holatlar([m.id]);
+    res.send({ ...m.toJSON(), telegram: h.get(m.id) || null });   // 2026-11-28
   };
 
   /* POST /mijozlar */

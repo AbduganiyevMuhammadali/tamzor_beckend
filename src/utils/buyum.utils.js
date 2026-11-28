@@ -333,6 +333,14 @@ async function harakatYoz(p) {
     await BuyumHarakatQatorModel.bulkCreate(ids.map(id => ({
       harakat_id: h.id, buyum_id: id, buyum_nomi: by.get(id).nomi, dona: p.kerak.get(id),
     })), { transaction: t });
+    // 2026-11-28: TELEGRAM — mijozga buyum berildi/qaytarib olindi (yoqilgan bo'lsa yetmasa amal saqlanmaydi)
+    if (p.mijoz && (p.tur === 'mijozga' || p.tur === 'mijozdan')) {
+      const TG = require('./telegram.utils');
+      await TG.xabar(p.mijoz.id, 'buyum', () => TG.buyumMatni({
+        tur: p.tur, xodim: p.agent ? p.agent.fullname : null, sana: p.sana || new Date(),
+        qatorlar: ids.map(id => ({ nomi: by.get(id).nomi, dona: p.kerak.get(id) })),
+      }), { t, mijozNomi: p.mijoz.nomi, kim: p.userNomi || null });
+    }
     return h.id;
   });
 }

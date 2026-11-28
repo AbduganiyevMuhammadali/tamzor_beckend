@@ -28,7 +28,11 @@ if (!secret_jwt || String(secret_jwt).length < 16) {
         process.exit(1);
     }
     // 0.0.0.0 — barcha tarmoq interfeyslarini tinglaydi, shunda telefon LAN IP orqali ulana oladi
-    app.listen(port, '0.0.0.0', () => console.log(`🚀 Server running on port ${port}!`))
+    app.listen(port, '0.0.0.0', () => {
+        console.log(`🚀 Server running on port ${port}!`);
+        // 2026-11-28: Telegram mijoz boti (TELEGRAM_BOT_TOKEN bo'lsa) — long polling
+        require('./utils/telegram.utils').botniIshgaTushir().catch((e) => console.error('[telegram]', e.message));
+    })
         .on('error', (e) => {
             console.log('Error happened: ', e.message)
          });

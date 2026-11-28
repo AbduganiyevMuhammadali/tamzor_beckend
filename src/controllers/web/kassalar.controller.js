@@ -115,6 +115,18 @@ async function topshiruvBitta(id) {
   return { ...topshiruvJson(x), agent_qolda: m.qolda, audit: await P.auditRoyxat('pul_topshiruv', id) };
 }
 
+/* 2026-11-28: karta to'lovi tasdiqlandi/rad etildi — mijozga Telegram xabari (yumshoq: yetmasa ham amal qoladi) */
+async function plastikXabar(p, tasdiq, sabab = null) {
+  const mijozId = p && (p.mijoz_id || (p.mijoz && p.mijoz.id));
+  if (!mijozId) return;
+  const TG = require('../../utils/telegram.utils');
+  const { MijozModel } = require('../../models/mijoz.model');
+  await TG.xabarYumshoq(mijozId, 'plastik_tasdiq', async () => {
+    const m = await MijozModel.findByPk(mijozId, { attributes: ['balans'] });
+    return TG.plastikMatni({ summa: p.summa, tasdiq, sabab, balans: m ? m.balans : 0 });
+  });
+}
+
 class KassalarController {
   /* GET /kassalar?tur=&faol=&territoriya_id= */
   royxat = async (req, res) => {
@@ -276,12 +288,16 @@ class KassalarController {
   plastikTasdiqla = async (req, res) => {
     const id = idOl(req.params.id);
     await P.plastikTasdiqla(id, req.currentUser, { izoh: req.body && req.body.izoh ? String(req.body.izoh).slice(0, 500) : null });
-    res.send(await plastikBitta(id));
+    const javob = await plastikBitta(id);
+    await plastikXabar(javob, true);   // 2026-11-28: Telegram (yumshoq — tasdiqni to'xtatmaydi)
+    res.send(javob);
   };
   plastikRad = async (req, res) => {
     const id = idOl(req.params.id);
     await P.plastikRad(id, req.currentUser, req.body && req.body.sabab);
-    res.send(await plastikBitta(id));
+    const javob = await plastikBitta(id);
+    await plastikXabar(javob, false, req.body && req.body.sabab);
+    res.send(javob);
   };
   plastikTahrir = async (req, res) => {
     const id = idOl(req.params.id);

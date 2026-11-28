@@ -776,6 +776,9 @@ class MobileAvtolavkaController {
       mobilBuyumlar(agent, mijozlar.map(m => m.id)),   // 2026-11-28: buyumlar (sinxrondagi mijozlar to'plami)
     ]);
     const ruyxatIds = new Set(narx.javob.ruyxatlar.map(r => r.id));
+    // 2026-11-28: Telegram — bot holati, qat'iy yoqilgan turlar va har mijozning ulanganligi
+    const TG = require('../../utils/telegram.utils');
+    const [tgBlok, tgHolat] = await Promise.all([TG.mobilBlok(), TG.holatlar(mijozlar.map(m => m.id))]);
     const agentNomi = new Map((await AgentModel.findAll({ attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]));
 
     // 2026-11-27: kuzatuvda — super agent ruxsatlari bo'yicha qisqartiriladi (superKuzatuv.utils)
@@ -789,6 +792,8 @@ class MobileAvtolavkaController {
       },
       // Super agent biriktirilgan agentni ko'ryapti (x-kuzat-agent) — ilova faqat o'qish rejimida
       kuzatuv: !!req.kuzatuv,
+      // 2026-11-28: { sozlangan, turlar: { sotuv: true, ... } — yoqilgan qat'iy turlar, bot } — ulanmagan mijozga shu amallar yo'q
+      telegram: tgBlok,
       holat,
       mashina: { qatorlar: mashina.qatorlar, jami: mashina.jami },
       brak,
@@ -819,6 +824,7 @@ class MobileAvtolavkaController {
           agentId: m.agent_id ? String(m.agent_id) : null, agentNomi: m.agent_id ? (agentNomi.get(m.agent_id) || '') : '', meniki: m.agent_id === agent.id,
           // Qarzga sotuvda to'lov sanasi kalendarining standart taklifi (sotuv + shuncha kun)
           tolovMuddatiKun: parseInt(m.tolov_muddati_kun, 10) || 30,
+          telegram: tgHolat.get(m.id) || null,   // 'faol' | 'bloklangan' | null (botga ulanmagan)
           ...reytingKorinish(m),   // mijoz reytingi: reyting, daraja, darajaNomi, radKetmaKet, tolovVada
         };
       }),
@@ -996,6 +1002,17 @@ class MobileAvtolavkaController {
             const yangiSumma = Math.max(0, r2(n(r.summa) - kamaydi));
             await r.update({ summa: yangiSumma, bonus_summa: Math.round(yangiSumma * n(r.bonus_foiz) / 100) }, { transaction: t });
           }
+        }
+        // 2026-11-28: TELEGRAM — vozvrat xabari (yoqilgan bo'lsa yetmasa vozvrat saqlanmaydi)
+        if (mijoz) {
+          const TG = require('../../utils/telegram.utils');
+          await TG.xabar(mijoz.id, 'vozvrat', async () => {
+            const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
+            return TG.vozvratMatni({
+              raqam: ariza.raqam, summa: kamaydi, usul: sorov.tolov, balans: mb ? mb.balans : 0, xodim: agent.fullname, sana: vaqt,
+              qatorlar: await TG.nomlarniToldir(bolaklar.map(b => ({ tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi, dona: b.dona, yaroqli: b.yaroqli })), t),
+            });
+          }, { t, mijozNomi: mijoz.nomi, kim: `${agent.diller ? 'Diller' : 'Agent'}: ${agent.fullname}` });
         }
         return { qaytarish };
       });

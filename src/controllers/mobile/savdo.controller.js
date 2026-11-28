@@ -374,6 +374,18 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
     // Chaqiruvchining qo'shimcha qadamlari (masalan saveVozvrat ombor kirimi) — shu tranzaksiyada
     if (keyin) await keyin(ariza, qatorlar, t);
 
+    // 2026-11-28: TELEGRAM — mijozga xarid xabari (yoqilgan bo'lsa: botga ulanmagan/bloklagan → sotuv saqlanmaydi)
+    if (turi === 'sotish' && darhol) {
+      const TG = require('../../utils/telegram.utils');
+      await TG.xabar(mijoz.id, 'sotuv', async () => {
+        const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
+        return TG.sotuvMatni({
+          ariza, qatorlar: await TG.nomlarniToldir(qatorlar, t), balans: mb ? mb.balans : 0, xodim: agent ? agent.fullname : null,
+          naqd: parseFloat(ariza.tolangan_summa) || 0, plastik: plastikMi ? plastikSumma : 0,
+        });
+      }, { t, mijozNomi: mijoz.nomi, kim: agent ? `Agent: ${agent.fullname}` : (webUser || null) });
+    }
+
     return ariza;
   };
   return sequelize.transaction(ish);
@@ -669,6 +681,12 @@ class MobileSavdoController {
           await auditYoz({ obyekt: 'plastik_tolov', obyekt_id: p.id, amal: 'yaratildi',
             yangi: { holat: 'kutilmoqda', summa: plastik, kassa_id: kassa.id }, user: { id: null, nomi: `Agent: ${agent.fullname}` } }, t);
         }
+        // 2026-11-28: TELEGRAM — to'lov xabari (yoqilgan bo'lsa yetmasa to'lov saqlanmaydi)
+        const TG = require('../../utils/telegram.utils');
+        await TG.xabar(mijoz.id, 'tolov', async () => {
+          const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
+          return TG.tolovMatni({ naqd, plastik, balans: mb ? mb.balans : 0, xodim: agent ? agent.fullname : null, sana: vaqt });
+        }, { t, mijozNomi: mijoz.nomi, kim: agent ? `Agent: ${agent.fullname}` : null });
       });
     } catch (e) {
       if (takrorXato(e)) { const tk = await takrorMi(); if (tk) return takrorJavob(tk); }
