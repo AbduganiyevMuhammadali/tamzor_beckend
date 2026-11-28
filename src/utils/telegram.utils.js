@@ -171,10 +171,15 @@ async function holatlar(mijozIds) {
 }
 
 /** Mobil ilova uchun: bot holati va qat'iy yoqilgan turlar */
-async function mobilBlok() {
-  if (!botBor()) return { sozlangan: false, turlar: {}, bot: null };
+async function mobilBlok(agent = null) {
+  if (!botBor()) return { sozlangan: false, turlar: {}, bot: null, havola: null };
+  if (!botNomi) { try { botNomi = (await api('getMe', {}, { timeoutMs: 5000 })).username || null; } catch (e) { /* tarmoq */ } }
   const tr = await turlar();
-  return { sozlangan: true, turlar: Object.fromEntries(KALITLAR.filter(k => tr[k] && TURLAR[k].qatiy).map(k => [k, true])), bot: botNomi };
+  return {
+    sozlangan: true, turlar: Object.fromEntries(KALITLAR.filter(k => tr[k] && TURLAR[k].qatiy).map(k => [k, true])), bot: botNomi,
+    // 2026-11-28: agentning shaxsiy havolasi (QR) — mijoz skanerlasa faqat shu agentning mijozi sifatida ulanadi
+    havola: botNomi && agent ? `https://t.me/${botNomi}?start=a${agent.id}` : null,
+  };
 }
 
 /* ── Xabar matnlari ─────────────────────────────────────── */
@@ -252,6 +257,11 @@ async function chatMijozlari(chatId) {
     WHERE t.chat_id = :c ORDER BY m.nomi`, { replacements: { c: String(chatId) }, type: sequelize.QueryTypes.SELECT });
 }
 
+/* Agent QR kodi (2026-11-28): https://t.me/<bot>?start=a<agentId> — mijoz skanerlasa /start a<agentId> keladi.
+   Shu chat kontakt yuborguncha agent eslab qolinadi: raqam faqat SHU agentga biriktirilgan mijozlar orasidan qidiriladi. */
+const kutilganAgent = new Map();   // chatId → { agentId, vaqt }
+const agentPayload = (text) => { const m = /^\/start\s+a(\d{1,10})\b/.exec(text); return m ? Number(m[1]) : null; };
+
 async function yangilanish(u) {
   const mcm = u.my_chat_member;
   if (mcm && mcm.chat && mcm.new_chat_member) {
@@ -269,12 +279,21 @@ async function yangilanish(u) {
     }
     const raqam = oxirgi9(m.contact.phone_number);
     if (raqam.length < 9) return javob(chatId, "Raqam noto'g'ri.", { reply_markup: KONTAKT_TUGMA });
-    const mijozlar = await sequelize.query(`SELECT id, nomi, balans FROM mijoz WHERE deletedAt IS NULL AND (
-        RIGHT(REGEXP_REPLACE(COALESCE(telefon, ''), '[^0-9]', ''), 9) = :r OR RIGHT(REGEXP_REPLACE(COALESCE(telefon2, ''), '[^0-9]', ''), 9) = :r)`,
+    const ka = kutilganAgent.get(chatId);
+    const agentId = ka && Date.now() - ka.vaqt < 24 * 3600 * 1000 ? ka.agentId : null;
+    const barcha = await sequelize.query(`SELECT m.id, m.nomi, m.balans, m.agent_id, a.fullname agent_nomi FROM mijoz m LEFT JOIN agent a ON a.id = m.agent_id
+      WHERE m.deletedAt IS NULL AND (RIGHT(REGEXP_REPLACE(COALESCE(m.telefon, ''), '[^0-9]', ''), 9) = :r OR RIGHT(REGEXP_REPLACE(COALESCE(m.telefon2, ''), '[^0-9]', ''), 9) = :r)`,
       { replacements: { r: raqam }, type: sequelize.QueryTypes.SELECT });
+    // Agent QR orqali kelgan: faqat shu agentga biriktirilgan mijozlar
+    const mijozlar = agentId ? barcha.filter(x => Number(x.agent_id) === agentId) : barcha;
     if (!mijozlar.length) {
+      if (agentId) {
+        const [ag] = await sequelize.query('SELECT fullname FROM agent WHERE id = :a', { replacements: { a: agentId }, type: sequelize.QueryTypes.SELECT });
+        return javob(chatId, `+998${raqam} raqami ${ag ? ag.fullname : 'bu agent'}ning mijozlari ro'yxatida yo'q. Agentingizdan raqamingizni o'z mijozlariga kiritishini so'rang, keyin QR kodni qayta skanerlang.`, { reply_markup: { remove_keyboard: true } });
+      }
       return javob(chatId, `+998${raqam} raqami mijozlar ro'yxatida topilmadi. Agentingizga raqamingizni to'g'ri yozib qo'yishini ayting va qayta /start bosing.`, { reply_markup: { remove_keyboard: true } });
     }
+    kutilganAgent.delete(chatId);
     const ism = [m.from.first_name, m.from.last_name].filter(Boolean).join(' ').slice(0, 150) || null;
     for (const mj of mijozlar) {
       const bor = await MijozTelegramModel.findOne({ where: { mijoz_id: mj.id, chat_id: chatId } });
@@ -290,6 +309,8 @@ async function yangilanish(u) {
   }
   const text = String(m.text || '').trim();
   if (/^\/start\b/.test(text)) {
+    const ag = agentPayload(text);
+    if (ag) kutilganAgent.set(chatId, { agentId: ag, vaqt: Date.now() });
     const bor = await chatMijozlari(chatId);
     if (bor.length) await MijozTelegramModel.update({ holat: 'faol', xato: null }, { where: { chat_id: chatId } });
     return javob(chatId, bor.length

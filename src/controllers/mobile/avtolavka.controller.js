@@ -778,7 +778,7 @@ class MobileAvtolavkaController {
     const ruyxatIds = new Set(narx.javob.ruyxatlar.map(r => r.id));
     // 2026-11-28: Telegram — bot holati, qat'iy yoqilgan turlar va har mijozning ulanganligi
     const TG = require('../../utils/telegram.utils');
-    const [tgBlok, tgHolat] = await Promise.all([TG.mobilBlok(), TG.holatlar(mijozlar.map(m => m.id))]);
+    const [tgBlok, tgHolat] = await Promise.all([TG.mobilBlok(agent), TG.holatlar(mijozlar.map(m => m.id))]);
     const agentNomi = new Map((await AgentModel.findAll({ attributes: ['id', 'fullname'], raw: true, paranoid: false })).map(a => [a.id, a.fullname]));
 
     // 2026-11-27: kuzatuvda — super agent ruxsatlari bo'yicha qisqartiriladi (superKuzatuv.utils)
