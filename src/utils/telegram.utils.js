@@ -15,6 +15,7 @@
    Bog'lanish: mijoz botda /start → "Telefon raqamni yuborish" (Telegram kontakti, faqat o'ziniki) →
    raqamning oxirgi 9 raqami mijoz.telefon / telefon2 ga mos kelgan barcha mijozlarga bog'lanadi.
    Yangilanishlar long polling (getUpdates) bilan olinadi — bitta jarayon (pm2 fork), webhook/HTTPS shart emas. */
+const { AsyncLocalStorage } = require('async_hooks');
 const sequelize = require('../db/db-sequelize');
 const HttpException = require('./HttpException.utils');
 const SozlamaModel = require('../models/sozlama.model');
@@ -148,10 +149,17 @@ async function nomlarniToldir(qatorlar, t = null) {
   return qatorlar.map(q => (q.tovar_nomi || !q.tovar_id ? q : { ...q, tovar_nomi: by.get(Number(q.tovar_id)) || q.tovar_nomi }));
 }
 
+const kontekst = new AsyncLocalStorage();   // shablondagi {mijoz} uchun
+
 async function xabar(mijozId, tur, matn, { t = null, kim = null, mijozNomi = null } = {}) {
   const links = await tayyorla(mijozId, tur, { t, mijozNomi });
   if (!links) return 0;
-  const m = typeof matn === 'function' ? await matn() : matn;
+  let nomi = mijozNomi;
+  if (!nomi) {
+    const [r] = await sequelize.query('SELECT nomi FROM mijoz WHERE id = :id', { replacements: { id: mijozId }, type: sequelize.QueryTypes.SELECT, ...(t ? { transaction: t } : {}) });
+    nomi = r ? r.nomi : '';
+  }
+  const m = typeof matn === 'function' ? await kontekst.run({ mijoz: nomi }, () => matn()) : matn;
   return yubor(links, m, { tur, mijozId, kim, qatiy: TURLAR[tur].qatiy, mijozNomi });
 }
 
@@ -182,66 +190,198 @@ async function mobilBlok(agent = null) {
   };
 }
 
-/* ── Xabar matnlari ─────────────────────────────────────── */
+/* ── Xabar matnlari: shablonlar (admin tahrirlaydi) ──────
+   Shablon — oddiy matn, {ozgaruvchi} o'rniga qiymat qo'yiladi. Qatorda o'zgaruvchi(lar) bo'lsa-yu, hammasi bo'sh
+   chiqsa (masalan chegirma yo'q, xodim yo'q) — o'sha qator butunlay tushib qoladi. Ketma-ket bo'sh qatorlar bittaga.
+   Saqlanadi: sozlama 'tgs_<kalit>' (bo'sh / null — standart matn). */
+const SHABLONLAR = {
+  sotuv: {
+    nomi: 'Sotuv (xarid)',
+    standart: "🧾 Xarid: {raqam}\n{sana}\nSotuvchi: {xodim}\n\n{tovarlar}\nChegirma: −{chegirma}\nJami: {jami}\n{tolov}\n\n{qarz_holati}",
+    ozg: { raqam: 'Chek raqami', sana: 'Sana va vaqt', xodim: 'Agent / diller', tovarlar: "Tovarlar ro'yxati (har biri alohida qatorda)", chegirma: "Chegirma summasi (bo'lmasa qator chiqmaydi)",
+      jami: 'Jami summa', tolov: "To'lov qatorlari: naqd / karta / qarzga", naqd: "Naqd to'langan", karta: 'Karta bilan', qarzga: "Qarzga qolgan", tolov_sana: "Qarzni to'lash sanasi" },
+  },
+  tolov: {
+    nomi: "To'lov (qarz to'lovi)",
+    standart: "💵 To'lov qabul qilindi\n{sana}\nQabul qildi: {xodim}\n\nNaqd: {naqd}\nKarta: {karta} (tasdiq kutilmoqda — tasdiqlangach qarzdan ayiriladi)\n\n{qarz_holati}",
+    ozg: { sana: 'Sana va vaqt', xodim: 'Qabul qilgan xodim', naqd: 'Naqd summa', karta: 'Karta summasi (tasdiq kutadi)', summa: "Jami to'lov" },
+  },
+  vozvrat: {
+    nomi: 'Vozvrat (qaytarish)',
+    standart: "↩️ Vozvrat: {raqam} chekidan\n{sana}\nQabul qildi: {xodim}\n\n{tovarlar}\nSumma: {summa} — {usul}\n\n{qarz_holati}",
+    ozg: { raqam: 'Asl chek raqami', sana: 'Sana va vaqt', xodim: 'Xodim', tovarlar: 'Qaytgan tovarlar', summa: 'Qaytarish summasi', usul: '"sizga naqd qaytarildi" yoki "qarzingizdan ayirildi"' },
+  },
+  buyum_berish: {
+    nomi: 'Buyum berildi',
+    standart: "📦 Sizga buyum berildi (vaqtinchalik foydalanishga)\n{sana}\nXodim: {xodim}\n\n{buyumlar}",
+    ozg: { sana: 'Sana va vaqt', xodim: 'Xodim', buyumlar: "Buyumlar ro'yxati" },
+  },
+  buyum_qaytarish: {
+    nomi: 'Buyum qaytarib olindi',
+    standart: "📦 Sizdan buyum qaytarib olindi\n{sana}\nXodim: {xodim}\n\n{buyumlar}",
+    ozg: { sana: 'Sana va vaqt', xodim: 'Xodim', buyumlar: "Buyumlar ro'yxati" },
+  },
+  vada: {
+    nomi: "To'lov sanasi surildi (va'da)",
+    standart: "📅 Qarz to'lovi sanasi {yangi_sana} ga surildi\nXodim: {xodim}\nIzoh: {izoh}\n\n{qarz_holati}",
+    ozg: { yangi_sana: "Yangi to'lov sanasi", xodim: 'Xodim', izoh: 'Izoh' },
+  },
+  bekor: {
+    nomi: 'Sotuv bekor qilindi',
+    standart: "❌ Xarid bekor qilindi: {raqam}\nSabab: {sabab}\n\n{qarz_holati}",
+    ozg: { raqam: 'Chek raqami', sabab: 'Bekor qilish sababi' },
+  },
+  plastik_tasdiq: {
+    nomi: "Karta to'lovi tasdiqlandi",
+    standart: "✅ Karta to'lovingiz tasdiqlandi: {summa}\n\n{qarz_holati}",
+    ozg: { summa: "To'lov summasi" },
+  },
+  plastik_rad: {
+    nomi: "Karta to'lovi tasdiqlanmadi",
+    standart: "⚠️ Karta to'lovingiz tasdiqlanmadi: {summa}\nSabab: {sabab}\n\n{qarz_holati}",
+    ozg: { summa: "To'lov summasi", sabab: 'Rad etish sababi' },
+  },
+};
+// Hamma shablonda bor
+const UMUMIY_OZG = { mijoz: 'Mijoz (do\'kon) nomi', qarz: "Umumiy qarz summasi (qarz bo'lmasa — bo'sh)", qarz_holati: '"Umumiy qarzingiz: …" / "Qarzingiz yo\'q ✅" / "Sizning haqingiz: …"' };
+const SHABLON_KALITLAR = Object.keys(SHABLONLAR);
+
+function shablonQoll(tpl, vars) {
+  const bosh = (k) => vars[k] === undefined || vars[k] === null || String(vars[k]) === '';
+  const out = [];
+  for (const line of String(tpl).split('\n')) {
+    const keys = [...line.matchAll(/\{([a-z_]+)\}/g)].map(m => m[1]);
+    if (keys.length && keys.every(bosh)) continue;
+    out.push(line.replace(/\{([a-z_]+)\}/g, (_, k) => (bosh(k) ? '' : String(vars[k]))));
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+async function shablonMatni(kalit) {
+  const s = await SozlamaModel.findByPk(`tgs_${kalit}`).catch(() => null);
+  const v = s && s.qiymat ? String(s.qiymat) : '';
+  return v.trim() ? v : SHABLONLAR[kalit].standart;
+}
+
+async function render(kalit, vars) {
+  const balans = n(vars.balans);
+  const k = kontekst.getStore();
+  return shablonQoll(await shablonMatni(kalit), {
+    ...vars, mijoz: vars.mijoz || (k && k.mijoz) || '', qarz: balans < -0.5 ? sum(-balans) : '', qarz_holati: qarzQatori(balans),
+  });
+}
+
+/** Shablon tekshiruvi: noma'lum {ozgaruvchi} — 400 */
+function shablonTekshir(kalit, matn) {
+  if (!SHABLONLAR[kalit]) throw new HttpException(400, `Noma'lum shablon "${kalit}" (${SHABLON_KALITLAR.join(', ')})`);
+  if (matn === null || matn === undefined || String(matn).trim() === '') return null;
+  if (typeof matn !== 'string') throw new HttpException(400, `${kalit}: matn satr bo'lsin`);
+  if (matn.length > 3500) throw new HttpException(400, `${kalit}: matn 3500 belgidan oshmasin`);
+  const ruxsat = { ...SHABLONLAR[kalit].ozg, ...UMUMIY_OZG };
+  const nomalum = [...new Set([...matn.matchAll(/\{([^{}]*)\}/g)].map(m => m[1]).filter(k => !ruxsat[k]))];
+  if (nomalum.length) throw new HttpException(400, `${SHABLONLAR[kalit].nomi}: noma'lum o'zgaruvchi: ${nomalum.join(', ')}. Mumkin: ${Object.keys(ruxsat).join(', ')} (jingalak qavsda yoziladi)`);
+  return matn;
+}
+
+/* Namuna qiymatlar (admin panelda ko'rinish uchun) */
+const NAMUNA = {
+  sotuv: { raqam: 'AR-2026-0123', sana: '28.11.2026 14:35', xodim: 'Ali Valiyev', tovarlar: "• Sut 1L — 10 × 12 000 so'm = 120 000 so'm\n• Qatiq — 5 × 9 000 so'm = 45 000 so'm",
+    chegirma: '', jami: "165 000 so'm", tolov: "Naqd to'landi: 100 000 so'm\nQarzga: 65 000 so'm (to'lov sanasi 2026-12-05)", naqd: "100 000 so'm", karta: '', qarzga: "65 000 so'm", tolov_sana: '2026-12-05', balans: -265000 },
+  tolov: { sana: '28.11.2026 15:10', xodim: 'Ali Valiyev', naqd: "50 000 so'm", karta: '', summa: "50 000 so'm", balans: -215000 },
+  vozvrat: { raqam: 'AR-2026-0123', sana: '28.11.2026 15:20', xodim: 'Ali Valiyev', tovarlar: '• Sut 1L — 2\n• Qatiq — 1 (yaroqsiz)', summa: "33 000 so'm", usul: 'qarzingizdan ayirildi', balans: -182000 },
+  buyum_berish: { sana: '28.11.2026 15:30', xodim: 'Ali Valiyev', buyumlar: '• Muzlatkich — 1 dona' },
+  buyum_qaytarish: { sana: '28.11.2026 15:30', xodim: 'Ali Valiyev', buyumlar: '• Muzlatkich — 1 dona' },
+  vada: { yangi_sana: '2026-12-05', xodim: 'Ali Valiyev', izoh: "Juma kuni to'laydi", balans: -182000 },
+  bekor: { raqam: 'AR-2026-0123', sabab: 'Takror yozilgan chek', balans: -17000 },
+  plastik_tasdiq: { summa: "40 000 so'm", balans: -142000 },
+  plastik_rad: { summa: "40 000 so'm", sabab: "Chek o'qilmaydi", balans: -182000 },
+};
+
+async function shablonlar() {
+  const rows = await SozlamaModel.findAll({ where: { kalit: SHABLON_KALITLAR.map(k => `tgs_${k}`) }, raw: true });
+  const by = Object.fromEntries(rows.map(r => [r.kalit.slice(4), r.qiymat]));
+  return SHABLON_KALITLAR.map(k => {
+    const ozgartirilgan = !!(by[k] && String(by[k]).trim());
+    const matn = ozgartirilgan ? by[k] : SHABLONLAR[k].standart;
+    const b = n(NAMUNA[k].balans);
+    return {
+      kalit: k, nomi: SHABLONLAR[k].nomi, matn, standart: SHABLONLAR[k].standart, ozgartirilgan,
+      ozgaruvchilar: Object.entries({ ...SHABLONLAR[k].ozg, ...UMUMIY_OZG }).map(([kalit, izoh]) => ({ kalit, izoh })),
+      namuna: shablonQoll(matn, { ...NAMUNA[k], mijoz: 'Baraka market', qarz: b < -0.5 ? sum(-b) : '', qarz_holati: qarzQatori(b) }),
+    };
+  });
+}
+
+/** { kalit: matn | null } — null / bo'sh — standartga qaytarish */
+async function shablonYoz(body) {
+  const b = body && typeof body === 'object' ? (body.shablonlar && typeof body.shablonlar === 'object' ? body.shablonlar : body) : {};
+  const tayyor = Object.entries(b).map(([k, v]) => [k, shablonTekshir(k, v)]);
+  for (const [k, v] of tayyor) {
+    await SozlamaModel.upsert({ kalit: `tgs_${k}`, qiymat: v, izoh: `Telegram xabar shabloni: ${SHABLONLAR[k].nomi}` });
+  }
+  return shablonlar();
+}
+
+/** Ko'rinish: saqlamasdan, berilgan matn namunada qanday chiqadi */
+function shablonNamuna(kalit, matn) {
+  const m = shablonTekshir(kalit, matn) || SHABLONLAR[kalit].standart;
+  const b = n(NAMUNA[kalit].balans);
+  return { kalit, namuna: shablonQoll(m, { ...NAMUNA[kalit], mijoz: 'Baraka market', qarz: b < -0.5 ? sum(-b) : '', qarz_holati: qarzQatori(b) }) };
+}
+
 const qarzQatori = (balans) => {
   const b = n(balans);
   return b < -0.5 ? `Umumiy qarzingiz: ${sum(-b)}` : b > 0.5 ? `Sizning haqingiz: ${sum(b)}` : 'Qarzingiz yo\'q ✅';
 };
 
-function sotuvMatni({ ariza, qatorlar, balans, xodim, plastik = 0, naqd = 0 }) {
+async function sotuvMatni({ ariza, qatorlar, balans, xodim, plastik = 0, naqd = 0, mijoz = null }) {
   const qq = (qatorlar || []).filter(q => n(q.jami_dona ?? q.dona) > 0).slice(0, 40)
     .map(q => `• ${q.tovar_nomi || 'Tovar'} — ${son(q.jami_dona ?? q.dona)} × ${sum(q.narx)} = ${sum(q.summa)}`);
   const jami = n(ariza.jami_summa);
+  const qarzga = Math.max(0, jami - n(naqd) - n(plastik));
+  const tolSana = ariza.tolov_sana ? String(ariza.tolov_sana).slice(0, 10) : '';
   const tol = [];
   if (n(naqd) > 0.5) tol.push(`Naqd to'landi: ${sum(naqd)}`);
   if (n(plastik) > 0.5) tol.push(`Karta: ${sum(plastik)} (tasdiq kutilmoqda)`);
-  const qarzga = Math.max(0, jami - n(naqd) - n(plastik));
-  if (qarzga > 0.5) tol.push(`Qarzga: ${sum(qarzga)}${ariza.tolov_sana ? ` (to'lov sanasi ${String(ariza.tolov_sana).slice(0, 10)})` : ''}`);
-  return [
-    `🧾 Xarid: ${ariza.raqam || ''}`, sanaMatn(ariza.yetkazilgan_sana || ariza.createdAt),
-    ...(xodim ? [`Sotuvchi: ${xodim}`] : []), '', ...qq,
-    ...(n(ariza.chegirma_summa) > 0.5 ? [`Chegirma: −${sum(ariza.chegirma_summa)}`] : []),
-    `Jami: ${sum(jami)}`, ...tol, '', qarzQatori(balans),
-  ].join('\n');
+  if (qarzga > 0.5) tol.push(`Qarzga: ${sum(qarzga)}${tolSana ? ` (to'lov sanasi ${tolSana})` : ''}`);
+  return render('sotuv', {
+    raqam: ariza.raqam || '', sana: sanaMatn(ariza.yetkazilgan_sana || ariza.createdAt), xodim: xodim || '', tovarlar: qq.join('\n'),
+    chegirma: n(ariza.chegirma_summa) > 0.5 ? sum(ariza.chegirma_summa) : '', jami: sum(jami), tolov: tol.join('\n'),
+    naqd: n(naqd) > 0.5 ? sum(naqd) : '', karta: n(plastik) > 0.5 ? sum(plastik) : '', qarzga: qarzga > 0.5 ? sum(qarzga) : '',
+    tolov_sana: tolSana, balans, mijoz: mijoz || ariza.mijoz_nomi || '',
+  });
 }
 
-function tolovMatni({ naqd = 0, plastik = 0, balans, xodim, sana }) {
-  return [
-    `💵 To'lov qabul qilindi`, sanaMatn(sana), ...(xodim ? [`Qabul qildi: ${xodim}`] : []), '',
-    ...(n(naqd) > 0.5 ? [`Naqd: ${sum(naqd)}`] : []),
-    ...(n(plastik) > 0.5 ? [`Karta: ${sum(plastik)} (tasdiq kutilmoqda — tasdiqlangach qarzdan ayiriladi)`] : []),
-    '', qarzQatori(balans),
-  ].join('\n');
+async function tolovMatni({ naqd = 0, plastik = 0, balans, xodim, sana, mijoz = null }) {
+  return render('tolov', {
+    sana: sanaMatn(sana), xodim: xodim || '', naqd: n(naqd) > 0.5 ? sum(naqd) : '', karta: n(plastik) > 0.5 ? sum(plastik) : '',
+    summa: sum(n(naqd) + n(plastik)), balans, mijoz: mijoz || '',
+  });
 }
 
-function vozvratMatni({ raqam, qatorlar, summa, usul, balans, xodim, sana }) {
+async function vozvratMatni({ raqam, qatorlar, summa, usul, balans, xodim, sana, mijoz = null }) {
   const qq = (qatorlar || []).slice(0, 40).map(q => `• ${q.tovar_nomi || q.tovar || 'Tovar'} — ${son(q.dona)}${q.yaroqli === false ? ' (yaroqsiz)' : ''}`);
-  return [
-    `↩️ Vozvrat${raqam ? `: ${raqam} chekidan` : ''}`, sanaMatn(sana), ...(xodim ? [`Qabul qildi: ${xodim}`] : []), '', ...qq,
-    `Summa: ${sum(summa)} — ${usul === 'naqd' ? 'sizga naqd qaytarildi' : 'qarzingizdan ayirildi'}`, '', qarzQatori(balans),
-  ].join('\n');
+  return render('vozvrat', {
+    raqam: raqam || '', sana: sanaMatn(sana), xodim: xodim || '', tovarlar: qq.join('\n'), summa: sum(summa),
+    usul: usul === 'naqd' ? 'sizga naqd qaytarildi' : 'qarzingizdan ayirildi', balans, mijoz: mijoz || '',
+  });
 }
 
-function buyumMatni({ tur, qatorlar, xodim, sana }) {
+async function buyumMatni({ tur, qatorlar, xodim, sana, mijoz = null }) {
   const qq = (qatorlar || []).slice(0, 40).map(q => `• ${q.nomi || 'Buyum'} — ${son(q.dona)} dona`);
-  return [
-    tur === 'mijozga' ? '📦 Sizga buyum berildi (vaqtinchalik foydalanishga)' : '📦 Sizdan buyum qaytarib olindi',
-    sanaMatn(sana), ...(xodim ? [`Xodim: ${xodim}`] : []), '', ...qq,
-  ].join('\n');
+  return render(tur === 'mijozga' ? 'buyum_berish' : 'buyum_qaytarish', { sana: sanaMatn(sana), xodim: xodim || '', buyumlar: qq.join('\n'), mijoz: mijoz || '' });
 }
 
-function vadaMatni({ yangiSana, balans, xodim, izoh }) {
-  return [`📅 Qarz to'lovi sanasi ${yangiSana} ga surildi`, ...(xodim ? [`Xodim: ${xodim}`] : []), ...(izoh ? [`Izoh: ${izoh}`] : []), '', qarzQatori(balans)].join('\n');
+async function vadaMatni({ yangiSana, balans, xodim, izoh, mijoz = null }) {
+  return render('vada', { yangi_sana: yangiSana, xodim: xodim || '', izoh: izoh || '', balans, mijoz: mijoz || '' });
 }
 
-function bekorMatni({ raqam, sabab, balans }) {
-  return [`❌ Xarid bekor qilindi: ${raqam || ''}`, ...(sabab ? [`Sabab: ${sabab}`] : []), '', qarzQatori(balans)].join('\n');
+async function bekorMatni({ raqam, sabab, balans, mijoz = null }) {
+  return render('bekor', { raqam: raqam || '', sabab: sabab || '', balans, mijoz: mijoz || '' });
 }
 
-function plastikMatni({ summa, tasdiq, sabab, balans }) {
-  return tasdiq
-    ? [`✅ Karta to'lovingiz tasdiqlandi: ${sum(summa)}`, '', qarzQatori(balans)].join('\n')
-    : [`⚠️ Karta to'lovingiz tasdiqlanmadi: ${sum(summa)}`, ...(sabab ? [`Sabab: ${sabab}`] : []), '', qarzQatori(balans)].join('\n');
+async function plastikMatni({ summa, tasdiq, sabab, balans, mijoz = null }) {
+  return render(tasdiq ? 'plastik_tasdiq' : 'plastik_rad', { summa: sum(summa), sabab: sabab || '', balans, mijoz: mijoz || '' });
 }
 
 /* ── Bot: yangilanishlarni olish (long polling) ─────────── */
@@ -353,5 +493,5 @@ async function botniIshgaTushir() {
 
 module.exports = {
   TURLAR, KALITLAR, botBor, sozlamalar, sozlamaYoz, tayyorla, yubor, xabar, xabarYumshoq, holatlar, mobilBlok,
-  nomlarniToldir, sotuvMatni, tolovMatni, vozvratMatni, buyumMatni, vadaMatni, bekorMatni, plastikMatni, botniIshgaTushir, yangilanish,
+  nomlarniToldir, shablonlar, shablonYoz, shablonNamuna, shablonQoll, SHABLONLAR, sotuvMatni, tolovMatni, vozvratMatni, buyumMatni, vadaMatni, bekorMatni, plastikMatni, botniIshgaTushir, yangilanish,
 };

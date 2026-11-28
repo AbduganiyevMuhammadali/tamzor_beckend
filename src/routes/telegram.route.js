@@ -3,7 +3,8 @@
    PATCH  /telegram/sozlama  { turlar: { sotuv: true, ... } }  — faqat Admin
    GET    /telegram/mijoz/:id                    — mijozning Telegram bog'lanishlari va oxirgi 50 xabar
    DELETE /telegram/mijoz/:id/:bogId             — bog'lanishni o'chirish (Admin)
-   GET    /telegram/xabarlar?mijoz_id&holat&page — jurnal (100 tadan) */
+   GET    /telegram/xabarlar?mijoz_id&holat&page — jurnal (100 tadan)
+   GET    /telegram/shablonlar · PATCH /telegram/shablonlar { kalit: matn|null } (Admin) · POST /telegram/shablonlar/namuna { kalit, matn } */
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth.middleware');
@@ -14,6 +15,11 @@ const { MijozTelegramModel, TelegramXabarModel } = require('../models/telegram.m
 
 router.get('/sozlama', auth(), h(async (req, res) => res.send(await TG.sozlamalar())));
 router.patch('/sozlama', auth('Admin'), h(async (req, res) => res.send(await TG.sozlamaYoz(req.body))));
+
+// 2026-11-28: xabar shablonlari — matnni admin o'zgartiradi ({ozgaruvchi} lar bilan), null — standartga qaytarish
+router.get('/shablonlar', auth(), h(async (req, res) => res.send(await TG.shablonlar())));
+router.patch('/shablonlar', auth('Admin'), h(async (req, res) => res.send(await TG.shablonYoz(req.body))));
+router.post('/shablonlar/namuna', auth(), h(async (req, res) => res.send(TG.shablonNamuna(req.body && req.body.kalit, req.body && req.body.matn))));
 
 router.get('/mijoz/:id', auth(), h(async (req, res) => {
   const id = Number(req.params.id) || 0;

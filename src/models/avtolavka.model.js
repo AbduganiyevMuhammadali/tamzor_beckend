@@ -33,7 +33,7 @@ class AvtolavkaHujjatModel extends Model {}
 AvtolavkaHujjatModel.init({
   id:               { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
   raqam:            { type: DataTypes.STRING(30), allowNull: true },
-  tur:              { type: DataTypes.ENUM('yuklash', 'qabul'), allowNull: false },
+  tur:              { type: DataTypes.ENUM('yuklash', 'qabul', 'brak_qabul'), allowNull: false },   // brak_qabul (2026-11-28): agent braki → kompaniya Brak ombori
   // 'mobil' — agent ilovadan so'ragan yuklash (omborchi tasdiqlaguncha qoralama)
   manba:            { type: DataTypes.ENUM('web', 'mobil'), allowNull: false, defaultValue: 'web' },
   agent_id:         { type: DataTypes.INTEGER, allowNull: false },

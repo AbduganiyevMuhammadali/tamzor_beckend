@@ -21,7 +21,7 @@ const AgentModel = require('../../models/agent.model');
 const TovarModel = require('../../models/tovar.model');
 const TovarRegisterModel = require('../../models/tovar_register.model');
 const HttpException = require('../../utils/HttpException.utils');
-const { ASOSIY_OMBOR, AGENT_PREFIKS, agentOmbori } = require('../../utils/ombor.utils');
+const { ASOSIY_OMBOR, AGENT_PREFIKS, agentOmbori, agentBrakOmbori } = require('../../utils/ombor.utils');
 const { mavjudQoldiq } = require('../../utils/zaxira.utils');
 const { SOTUV_RADIUS_M } = require('../../utils/geo.utils');
 const { davr } = require('../../utils/tahlil.utils');
@@ -268,6 +268,82 @@ class AvtolavkaController {
     res.send({ ok: true, sana, yangi_reys: r.yangiReys, kun: await kunHisobla(agent, sana) });
   };
 
+  /* 2026-11-28: AGENT BRAKINI KOMPANIYAGA QAYTARISH
+     GET  /avtolavka/brak?agent_id=  — agent berilsa: uning brak omboridagi tovarlar; berilmasa: brak bor agentlar ro'yxati
+     POST /avtolavka/brak-qabul { agent_id, qatorlar?:[{tovar_id, dona}], izoh? } — "Agent: <ism> (brak)" → "Brak ombori".
+       qatorlar berilmasa — hammasi. Hujjat tur 'brak_qabul' (agent kunini yopmaydi). Diller — Dillerlar → Qaytarish (brak). */
+  brakRuyxat = async (req, res) => {
+    if (req.query.agent_id) {
+      const agent = await avtolavkaAgent(req.query.agent_id);
+      const map = await omborQoldiq(agentBrakOmbori(agent.fullname));
+      const ids = Object.keys(map).filter(id => map[id].qoldiq > EPS).map(Number);
+      const narx = ids.length ? await narxMap(ids) : {};
+      return res.send({
+        agent: { id: agent.id, fullname: agent.fullname }, ombor: agentBrakOmbori(agent.fullname),
+        qatorlar: ids.map(id => ({ tovar_id: id, tovar_nomi: map[id].tovar_nomi, turkum: map[id].turkum || null, dona: +map[id].qoldiq.toFixed(3),
+          narx: n(narx[id] && narx[id].chakana_narx), summa: Math.round(map[id].qoldiq * n(narx[id] && narx[id].chakana_narx)) })),
+      });
+    }
+    const rows = await sequelize.query(`SELECT ombor, COUNT(DISTINCT tovar_id) xil, SUM(q) dona FROM (
+        SELECT ombor, tovar_id, SUM(donada) q FROM tovar_register WHERE ombor LIKE :p AND ombor LIKE '% (brak)' GROUP BY ombor, tovar_id HAVING SUM(donada) > 0.001) x
+      GROUP BY ombor`, { replacements: { p: `${AGENT_PREFIKS}%` }, type: sequelize.QueryTypes.SELECT });
+    const agentlar = await AgentModel.findAll({ where: { diller: false }, attributes: ['id', 'fullname'], raw: true });
+    const byOmbor = new Map(agentlar.map(a => [agentBrakOmbori(a.fullname), a]));
+    res.send(rows.map(r => ({ agent_id: byOmbor.get(r.ombor) ? byOmbor.get(r.ombor).id : null, agent_nomi: byOmbor.get(r.ombor) ? byOmbor.get(r.ombor).fullname : r.ombor,
+      ombor: r.ombor, xil: Number(r.xil), dona: +n(r.dona).toFixed(3) })).filter(r => r.agent_id));
+  };
+
+  brakQabul = async (req, res) => {
+    const b = req.body || {};
+    const agent = await avtolavkaAgent(b.agent_id);
+    const ombor = agentBrakOmbori(agent.fullname);
+    const izoh = b.izoh ? String(b.izoh).trim().slice(0, 1000) : null;
+    const hujjat = await sequelize.transaction(async (t) => {
+      await qulflabOl(AgentModel, agent.id, t);
+      const nomzod = await omborQoldiq(ombor, t);
+      await tovarlarniQulfla(Object.keys(nomzod), t);
+      const bor = await omborQoldiq(ombor, t, { qulfla: true });
+      let kerak;
+      if (Array.isArray(b.qatorlar) && b.qatorlar.length) {
+        kerak = new Map();
+        for (const q of b.qatorlar) {
+          const id = Number(q && q.tovar_id), dona = +n(q && q.dona).toFixed(3);
+          if (!Number.isInteger(id) || id <= 0 || !(dona > 0)) throw new HttpException(400, "Qator noto'g'ri (tovar_id, dona > 0)");
+          kerak.set(id, +((kerak.get(id) || 0) + dona).toFixed(3));
+        }
+        for (const [id, dona] of kerak) {
+          const q = n(bor[id] && bor[id].qoldiq);
+          if (dona > q + EPS) throw new HttpException(400, `"${(bor[id] && bor[id].tovar_nomi) || '#' + id}": agent brakida ${+q.toFixed(3)} bor — ${dona} qabul qilib bo'lmaydi`);
+        }
+      } else {
+        kerak = new Map(Object.keys(bor).filter(id => bor[id].qoldiq > EPS).map(id => [Number(id), +bor[id].qoldiq.toFixed(3)]));
+      }
+      if (!kerak.size) throw new HttpException(400, `${agent.fullname}da qaytariladigan brak tovar yo'q`);
+      const narx = await narxMap([...kerak.keys()]);
+      const vaqt = new Date();
+      const h = await AvtolavkaHujjatModel.create({
+        raqam: await raqamYarat('brak_qabul', t), tur: 'brak_qabul', agent_id: agent.id, agent_nomi: agent.fullname, ombor,
+        sana: bugun(), holat: 'tasdiqlangan', izoh, yaratgan_id: req.currentUser?.id || null,
+        tasdiqlagan_id: req.currentUser?.id || null, tasdiqlagan_sana: vaqt,
+      }, { transaction: t });
+      const qatorYoz = [], regYoz = [];
+      let jamiDona = 0, jamiSumma = 0;
+      for (const [id, dona] of kerak) {
+        const nx = narx[id] || { kirim_narx: 0, optom_narx: 0, chakana_narx: 0 };
+        const q = { tovar_id: id, tovar_nomi: bor[id].tovar_nomi, turkum: bor[id].turkum || null, blok: 0, narx: n(nx.chakana_narx) };
+        qatorYoz.push({ hujjat_id: h.id, ...q, kirim_narx: n(nx.kirim_narx), dona, brak_dona: dona, summa: Math.round(dona * n(nx.chakana_narx)) });
+        regYoz.push(regYozuv({ q, ombor, tur: 'chiqim', manba_tur: 'qabul', manba_id: h.id, dona, narx: nx, sana: vaqt }));
+        regYoz.push(regYozuv({ q, ombor: BRAK_OMBOR, tur: 'kirim', manba_tur: 'qabul', manba_id: h.id, dona, narx: nx, sana: vaqt }));
+        jamiDona += dona; jamiSumma += dona * n(nx.chakana_narx);
+      }
+      await AvtolavkaQatorModel.bulkCreate(qatorYoz, { transaction: t });
+      await TovarRegisterModel.bulkCreate(regYoz, { transaction: t });
+      await h.update({ jami_dona: +jamiDona.toFixed(3), brak_dona: +jamiDona.toFixed(3), jami_summa: Math.round(jamiSumma) }, { transaction: t });
+      return h;
+    });
+    res.status(201).send(await AvtolavkaHujjatModel.findByPk(hujjat.id, { include: INCLUDE }));
+  };
+
   // POST /avtolavka/qabul  { agent_id, sana, izoh, qatorlar:[{tovar_id, qabul_dona, brak_dona}] }
   // Skladchi sanab qabul qiladi: qabul → asosiy ombor, brak → brak ombori,
   // farq agent omborida qoladi (tushuntirilmagan qoldiq).
@@ -455,7 +531,7 @@ class AvtolavkaController {
     const q = (sql) => sequelize.query(sql, { replacements: { ids, from, to, tz: tzOffset() }, type: sequelize.QueryTypes.SELECT });
     const [hujjat, sotuv, naqd, inkas] = await Promise.all([
       q(`SELECT agent_id, DATE_FORMAT(sana, '%Y-%m-%d') sana, tur, SUM(jami_summa) summa, SUM(farq_dona) farq
-         FROM avtolavka_hujjat WHERE agent_id IN (:ids) AND holat = 'tasdiqlangan' AND sana BETWEEN :from AND :to
+         FROM avtolavka_hujjat WHERE agent_id IN (:ids) AND holat = 'tasdiqlangan' AND tur IN ('yuklash', 'qabul') AND sana BETWEEN :from AND :to
          GROUP BY agent_id, DATE_FORMAT(sana, '%Y-%m-%d'), tur`),
       // DATETIME ustunlar UTC — kunga mahalliy vaqtda ajratiladi (kunHisobla bilan bir xil)
       q(`SELECT agent_id, DATE_FORMAT(${lokalKun('yetkazilgan_sana')}, '%Y-%m-%d') sana, SUM(jami_summa) summa

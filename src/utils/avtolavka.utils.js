@@ -23,7 +23,7 @@ const { qulflabOl, tovarlarniQulfla, keyingiTartib, maksRaqam } = require('./qul
 const { tzOffset, kunKey } = require('./tahlil.utils');
 
 const BRAK_OMBOR = 'Brak ombori';   // mobile/delivery.controller.js bilan bir xil
-const PREFIKS = { yuklash: 'YK', qabul: 'QB' };
+const PREFIKS = { yuklash: 'YK', qabul: 'QB', brak_qabul: 'BQ' };
 const INCLUDE = [{ model: AvtolavkaQatorModel, as: 'qatorlar' }];
 const EPS = 0.001;
 
@@ -418,7 +418,7 @@ async function kunVoqealari(agent, sana) {
     replacements: { agent_id: agent.id, sana, ombor, tz: tzOffset() }, type: sequelize.QueryTypes.SELECT });
   const [hujjatlar, sotuvlar, tashriflar, tolovlar, inkas, sorovlar, kunYopish] = await Promise.all([
     q(`SELECT id, raqam, tur, jami_dona, jami_summa, farq_dona, brak_dona, tasdiqlagan_sana vaqt, agent_qabul_vaqt
-       FROM avtolavka_hujjat WHERE agent_id = :agent_id AND sana = :sana AND holat = 'tasdiqlangan'`),
+       FROM avtolavka_hujjat WHERE agent_id = :agent_id AND sana = :sana AND holat = 'tasdiqlangan' AND tur IN ('yuklash', 'qabul')`),
     q(`SELECT a.id, a.raqam, a.mijoz_nomi, a.jami_summa, a.tolov_turi, a.tolangan_summa, a.yetkazilgan_sana vaqt, a.masofa_m,
               (SELECT COALESCE(SUM(jami_dona),0) FROM ariza_qator WHERE ariza_id = a.id) dona
        FROM ariza a WHERE a.agent_id = :agent_id AND a.deletedAt IS NULL AND a.turi = 'sotish'
