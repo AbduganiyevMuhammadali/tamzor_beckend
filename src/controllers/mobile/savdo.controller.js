@@ -132,7 +132,8 @@ function jamiHisobla(qatorlar, chegirmaRaw, agent) {
 // tovar asosiy skladdan chiqadi (boshqa zakazlarga band qilingani tekshiriladi), hujjat darhol
 // "yetkazildi", naqd to'g'ridan-to'g'ri kassaga (manba_tur='sklad', user_id = web foydalanuvchi —
 // inkassatsiya uni agent puli deb sanamaydi), qarz mijoz balansiga. Agent bonusi yo'q.
-async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null, webUserId = null, keyin = null }) {
+// tx — tashqi tranzaksiya (savdoAlmashtirish), telegramsiz — xarid xabari chaqiruvchida (2026-11-28)
+async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null, webUserId = null, keyin = null, tx = null, telegramsiz = false }) {
   const sklad = !agent;
   // 2026-11-29: diller sotuvi bu yo'ldan o'tmaydi (Diller.mobilSotuv); diller mijoziga kompaniya sotuvi yo'q
   if (agent && agent.diller) throw new HttpException(400, `${agent.fullname} — diller: uning sotuvi faqat mobil ilovadan (kompaniya nomidan sotuv qilinmaydi)`);
@@ -375,7 +376,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
     if (keyin) await keyin(ariza, qatorlar, t);
 
     // 2026-11-28: TELEGRAM — mijozga xarid xabari (yoqilgan bo'lsa: botga ulanmagan/bloklagan → sotuv saqlanmaydi)
-    if (turi === 'sotish' && darhol) {
+    if (turi === 'sotish' && darhol && !telegramsiz) {
       const TG = require('../../utils/telegram.utils');
       await TG.xabar(mijoz.id, 'sotuv', async () => {
         const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
@@ -388,7 +389,7 @@ async function createAriza({ body, agent, turi, manba = 'mobil', webUser = null,
 
     return ariza;
   };
-  return sequelize.transaction(ish);
+  return tx ? ish(tx) : sequelize.transaction(ish);
 }
 
 /* saveSell mijoz ruxsati — shared.sotuvMijozRuxsat (buyumHarakat ham shu qoidadan foydalanadi) */
@@ -698,4 +699,6 @@ class MobileSavdoController {
 
 module.exports = new MobileSavdoController();
 module.exports.createAriza = createAriza;   // web: Won Sell → Sotuv qilish (xodim nomidan)
+module.exports.mapQator = mapQator;           // 2026-11-28: almashtirish — yangi tovarlar summasi
+module.exports.jamiHisobla = jamiHisobla;
 module.exports.dillerMijozTekshir = dillerMijozTekshir;

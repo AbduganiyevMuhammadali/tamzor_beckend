@@ -211,6 +211,12 @@ const SHABLONLAR = {
     standart: "↩️ Vozvrat: {raqam} chekidan\n{sana}\nQabul qildi: {xodim}\n\n{tovarlar}\nSumma: {summa} — {usul}\n\n{qarz_holati}",
     ozg: { raqam: 'Asl chek raqami', sana: 'Sana va vaqt', xodim: 'Xodim', tovarlar: 'Qaytgan tovarlar', summa: 'Qaytarish summasi', usul: '"sizga naqd qaytarildi" yoki "qarzingizdan ayirildi"' },
   },
+  almashtirish: {
+    nomi: 'Tovar almashtirish',
+    standart: "🔄 Tovar almashtirildi: {raqam} ({asl_raqam} chekidan)\n{sana}\nXodim: {xodim}\n\nQaytardingiz ({qaytgan_summa}):\n{qaytgan}\n\nO'rniga oldingiz ({yangi_summa}):\n{yangi}\n\n{farq_matni}\n\n{qarz_holati}",
+    ozg: { raqam: 'Almashtirish raqami', asl_raqam: 'Asl chek raqami', sana: 'Sana va vaqt', xodim: 'Agent', qaytgan: 'Qaytarilgan tovarlar', qaytgan_summa: 'Qaytgan summa',
+      yangi: 'Berilgan tovarlar', yangi_summa: 'Yangi tovarlar summasi', farq: 'Farq summasi (musbat)', farq_matni: 'Farq qanday hisoblangani (to\'landi / qarzga / qaytarildi / ayirildi)' },
+  },
   buyum_berish: {
     nomi: 'Buyum berildi',
     standart: "📦 Sizga buyum berildi (vaqtinchalik foydalanishga)\n{sana}\nXodim: {xodim}\n\n{buyumlar}",
@@ -289,6 +295,8 @@ const NAMUNA = {
     chegirma: '', jami: "165 000 so'm", tolov: "Naqd to'landi: 100 000 so'm\nQarzga: 65 000 so'm (to'lov sanasi 2026-12-05)", naqd: "100 000 so'm", karta: '', qarzga: "65 000 so'm", tolov_sana: '2026-12-05', balans: -265000 },
   tolov: { sana: '28.11.2026 15:10', xodim: 'Ali Valiyev', naqd: "50 000 so'm", karta: '', summa: "50 000 so'm", balans: -215000 },
   vozvrat: { raqam: 'AR-2026-0123', sana: '28.11.2026 15:20', xodim: 'Ali Valiyev', tovarlar: '• Sut 1L — 2\n• Qatiq — 1 (yaroqsiz)', summa: "33 000 so'm", usul: 'qarzingizdan ayirildi', balans: -182000 },
+  almashtirish: { raqam: 'ALM-2026-0007', asl_raqam: 'AR-2026-0123', sana: '28.11.2026 15:25', xodim: 'Ali Valiyev', qaytgan: '• Sut 1L — 2 (yaroqsiz)', qaytgan_summa: "24 000 so'm",
+    yangi: "• Qatiq — 3 × 9 000 so'm = 27 000 so'm", yangi_summa: "27 000 so'm", farq: "3 000 so'm", farq_matni: "Farq 3 000 so'm — naqd to'landi", balans: -182000 },
   buyum_berish: { sana: '28.11.2026 15:30', xodim: 'Ali Valiyev', buyumlar: '• Muzlatkich — 1 dona' },
   buyum_qaytarish: { sana: '28.11.2026 15:30', xodim: 'Ali Valiyev', buyumlar: '• Muzlatkich — 1 dona' },
   vada: { yangi_sana: '2026-12-05', xodim: 'Ali Valiyev', izoh: "Juma kuni to'laydi", balans: -182000 },
@@ -364,6 +372,19 @@ async function vozvratMatni({ raqam, qatorlar, summa, usul, balans, xodim, sana,
   return render('vozvrat', {
     raqam: raqam || '', sana: sanaMatn(sana), xodim: xodim || '', tovarlar: qq.join('\n'), summa: sum(summa),
     usul: usul === 'naqd' ? 'sizga naqd qaytarildi' : 'qarzingizdan ayirildi', balans, mijoz: mijoz || '',
+  });
+}
+
+async function almashtirishMatni({ raqam, aslRaqam, xodim, sana, balans, qaytgan, yangi, qaytganSumma, yangiSumma, farq, usul }) {
+  const d = n(farq);
+  const farqMatni = Math.abs(d) < 0.5 ? "Farq yo'q"
+    : d > 0 ? `Farq ${sum(d)} — ${usul === 'naqd' ? "naqd to'landi" : 'qarzingizga yozildi'}`
+      : `Farq ${sum(-d)} — ${usul === 'naqd' ? 'sizga naqd qaytarildi' : 'qarzingizdan ayirildi'}`;
+  return render('almashtirish', {
+    raqam, asl_raqam: aslRaqam || '', sana: sanaMatn(sana), xodim: xodim || '',
+    qaytgan: (qaytgan || []).map(q => `• ${q.tovar_nomi || 'Tovar'} — ${son(q.dona)}${q.yaroqli === false ? ' (yaroqsiz)' : ''}`).join('\n'),
+    yangi: (yangi || []).filter(q => n(q.jami_dona ?? q.dona) > 0).map(q => `• ${q.tovar_nomi || 'Tovar'} — ${son(q.jami_dona ?? q.dona)} × ${sum(q.narx)} = ${sum(q.summa)}`).join('\n'),
+    qaytgan_summa: sum(qaytganSumma), yangi_summa: sum(yangiSumma), farq: sum(Math.abs(d)), farq_matni: farqMatni, balans,
   });
 }
 
@@ -493,5 +514,5 @@ async function botniIshgaTushir() {
 
 module.exports = {
   TURLAR, KALITLAR, botBor, sozlamalar, sozlamaYoz, tayyorla, yubor, xabar, xabarYumshoq, holatlar, mobilBlok,
-  nomlarniToldir, shablonlar, shablonYoz, shablonNamuna, shablonQoll, SHABLONLAR, sotuvMatni, tolovMatni, vozvratMatni, buyumMatni, vadaMatni, bekorMatni, plastikMatni, botniIshgaTushir, yangilanish,
+  nomlarniToldir, almashtirishMatni, shablonlar, shablonYoz, shablonNamuna, shablonQoll, SHABLONLAR, sotuvMatni, tolovMatni, vozvratMatni, buyumMatni, vadaMatni, bekorMatni, plastikMatni, botniIshgaTushir, yangilanish,
 };

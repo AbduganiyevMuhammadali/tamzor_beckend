@@ -40,6 +40,7 @@ router.delete('/yuklash/:id',          auth(), h(c.yuklashDelete));
 
 router.post('/qabul',                  auth(), h(c.qabulCreate));
 router.get('/brak',                    auth(), h(c.brakRuyxat));     // 2026-11-28: agent braki
+router.get('/almashtirishlar',         auth(), h(c.almashtirishlar)); // 2026-11-28: tovar almashtirish jurnali
 router.post('/brak-qabul',             auth(), h(c.brakQabul));      // 2026-11-28: agent braki → kompaniya Brak ombori
 // Yopilgan kunni qayta ochish — bir kunda yangi reys
 router.post('/kun/qayta-och',          auth(), h(c.kunQaytaOch));

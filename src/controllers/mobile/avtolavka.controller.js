@@ -482,6 +482,139 @@ const qaytarishJavob = (q, takror = false) => ({
   ...(takror ? { takror: true } : {}),
 });
 
+/* Sotuvga bog'langan qaytarish yadrosi (tranzaksiya ichida) — savdoQaytarish va savdoAlmashtirish (2026-11-28).
+   borini(t) — takror tekshiruvi (bo'lsa { takror }); telegram=false — xabar chaqiruvchida. */
+async function qaytarishYoz({ agent, sorov, mobilId, vaqt, t, borini = null, telegram = true }) {
+    // QULF TARTIBI (mavjud hujjat): ariza → qatorlar → tovar → mijoz
+    const ariza = await qulflabOl(ArizaModel, sorov.savdoId, t);
+    if (!ariza) throw new HttpException(404, 'Sotuv topilmadi');
+    if (Number(ariza.agent_id) !== Number(agent.id)) throw new HttpException(403, 'Bu sotuv sizga tegishli emas');
+    if (ariza.turi !== (agent.diller ? 'diller_sotuv' : 'sotish') || ariza.holat !== 'yetkazildi') {
+      throw new HttpException(400, `Faqat yetkazilgan sotuvga qaytarish qilinadi (hujjat: ${ariza.turi}, ${ariza.holat})`);
+    }
+    // Parallel takror ariza qulfidan keyin ko'rinadi
+    if (borini) { const takror = await borini(t); if (takror) return { takror }; }
+
+    const qatorlar = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
+    await tovarlarniQulfla(sorov.qatorlar.map(q => q.tovarId), t);
+    const mijoz = ariza.mijoz_id ? await qulflabOl(MijozModel, ariza.mijoz_id, t) : null;
+
+    // Joriy (oldingi qaytarishlardan keyin qolgan) qiymatlar — xotirada kamaytirib boriladi
+    const holat = new Map(qatorlar.map(q => [q.id, { q, jami_dona: n(q.jami_dona), dona: n(q.dona), summa: n(q.summa) }]));
+    const bolaklar = [];   // { qator, dona, summa, narx, yaroqli, sabab, tovar_id, tovar_nomi, turkum }
+    for (const p of sorov.qatorlar) {
+      const mos = qatorlar.filter(q => Number(q.tovar_id) === p.tovarId);
+      if (!mos.length) throw new HttpException(400, `Tovar #${p.tovarId} bu sotuvda yo'q`);
+      const qoldi = r3(mos.reduce((s2, q) => s2 + holat.get(q.id).jami_dona, 0));
+      if (p.dona > qoldi + 0.0005) {
+        throw new HttpException(400, `"${mos[0].tovar_nomi || `#${p.tovarId}`}" — qaytarish miqdori sotuvda qolganidan ko'p. Mumkin: ${Math.max(0, qoldi)}, so'raldi: ${p.dona}`);
+      }
+      let kerak = p.dona;
+      for (const q of mos) {
+        if (kerak <= 0.0005) break;
+        const h = holat.get(q.id);
+        if (h.jami_dona <= 0.0005) continue;
+        const dona = r3(Math.min(kerak, h.jami_dona));
+        const narx = n(q.narx);
+        // Qatorning oxirgi donasi qaytsa — qolgan summa (yaxlitlash farqi qolmasin)
+        const summa = dona >= h.jami_dona - 0.0005 ? r2(h.summa) : r2(Math.min(h.summa, narx * dona));
+        h.jami_dona = r3(h.jami_dona - dona);
+        h.dona = Math.max(0, r3(h.dona - dona));
+        h.summa = Math.max(0, r2(h.summa - summa));
+        bolaklar.push({ qator: q, dona, summa, narx, yaroqli: p.yaroqli, sabab: p.sabab });
+        kerak = r3(kerak - dona);
+      }
+    }
+
+    const qaytSumma = r2(bolaklar.reduce((s2, b) => s2 + b.summa, 0));
+    const eskiJami = n(ariza.jami_summa);
+    const yangiJami = Math.max(0, r2(eskiJami - qaytSumma));
+    const kamaydi = r2(eskiJami - yangiJami);   // chegirma bo'lsa jami 0 dan pastga tushmaydi
+    const tolangan = n(ariza.tolangan_summa);
+
+    const arizaYangi = { jami_summa: yangiJami };
+    if (sorov.tolov === 'naqd') {
+      if (kamaydi > tolangan + 0.005) {
+        throw new HttpException(400, `Naqd qaytarish (${kamaydi}) shu sotuvda olingan naqddan (${tolangan}) ko'p — "qarzdan ayirish" ni tanlang`);
+      }
+      arizaYangi.tolangan_summa = Math.max(0, r2(tolangan - kamaydi));
+      // Naqd to'liq qaytdi, lekin summa qoldi — hujjat endi qarzga sotuv (hisobotlar naqd deb sanamasin)
+      const naqdTur = ariza.tolov_turi === 'naqt' || ariza.tolov_turi === 'naqd';
+      if (naqdTur && arizaYangi.tolangan_summa <= 0.005 && yangiJami > 0.005) arizaYangi.tolov_turi = 'qarz';
+    } else if (tolangan > yangiJami) {
+      arizaYangi.tolangan_summa = yangiJami;
+    }
+
+    const qaytarish = await SavdoQaytarishModel.create({
+      mobil_id: mobilId, ariza_id: ariza.id, ariza_raqam: ariza.raqam, agent_id: agent.id, agent_nomi: agent.fullname,
+      mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, tolov: sorov.tolov, summa: kamaydi,
+      yaroqli_summa: r2(bolaklar.filter(b => b.yaroqli).reduce((s2, b) => s2 + b.summa, 0)),
+      yaroqsiz_summa: r2(bolaklar.filter(b => !b.yaroqli).reduce((s2, b) => s2 + b.summa, 0)),
+      eski_jami: eskiJami, yangi_jami: yangiJami, izoh: sorov.izoh, sana: vaqt,
+    }, { transaction: t });
+
+    const ombor = sotuvOmbori(agent), brakOmbor = brakOmbori(agent);
+    await SavdoQaytarishQatorModel.bulkCreate(bolaklar.map(b => ({
+      qaytarish_id: qaytarish.id, ariza_qator_id: b.qator.id, tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi,
+      dona: b.dona, narx: b.narx, summa: b.summa, yaroqli: b.yaroqli, ombor: b.yaroqli ? ombor : brakOmbor, sabab: b.sabab,
+    })), { transaction: t });
+    await TovarRegisterModel.bulkCreate(bolaklar.map(b => ({
+      tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi || '', turkum: b.qator.turkum || null,
+      ombor: b.yaroqli ? ombor : brakOmbor, tur: 'qaytarma_kirim',
+      // manba — asl sotuv (hisobotlar 'qaytarma' ni ariza bilan bog'laydi); tafsilot savdo_qaytarish jadvalida
+      manba_tur: agent.diller ? 'diller_qaytarma' : 'qaytarma', manba_id: ariza.id,
+      donada: b.dona, bloklarda: 0, qutilarda: 0, hajm: 0, kirim_narx: 0, sotuv_narx: b.narx, summa: b.summa, sana: vaqt,
+    })), { transaction: t });
+
+    for (const h of holat.values()) {
+      if (Math.abs(h.jami_dona - n(h.q.jami_dona)) > 0.0001 || Math.abs(h.summa - n(h.q.summa)) > 0.001) {
+        await h.q.update({ jami_dona: h.jami_dona, dona: h.dona, summa: h.summa }, { transaction: t });
+      }
+    }
+    await ariza.update(arizaYangi, { transaction: t });
+
+    if (kamaydi > 0) {
+      if (sorov.tolov === 'qarz' && mijoz) {
+        await MijozModel.increment('balans', { by: kamaydi, where: { id: mijoz.id }, transaction: t });
+      }
+      if (sorov.tolov === 'naqd' && agent.diller) {
+        // 2026-11-29: diller mijozga o'z pulidan qaytardi — kompaniya kassasi/jurnaliga yozilmaydi
+        const { DillerPulModel } = require('../../models/diller.model');
+        await DillerPulModel.create({
+          diller_id: agent.id, tur: 'chiqim', kategoriya: 'qaytarish', usul: 'naqd', summa: kamaydi,
+          mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, ariza_id: ariza.id, qaytarish_id: qaytarish.id,
+          izoh: `${ariza.raqam || ariza.id} — qaytarish, naqd mijozga qaytarildi`.slice(0, 255), sana: vaqt,
+        }, { transaction: t });
+      } else if (sorov.tolov === 'naqd') {
+        const kassa = await KassaModel.create({
+          tur: 'chiqim', kategoriya: 'sotuv_qaytarish', summa: kamaydi, tolov_usul: 'naqt',
+          manba_tur: 'savdo_qaytarish', manba_id: qaytarish.id, mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi,
+          izoh: `${ariza.raqam || ariza.id} — qaytarish, naqd mijozga qaytarildi`.slice(0, 255),
+          sana: vaqt, user_id: agent.id, agent_id: agent.id,   // agent qo'lidagi naqd kamayadi (majburiyat)
+        }, { transaction: t });
+        await qaytarish.update({ kassa_id: kassa.id }, { transaction: t });
+      }
+      // Agent plan-fakti va bonusi haqiqiy (kamaygan) savdodan
+      const regs = await AgentRegisterModel.findAll({ where: { ariza_id: ariza.id, tur: 'savdo' }, transaction: t, lock: t.LOCK.UPDATE });
+      for (const r of regs) {
+        const yangiSumma = Math.max(0, r2(n(r.summa) - kamaydi));
+        await r.update({ summa: yangiSumma, bonus_summa: Math.round(yangiSumma * n(r.bonus_foiz) / 100) }, { transaction: t });
+      }
+    }
+    // 2026-11-28: TELEGRAM — vozvrat xabari (yoqilgan bo'lsa yetmasa vozvrat saqlanmaydi; almashtirishda — o'z xabari)
+    if (mijoz && telegram) {
+      const TG = require('../../utils/telegram.utils');
+      await TG.xabar(mijoz.id, 'vozvrat', async () => {
+        const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
+        return TG.vozvratMatni({
+          raqam: ariza.raqam, summa: kamaydi, usul: sorov.tolov, balans: mb ? mb.balans : 0, xodim: agent.fullname, sana: vaqt,
+          qatorlar: await TG.nomlarniToldir(bolaklar.map(b => ({ tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi, dona: b.dona, yaroqli: b.yaroqli })), t),
+        });
+      }, { t, mijozNomi: mijoz.nomi, kim: `${agent.diller ? 'Diller' : 'Agent'}: ${agent.fullname}` });
+    }
+    return { qaytarish, kamaydi, bolaklar, ariza, mijoz };
+}
+
 class MobileAvtolavkaController {
   // GET avtolavkaHolat/?sana= — "Mening kunim": bosqich, mashina, bugungi ko'rsatkichlar
   avtolavkaHolat = async (req, res) => {
@@ -885,137 +1018,7 @@ class MobileAvtolavkaController {
 
     let natija;
     try {
-      natija = await sequelize.transaction(async (t) => {
-        // QULF TARTIBI (mavjud hujjat): ariza → qatorlar → tovar → mijoz
-        const ariza = await qulflabOl(ArizaModel, sorov.savdoId, t);
-        if (!ariza) throw new HttpException(404, 'Sotuv topilmadi');
-        if (Number(ariza.agent_id) !== Number(agent.id)) throw new HttpException(403, 'Bu sotuv sizga tegishli emas');
-        if (ariza.turi !== (agent.diller ? 'diller_sotuv' : 'sotish') || ariza.holat !== 'yetkazildi') {
-          throw new HttpException(400, `Faqat yetkazilgan sotuvga qaytarish qilinadi (hujjat: ${ariza.turi}, ${ariza.holat})`);
-        }
-        // Parallel takror ariza qulfidan keyin ko'rinadi
-        const takror = await borini(t);
-        if (takror) return { takror };
-
-        const qatorlar = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
-        await tovarlarniQulfla(sorov.qatorlar.map(q => q.tovarId), t);
-        const mijoz = ariza.mijoz_id ? await qulflabOl(MijozModel, ariza.mijoz_id, t) : null;
-
-        // Joriy (oldingi qaytarishlardan keyin qolgan) qiymatlar — xotirada kamaytirib boriladi
-        const holat = new Map(qatorlar.map(q => [q.id, { q, jami_dona: n(q.jami_dona), dona: n(q.dona), summa: n(q.summa) }]));
-        const bolaklar = [];   // { qator, dona, summa, narx, yaroqli, sabab, tovar_id, tovar_nomi, turkum }
-        for (const p of sorov.qatorlar) {
-          const mos = qatorlar.filter(q => Number(q.tovar_id) === p.tovarId);
-          if (!mos.length) throw new HttpException(400, `Tovar #${p.tovarId} bu sotuvda yo'q`);
-          const qoldi = r3(mos.reduce((s2, q) => s2 + holat.get(q.id).jami_dona, 0));
-          if (p.dona > qoldi + 0.0005) {
-            throw new HttpException(400, `"${mos[0].tovar_nomi || `#${p.tovarId}`}" — qaytarish miqdori sotuvda qolganidan ko'p. Mumkin: ${Math.max(0, qoldi)}, so'raldi: ${p.dona}`);
-          }
-          let kerak = p.dona;
-          for (const q of mos) {
-            if (kerak <= 0.0005) break;
-            const h = holat.get(q.id);
-            if (h.jami_dona <= 0.0005) continue;
-            const dona = r3(Math.min(kerak, h.jami_dona));
-            const narx = n(q.narx);
-            // Qatorning oxirgi donasi qaytsa — qolgan summa (yaxlitlash farqi qolmasin)
-            const summa = dona >= h.jami_dona - 0.0005 ? r2(h.summa) : r2(Math.min(h.summa, narx * dona));
-            h.jami_dona = r3(h.jami_dona - dona);
-            h.dona = Math.max(0, r3(h.dona - dona));
-            h.summa = Math.max(0, r2(h.summa - summa));
-            bolaklar.push({ qator: q, dona, summa, narx, yaroqli: p.yaroqli, sabab: p.sabab });
-            kerak = r3(kerak - dona);
-          }
-        }
-
-        const qaytSumma = r2(bolaklar.reduce((s2, b) => s2 + b.summa, 0));
-        const eskiJami = n(ariza.jami_summa);
-        const yangiJami = Math.max(0, r2(eskiJami - qaytSumma));
-        const kamaydi = r2(eskiJami - yangiJami);   // chegirma bo'lsa jami 0 dan pastga tushmaydi
-        const tolangan = n(ariza.tolangan_summa);
-
-        const arizaYangi = { jami_summa: yangiJami };
-        if (sorov.tolov === 'naqd') {
-          if (kamaydi > tolangan + 0.005) {
-            throw new HttpException(400, `Naqd qaytarish (${kamaydi}) shu sotuvda olingan naqddan (${tolangan}) ko'p — "qarzdan ayirish" ni tanlang`);
-          }
-          arizaYangi.tolangan_summa = Math.max(0, r2(tolangan - kamaydi));
-          // Naqd to'liq qaytdi, lekin summa qoldi — hujjat endi qarzga sotuv (hisobotlar naqd deb sanamasin)
-          const naqdTur = ariza.tolov_turi === 'naqt' || ariza.tolov_turi === 'naqd';
-          if (naqdTur && arizaYangi.tolangan_summa <= 0.005 && yangiJami > 0.005) arizaYangi.tolov_turi = 'qarz';
-        } else if (tolangan > yangiJami) {
-          arizaYangi.tolangan_summa = yangiJami;
-        }
-
-        const qaytarish = await SavdoQaytarishModel.create({
-          mobil_id: mobilId, ariza_id: ariza.id, ariza_raqam: ariza.raqam, agent_id: agent.id, agent_nomi: agent.fullname,
-          mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, tolov: sorov.tolov, summa: kamaydi,
-          yaroqli_summa: r2(bolaklar.filter(b => b.yaroqli).reduce((s2, b) => s2 + b.summa, 0)),
-          yaroqsiz_summa: r2(bolaklar.filter(b => !b.yaroqli).reduce((s2, b) => s2 + b.summa, 0)),
-          eski_jami: eskiJami, yangi_jami: yangiJami, izoh: sorov.izoh, sana: vaqt,
-        }, { transaction: t });
-
-        const ombor = sotuvOmbori(agent), brakOmbor = brakOmbori(agent);
-        await SavdoQaytarishQatorModel.bulkCreate(bolaklar.map(b => ({
-          qaytarish_id: qaytarish.id, ariza_qator_id: b.qator.id, tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi,
-          dona: b.dona, narx: b.narx, summa: b.summa, yaroqli: b.yaroqli, ombor: b.yaroqli ? ombor : brakOmbor, sabab: b.sabab,
-        })), { transaction: t });
-        await TovarRegisterModel.bulkCreate(bolaklar.map(b => ({
-          tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi || '', turkum: b.qator.turkum || null,
-          ombor: b.yaroqli ? ombor : brakOmbor, tur: 'qaytarma_kirim',
-          // manba — asl sotuv (hisobotlar 'qaytarma' ni ariza bilan bog'laydi); tafsilot savdo_qaytarish jadvalida
-          manba_tur: agent.diller ? 'diller_qaytarma' : 'qaytarma', manba_id: ariza.id,
-          donada: b.dona, bloklarda: 0, qutilarda: 0, hajm: 0, kirim_narx: 0, sotuv_narx: b.narx, summa: b.summa, sana: vaqt,
-        })), { transaction: t });
-
-        for (const h of holat.values()) {
-          if (Math.abs(h.jami_dona - n(h.q.jami_dona)) > 0.0001 || Math.abs(h.summa - n(h.q.summa)) > 0.001) {
-            await h.q.update({ jami_dona: h.jami_dona, dona: h.dona, summa: h.summa }, { transaction: t });
-          }
-        }
-        await ariza.update(arizaYangi, { transaction: t });
-
-        if (kamaydi > 0) {
-          if (sorov.tolov === 'qarz' && mijoz) {
-            await MijozModel.increment('balans', { by: kamaydi, where: { id: mijoz.id }, transaction: t });
-          }
-          if (sorov.tolov === 'naqd' && agent.diller) {
-            // 2026-11-29: diller mijozga o'z pulidan qaytardi — kompaniya kassasi/jurnaliga yozilmaydi
-            const { DillerPulModel } = require('../../models/diller.model');
-            await DillerPulModel.create({
-              diller_id: agent.id, tur: 'chiqim', kategoriya: 'qaytarish', usul: 'naqd', summa: kamaydi,
-              mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi, ariza_id: ariza.id, qaytarish_id: qaytarish.id,
-              izoh: `${ariza.raqam || ariza.id} — qaytarish, naqd mijozga qaytarildi`.slice(0, 255), sana: vaqt,
-            }, { transaction: t });
-          } else if (sorov.tolov === 'naqd') {
-            const kassa = await KassaModel.create({
-              tur: 'chiqim', kategoriya: 'sotuv_qaytarish', summa: kamaydi, tolov_usul: 'naqt',
-              manba_tur: 'savdo_qaytarish', manba_id: qaytarish.id, mijoz_id: ariza.mijoz_id, mijoz_nomi: ariza.mijoz_nomi,
-              izoh: `${ariza.raqam || ariza.id} — qaytarish, naqd mijozga qaytarildi`.slice(0, 255),
-              sana: vaqt, user_id: agent.id, agent_id: agent.id,   // agent qo'lidagi naqd kamayadi (majburiyat)
-            }, { transaction: t });
-            await qaytarish.update({ kassa_id: kassa.id }, { transaction: t });
-          }
-          // Agent plan-fakti va bonusi haqiqiy (kamaygan) savdodan
-          const regs = await AgentRegisterModel.findAll({ where: { ariza_id: ariza.id, tur: 'savdo' }, transaction: t, lock: t.LOCK.UPDATE });
-          for (const r of regs) {
-            const yangiSumma = Math.max(0, r2(n(r.summa) - kamaydi));
-            await r.update({ summa: yangiSumma, bonus_summa: Math.round(yangiSumma * n(r.bonus_foiz) / 100) }, { transaction: t });
-          }
-        }
-        // 2026-11-28: TELEGRAM — vozvrat xabari (yoqilgan bo'lsa yetmasa vozvrat saqlanmaydi)
-        if (mijoz) {
-          const TG = require('../../utils/telegram.utils');
-          await TG.xabar(mijoz.id, 'vozvrat', async () => {
-            const mb = await MijozModel.findByPk(mijoz.id, { attributes: ['balans'], transaction: t });
-            return TG.vozvratMatni({
-              raqam: ariza.raqam, summa: kamaydi, usul: sorov.tolov, balans: mb ? mb.balans : 0, xodim: agent.fullname, sana: vaqt,
-              qatorlar: await TG.nomlarniToldir(bolaklar.map(b => ({ tovar_id: b.qator.tovar_id, tovar_nomi: b.qator.tovar_nomi, dona: b.dona, yaroqli: b.yaroqli })), t),
-            });
-          }, { t, mijozNomi: mijoz.nomi, kim: `${agent.diller ? 'Diller' : 'Agent'}: ${agent.fullname}` });
-        }
-        return { qaytarish };
-      });
+      natija = await sequelize.transaction((t) => qaytarishYoz({ agent, sorov, mobilId, vaqt, t, borini }));
     } catch (e) {
       if (takrorXato(e)) {
         const b = await borini();
@@ -1025,6 +1028,105 @@ class MobileAvtolavkaController {
     }
     if (natija.takror) return takrorTekshir(natija.takror);
     ok(res, qaytarishJavob(natija.qaytarish), 'Qaytarish saqlandi');
+  };
+
+  /* 2026-11-28: POST savdoAlmashtirish/ — TOVAR ALMASHTIRISH: mijoz sotuvdagi tovarni qaytaradi, o'rniga boshqa tovar oladi.
+     { mobilId, vaqt, savdoId, qaytQatorlar:[{ tovarId, dona, yaroqli, sabab }], yangiQatorlar:[{ tovarId, kolbo, yangiNarx }],
+       farqUsul: 'naqd' | 'balans', izoh }
+     Bitta tranzaksiya: qaytarish (yaroqli → agent ombori, yaroqsiz → brak; qiymati mijoz balansiga) + yangi sotuv
+     (agent omboridan, bugungi narx) + farq: farq = yangi − qaytgan.
+       farq > 0, naqd   — mijoz farqni naqd to'ladi (agent zimmasiga);   farq > 0, balans — farq qarzga yoziladi
+       farq < 0, naqd   — agent farqni o'z qo'lidagi naqddan qaytardi;   farq < 0, balans — farq qarzdan ayiriladi
+     Faqat agent (diller emas). Yuk dalolatnomasi bloki va Telegram ('almashtirish' turi) — sotuvdagidek. */
+  savdoAlmashtirish = async (req, res) => {
+    const agent = dillerEmas(req, res); if (!agent) return;
+    const b = req.body || {};
+    const S = require('./savdo.controller');
+    const SavdoAlmashtirishModel = require('../../models/almashtirish.model');
+    const farqUsul = String(b.farqUsul || '');
+    if (!['naqd', 'balans'].includes(farqUsul)) throw new HttpException(400, "farqUsul faqat 'naqd' yoki 'balans' bo'lishi mumkin");
+    const izohX = b.izoh === undefined || b.izoh === null ? '' : String(b.izoh).trim().slice(0, 400);
+    const sorov = qaytarishSorovi({ savdoId: b.savdoId, tolov: 'qarz', qatorlar: b.qaytQatorlar, izoh: `Almashtirish${izohX ? ': ' + izohX : ''}` });
+    const yangi = Array.isArray(b.yangiQatorlar) ? b.yangiQatorlar : [];
+    if (!yangi.length) throw new HttpException(400, "O'rniga beriladigan kamida bitta tovar kerak");
+    const yangiSumma = S.jamiHisobla(yangi.map(S.mapQator), 0, agent).jami;
+    const mobilId = mobilKalit(b.mobilId);
+    const vaqt = mobilVaqt(b.vaqt);
+    const javob = (x, takror = false) => ({
+      almashtirishId: String(x.id), raqam: x.raqam, savdoId: String(x.ariza_id), docNumber: x.ariza_raqam, qaytarishId: String(x.qaytarish_id),
+      qaytganSumma: n(x.qaytgan_summa), yangiSumma: n(x.yangi_summa), farq: n(x.farq), farqUsul: x.farq_usul, ...(takror ? { takror: true } : {}),
+    });
+    const borini = (t) => (mobilId ? SavdoAlmashtirishModel.findOne({ where: { mobil_id: mobilId }, ...(t ? { transaction: t } : {}) }) : null);
+    const takrorJavob = (x) => {
+      if (Number(x.agent_id) !== Number(agent.id)) throw new HttpException(409, 'Bu mobilId boshqa amalga tegishli');
+      return ok(res, javob(x, true), 'Almashtirish allaqachon saqlangan');
+    };
+    const oldin = await borini();
+    if (oldin) return takrorJavob(oldin);
+
+    let natija;
+    try {
+      natija = await sequelize.transaction(async (t) => {
+        await require('../../utils/yukImzo.utils').sotuvBlokTekshir(agent, t);
+        // 1) Qaytarish (qiymati mijoz balansiga) — sotuv qulfi, tovar, mijoz
+        const q = await qaytarishYoz({ agent, sorov, mobilId: null, vaqt, t, telegram: false });
+        if (!q.mijoz) throw new HttpException(400, "Mijozsiz sotuvda almashtirish yo'q");
+        const qaytgan = q.kamaydi;
+        const farq = r2(yangiSumma - qaytgan);
+        const tolangan = farq > 0.005 && farqUsul === 'naqd' ? farq : 0;
+        // 2) Yangi sotuv — shu tranzaksiyada (qaytgan yaroqli tovar ham qayta berilishi mumkin)
+        const ariza = await S.createAriza({
+          body: {
+            klientId: q.mijoz.id, products: yangi, currency: tolangan > 0 ? 'naqt' : 'qarz', tolanganSumma: tolangan,
+            vaqt: b.vaqt, komment: `Almashtirish: ${q.ariza.raqam || q.ariza.id} chekidan`,
+          },
+          agent, turi: 'sotish', tx: t, telegramsiz: true,
+        });
+        // 3) Farq mijozga naqd qaytarildi — agent qo'lidagi puldan; balans qaytarishdagi oshishni qoplaydi
+        let kassaId = null;
+        if (farq < -0.005 && farqUsul === 'naqd') {
+          const m = await majburiyat(agent.id, t);
+          if (n(m.qolda) + 0.5 < -farq) {
+            throw new HttpException(400, `Qo'lingizdagi naqd (${Math.round(n(m.qolda))}) farqni (${Math.round(-farq)}) qaytarishga yetmaydi — "Balansga" ni tanlang`);
+          }
+          const k = await KassaModel.create({
+            tur: 'chiqim', kategoriya: 'sotuv_qaytarish', summa: -farq, tolov_usul: 'naqt',
+            manba_tur: 'savdo_almashtirish', manba_id: q.qaytarish.id, mijoz_id: q.mijoz.id, mijoz_nomi: q.mijoz.nomi,
+            izoh: `${q.ariza.raqam || q.ariza.id} — almashtirish farqi mijozga naqd qaytarildi`.slice(0, 255),
+            sana: vaqt, user_id: agent.id, agent_id: agent.id,
+          }, { transaction: t });
+          await MijozModel.decrement('balans', { by: -farq, where: { id: q.mijoz.id }, transaction: t });
+          kassaId = k.id;
+        }
+        const yil = new Date().getFullYear();
+        const { keyingiTartib, maksRaqam } = require('../../utils/qulf.utils');
+        const tartib = await keyingiTartib(`ALM-${yil}`, () => maksRaqam('savdo_almashtirish', `ALM-${yil}`, t), t);
+        const alm = await SavdoAlmashtirishModel.create({
+          raqam: `ALM-${yil}-${String(tartib).padStart(4, '0')}`, mobil_id: mobilId, agent_id: agent.id, agent_nomi: agent.fullname,
+          mijoz_id: q.mijoz.id, mijoz_nomi: q.mijoz.nomi, asl_ariza_id: q.ariza.id, asl_raqam: q.ariza.raqam,
+          qaytarish_id: q.qaytarish.id, ariza_id: ariza.id, ariza_raqam: ariza.raqam,
+          qaytgan_summa: qaytgan, yangi_summa: n(ariza.jami_summa), farq: r2(n(ariza.jami_summa) - qaytgan), farq_usul: farqUsul,
+          kassa_id: kassaId, izoh: izohX || null, sana: vaqt,
+        }, { transaction: t });
+        await q.qaytarish.update({ izoh: `${alm.raqam}${izohX ? ' · ' + izohX : ''}`.slice(0, 500) }, { transaction: t });
+        // 4) Telegram — bitta xabar (yoqilgan bo'lsa yetmasa almashtirish saqlanmaydi)
+        const TG = require('../../utils/telegram.utils');
+        await TG.xabar(q.mijoz.id, 'almashtirish', async () => {
+          const mb = await MijozModel.findByPk(q.mijoz.id, { attributes: ['balans'], transaction: t });
+          const yq = await ArizaQatorModel.findAll({ where: { ariza_id: ariza.id }, raw: true, transaction: t });
+          return TG.almashtirishMatni({
+            raqam: alm.raqam, aslRaqam: q.ariza.raqam, xodim: agent.fullname, sana: vaqt, balans: mb ? mb.balans : 0,
+            qaytgan: await TG.nomlarniToldir(q.bolaklar.map(x => ({ tovar_id: x.qator.tovar_id, tovar_nomi: x.qator.tovar_nomi, dona: x.dona, yaroqli: x.yaroqli })), t),
+            yangi: await TG.nomlarniToldir(yq, t), qaytganSumma: qaytgan, yangiSumma: n(ariza.jami_summa), farq: n(alm.farq), usul: farqUsul,
+          });
+        }, { t, mijozNomi: q.mijoz.nomi, kim: `Agent: ${agent.fullname}` });
+        return { alm };
+      });
+    } catch (e) {
+      if (takrorXato(e)) { const x = await borini(); if (x) return takrorJavob(x); }
+      throw e;
+    }
+    ok(res, javob(natija.alm), 'Almashtirish saqlandi');
   };
 
   // POST pulTopshirish/ { mobilId, summa, izoh, vaqt, usul?, kassaId?, chekRasm? } — agent qo'lidagi naqdni topshiradi.

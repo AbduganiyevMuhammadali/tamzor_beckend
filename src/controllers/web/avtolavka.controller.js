@@ -272,6 +272,35 @@ class AvtolavkaController {
      GET  /avtolavka/brak?agent_id=  — agent berilsa: uning brak omboridagi tovarlar; berilmasa: brak bor agentlar ro'yxati
      POST /avtolavka/brak-qabul { agent_id, qatorlar?:[{tovar_id, dona}], izoh? } — "Agent: <ism> (brak)" → "Brak ombori".
        qatorlar berilmasa — hammasi. Hujjat tur 'brak_qabul' (agent kunini yopmaydi). Diller — Dillerlar → Qaytarish (brak). */
+  /* 2026-11-28: GET /avtolavka/almashtirishlar?dan&gacha&agent_id&mijoz_id&page — tovar almashtirishlar jurnali
+     (har biri: qaytarish + yangi sotuv + farq). Qatorlar: qaytgan va berilgan tovarlar. */
+  almashtirishlar = async (req, res) => {
+    const D = davr(req.query, 30);
+    const R = { from: D.from, to: D.to, lim: 100, off: (Math.max(1, parseInt(req.query.page, 10) || 1) - 1) * 100 };
+    const w = ['a.sana BETWEEN :from AND :to'];
+    if (req.query.agent_id) { w.push('a.agent_id = :ag'); R.ag = parseInt(req.query.agent_id, 10) || 0; }
+    if (req.query.mijoz_id) { w.push('a.mijoz_id = :mj'); R.mj = parseInt(req.query.mijoz_id, 10) || 0; }
+    const Q = (sql) => sequelize.query(sql, { replacements: R, type: sequelize.QueryTypes.SELECT });
+    const [rows, [jami]] = await Promise.all([
+      Q(`SELECT a.* FROM savdo_almashtirish a WHERE ${w.join(' AND ')} ORDER BY a.sana DESC, a.id DESC LIMIT :lim OFFSET :off`),
+      Q(`SELECT COUNT(*) soni, COALESCE(SUM(qaytgan_summa),0) qaytgan, COALESCE(SUM(yangi_summa),0) yangi, COALESCE(SUM(farq),0) farq FROM savdo_almashtirish a WHERE ${w.join(' AND ')}`),
+    ]);
+    const qIds = rows.map(r => r.qaytarish_id), aIds = rows.map(r => r.ariza_id);
+    const [qq, aq] = await Promise.all([
+      qIds.length ? sequelize.query('SELECT qaytarish_id, tovar_id, tovar_nomi, dona, narx, summa, yaroqli FROM savdo_qaytarish_qator WHERE qaytarish_id IN (:ids)', { replacements: { ids: qIds }, type: sequelize.QueryTypes.SELECT }) : [],
+      aIds.length ? sequelize.query('SELECT ariza_id, tovar_id, tovar_nomi, jami_dona dona, narx, summa FROM ariza_qator WHERE ariza_id IN (:ids)', { replacements: { ids: aIds }, type: sequelize.QueryTypes.SELECT }) : [],
+    ]);
+    res.send({
+      dan: D.dan, gacha: D.gacha,
+      jami: { soni: Number(jami.soni), qaytgan: n(jami.qaytgan), yangi: n(jami.yangi), farq: n(jami.farq) },
+      rows: rows.map(r => ({
+        ...r, qaytgan_summa: n(r.qaytgan_summa), yangi_summa: n(r.yangi_summa), farq: n(r.farq),
+        qaytgan: qq.filter(x => x.qaytarish_id === r.qaytarish_id).map(x => ({ ...x, dona: n(x.dona), narx: n(x.narx), summa: n(x.summa), yaroqli: !!x.yaroqli })),
+        berilgan: aq.filter(x => x.ariza_id === r.ariza_id).map(x => ({ ...x, dona: n(x.dona), narx: n(x.narx), summa: n(x.summa) })),
+      })),
+    });
+  };
+
   brakRuyxat = async (req, res) => {
     if (req.query.agent_id) {
       const agent = await avtolavkaAgent(req.query.agent_id);
