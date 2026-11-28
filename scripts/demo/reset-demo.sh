@@ -15,7 +15,8 @@ mysql -e "DROP DATABASE IF EXISTS \`$DB\`; CREATE DATABASE \`$DB\` CHARACTER SET
 # Alohida JWT kaliti: demo tokeni ishchi serverda (bir xil agent_id) hech qachon o'tmasin
 grep -q '^DEMO_JWT=' $SIRLAR || echo "DEMO_JWT=$(openssl rand -hex 32)" >> $SIRLAR
 SECRET_JWT=$(grep '^DEMO_JWT=' $SIRLAR | cut -d= -f2-)
-export PORT=$PORT DB_DATABASE=$DB DEMO_LOGIN= DEMO_SERVER= GPS_BOSH=00:00 GPS_OXIR=23:59 SECRET_JWT
+# 2026-11-28: Telegram bot faqat prod'da (bitta token ikki jarayonda getUpdates qilsa to'qnashadi) — demo'da bo'sh
+export PORT=$PORT DB_DATABASE=$DB DEMO_LOGIN= DEMO_SERVER= GPS_BOSH=00:00 GPS_OXIR=23:59 SECRET_JWT TELEGRAM_BOT_TOKEN=
 pm2 restart tamzor-demo --update-env >/dev/null 2>&1 || pm2 start src/server.js --name tamzor-demo --update-env
 for i in $(seq 1 60); do curl -sf "http://127.0.0.1:$PORT/api/v1/rejim" >/dev/null && break; sleep 2; done
 DB_DATABASE=$DB DEMO_API="http://127.0.0.1:$PORT/api/v1" DEMO_SIRLAR=$SIRLAR node scripts/demo/seed-demo.js
